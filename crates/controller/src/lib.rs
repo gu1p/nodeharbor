@@ -23,6 +23,8 @@ mod reconcile;
 pub use reconcile::{HealthBackend, Reconciler};
 mod probe;
 pub use probe::probe_router;
+mod runtime;
+pub use runtime::{configure_runtime, ConfiguredController};
 mod network;
 pub use network::ProbeConfig;
 mod provision;
@@ -86,7 +88,8 @@ impl State {
             CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, device_id TEXT, action TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS health_samples (device_id TEXT NOT NULL, at TEXT NOT NULL, ready INTEGER NOT NULL, rtt_ms REAL, PRIMARY KEY(device_id, at));
             CREATE TABLE IF NOT EXISTS device_policy (device_id TEXT PRIMARY KEY, allow_ci INTEGER NOT NULL DEFAULT 0, allow_services INTEGER NOT NULL DEFAULT 0, permitted INTEGER NOT NULL DEFAULT 0);
-            CREATE TABLE IF NOT EXISTS device_health (device_id TEXT PRIMARY KEY, reason TEXT NOT NULL, observed_at TEXT NOT NULL);")
+            CREATE TABLE IF NOT EXISTS device_health (device_id TEXT PRIMARY KEY, reason TEXT NOT NULL, observed_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS pending_revocations (device_id TEXT PRIMARY KEY);")
             .execute(&db).await?;
         Ok(Self {
             db,
@@ -99,6 +102,35 @@ impl State {
     pub fn with_cluster(mut self, cluster: Arc<dyn Cluster>) -> Self {
         self.cluster = Some(cluster);
         self
+    }
+    pub async fn retry_revocations(&self) -> anyhow::Result<()> {
+        let _operation = self.operations.lock().await;
+        let Some(cluster) = &self.cluster else {
+            return Ok(());
+        };
+        let rows = sqlx::query("SELECT d.id,d.architecture FROM devices d JOIN pending_revocations p ON p.device_id=d.id WHERE d.revoked=1").fetch_all(&self.db).await?;
+        let mut errors = Vec::new();
+        for row in rows {
+            let device = DeviceIdentity {
+                id: row.get("id"),
+                architecture: row.get("architecture"),
+            };
+            match cluster.revoke(&device).await {
+                Ok(()) => {
+                    sqlx::query("DELETE FROM pending_revocations WHERE device_id=?")
+                        .bind(&device.id)
+                        .execute(&self.db)
+                        .await?;
+                }
+                Err(error) => errors.push(format!("{}: {error}", device.id)),
+            }
+        }
+        anyhow::ensure!(
+            errors.is_empty(),
+            "Device cleanup is pending: {}",
+            errors.join("; ")
+        );
+        Ok(())
     }
     pub fn with_proxy_auth(
         mut self,
@@ -403,19 +435,31 @@ async fn revoke(
     admin(&state, &headers)?;
     let _operation = state.operations.lock().await;
     let identity = identity(&state, &id).await?;
+    let mut transaction = state.db.begin().await.map_err(ApiError::internal)?;
     let updated = sqlx::query(
         "UPDATE devices SET revoked=1,remote_paused=1,eligible_ci=0,eligible_services=0 WHERE id=?",
     )
     .bind(&id)
-    .execute(&state.db)
+    .execute(&mut *transaction)
     .await
     .map_err(ApiError::internal)?;
     if updated.rows_affected() == 0 {
         return Err(ApiError(StatusCode::NOT_FOUND, "Device not found".into()));
     }
+    sqlx::query("INSERT OR IGNORE INTO pending_revocations(device_id) VALUES(?)")
+        .bind(&id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(ApiError::internal)?;
+    transaction.commit().await.map_err(ApiError::internal)?;
     audit(&state, Some(&id), "revoked").await?;
     if let Some(cluster) = &state.cluster {
         cluster.revoke(&identity).await.map_err(cluster_error)?;
+        sqlx::query("DELETE FROM pending_revocations WHERE device_id=?")
+            .bind(&id)
+            .execute(&state.db)
+            .await
+            .map_err(ApiError::internal)?;
     }
     Ok(Json(json!({"revoked":true})))
 }

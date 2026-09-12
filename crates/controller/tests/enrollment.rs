@@ -294,3 +294,66 @@ async fn heartbeat_persists_owner_opt_ins_and_omitted_preferences_fail_closed() 
         );
     }
 }
+
+#[derive(Default)]
+struct CleanupRetry(std::sync::atomic::AtomicUsize);
+#[async_trait::async_trait]
+impl nodeharbor_controller::Cluster for CleanupRetry {
+    async fn bootstrap(&self, _: &nodeharbor_controller::DeviceIdentity) -> anyhow::Result<Value> {
+        unreachable!()
+    }
+    async fn drain(&self, _: &nodeharbor_controller::DeviceIdentity) -> anyhow::Result<()> {
+        unreachable!()
+    }
+    async fn resume(&self, _: &nodeharbor_controller::DeviceIdentity) -> anyhow::Result<()> {
+        unreachable!()
+    }
+    async fn revoke(&self, _: &nodeharbor_controller::DeviceIdentity) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0,
+            "Temporary network outage"
+        );
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn revoked_credentials_stay_revoked_while_failed_network_cleanup_is_retried() {
+    let backend = std::sync::Arc::new(CleanupRetry::default());
+    let state = State::open("sqlite::memory:", "test-admin")
+        .await
+        .unwrap()
+        .with_cluster(backend.clone());
+    let app = router(state.clone());
+    let device = enrolled(&app).await;
+    assert_eq!(
+        request(
+            app.clone(),
+            "POST",
+            &format!(
+                "/api/v1/devices/{}/revoke",
+                device["deviceId"].as_str().unwrap()
+            ),
+            Some("test-admin"),
+            json!({})
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        request(
+            app,
+            "POST",
+            "/api/v1/heartbeat",
+            device["token"].as_str(),
+            json!({"state":"sharing"})
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    state.retry_revocations().await.unwrap();
+    assert_eq!(backend.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+    state.retry_revocations().await.unwrap();
+    assert_eq!(backend.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
