@@ -38,7 +38,18 @@ fn idle() -> Option<u64> {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_none() {
         return None;
     }
-    let (connection, screen) = x11rb::connect(None).ok()?;
+    let display = std::env::var("DISPLAY").ok()?;
+    let number: u16 = display
+        .rsplit_once(':')?
+        .1
+        .split('.')
+        .next()?
+        .parse()
+        .ok()?;
+    // X11 maps display numbers to TCP ports by adding 6000. Reject invalid
+    // numbers before the library computes that port, even for local displays.
+    number.checked_add(6000)?;
+    let (connection, screen) = x11rb::connect(Some(&display)).ok()?;
     let root = connection.setup().roots.get(screen)?.root;
     let reply = connection.screensaver_query_info(root).ok()?.reply().ok()?;
     Some(u64::from(reply.ms_since_user_input) / 1000)
