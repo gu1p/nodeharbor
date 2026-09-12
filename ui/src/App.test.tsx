@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi } from 'vitest';
 import { App } from './App';
@@ -8,6 +8,30 @@ function backend(overrides: Partial<Backend> = {}): Backend {
   return {snapshot:vi.fn().mockResolvedValue(snapshot()),savePolicy:vi.fn().mockImplementation(async policy => ({...snapshot(),policy})),action:vi.fn().mockResolvedValue(snapshot()),enroll:vi.fn().mockResolvedValue(snapshot()),fleet:vi.fn().mockResolvedValue([]),...overrides};
 }
 describe('A person contributes a machine', () => {
+ it('does not erase an unsaved-settings error during background status refresh', async () => {
+  vi.useFakeTimers();
+  try {
+   render(<App backend={backend({savePolicy:vi.fn().mockRejectedValue(new Error('Settings could not be saved'))})}/>);
+   await act(async()=>{});
+   await act(async()=>{fireEvent.click(screen.getByRole('button',{name:'Sharing rules'}));});
+   await act(async()=>{fireEvent.click(screen.getByRole('button',{name:'Save sharing rules'}));});
+   expect(screen.getByRole('alert')).toHaveTextContent('Settings could not be saved');
+   await act(async()=>{vi.advanceTimersByTime(10000);});
+   expect(screen.getByRole('alert')).toHaveTextContent('Settings could not be saved');
+  } finally { vi.useRealTimers(); }
+ });
+ it('refreshes fleet status while the fleet page remains open', async () => {
+  vi.useFakeTimers();
+  try {
+   const fleet=vi.fn().mockResolvedValueOnce([]).mockResolvedValue([{deviceId:'worker',name:'Connected worker',platform:'linux',architecture:'amd64',state:'sharing',reason:'Available for CI',lastSeen:null,eligibleCi:true,eligibleServices:false}]);
+   render(<App backend={backend({fleet})}/>);
+   await act(async()=>{});
+   await act(async()=>{fireEvent.click(screen.getByRole('button',{name:'Fleet'}));});
+   expect(screen.getByText('No machines connected yet')).toBeVisible();
+   await act(async()=>{vi.advanceTimersByTime(10000);});
+   expect(screen.getByRole('heading',{name:'Connected worker'})).toBeVisible();
+  } finally { vi.useRealTimers(); }
+ });
  it('shows loading, then the sharing state and all core navigation', async () => {
   render(<App backend={backend()}/>);
   expect(screen.getByRole('status')).toHaveTextContent('Loading');

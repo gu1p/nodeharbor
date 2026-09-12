@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "io.github.gu1p.nodeharbor",
   "build": {
-    "beforeDevCommand": "npm --prefix ../ui run dev",
-    "beforeBuildCommand": "npm --prefix ../ui run build",
+    "beforeDevCommand": "npm --prefix ui run dev",
+    "beforeBuildCommand": "npm --prefix ui run build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../ui/dist"
   },

@@ -9,6 +9,9 @@ import subprocess
 import shutil
 import tarfile
 import tomllib
+import os
+import urllib.request
+import urllib.error
 
 TARGETS = {
     "x86_64-unknown-linux-gnu": ("linux", "amd64", [".deb", ".AppImage"]),
@@ -77,6 +80,61 @@ def latest_release(releases: list[dict], history: list[str]) -> str | None:
     eligible=[r for r in releases if not r.get('draft') and not r.get('prerelease') and r.get('target_commitish') in ranks]
     return min(eligible,key=lambda r:ranks[r['target_commitish']])['tag_name'] if eligible else None
 
+def publication_action(existing: dict | None, manifest: dict) -> str:
+    if existing is None:return 'create'
+    if existing.get('target_commitish') != manifest['commit']:
+        raise ValueError('This release tag belongs to a different source commit')
+    if existing.get('draft'):return 'resume'
+    if existing.get('manifest') != manifest:
+        raise ValueError('Published release assets are immutable')
+    return 'skip'
+
+def github_release(repo: str, tag: str) -> dict | None:
+    token=os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
+    if not token:raise ValueError('A GitHub release credential is required')
+    request=urllib.request.Request(f'https://api.github.com/repos/{repo}/releases/tags/{tag}',headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json'})
+    try:
+        with urllib.request.urlopen(request,timeout=30) as response:return json.load(response)
+    except urllib.error.HTTPError as error:
+        if error.code==404:return None
+        raise
+
+def publish(folder: Path, version: str, commit: str, repo: str, key: Path):
+    manifests=validate_assets(folder,version,commit)
+    manifest={'version':version,'commit':commit,'targets':manifests}
+    manifest_file=folder/'release-manifest.json'
+    manifest_file.write_text(json.dumps(manifest,indent=2)+'\n')
+    tag=f'v{version}'
+    existing=github_release(repo,tag)
+    if existing and not existing['draft']:
+        asset=next((a for a in existing['assets'] if a['name']=='release-manifest.json'),None)
+        if not asset:raise ValueError('The published release has no immutable manifest')
+        with urllib.request.urlopen(asset['browser_download_url'],timeout=30) as response:existing['manifest']=json.load(response)
+    action=publication_action(existing,manifest)
+    if action=='skip':
+        print(f'{tag} already contains these immutable assets')
+        return
+    assets=[folder/asset['name'] for target in manifests for asset in target['assets']]
+    assets += [folder/f'nodeharbor-v{version}-{target}.json' for target in TARGETS]
+    assets.append(manifest_file)
+    sums=folder/'SHA256SUMS'
+    sums.write_text(''.join(f'{checksum(path)}  {path.name}\n' for path in sorted(assets)))
+    for path in [sums,manifest_file]:
+        subprocess.run(['minisign','-S','-s',str(key),'-m',str(path),'-t',f'NodeHarbor {tag} source {commit}'],check=True)
+        subprocess.run(['minisign','-V','-p','nodeharbor.minisign.pub','-m',str(path)],check=True)
+    notes=folder/'release-notes.md'
+    notes.write_text(f'NodeHarbor {tag}, built from `{commit}`.\n\nNative packages for macOS (Apple Silicon and Intel), Ubuntu (ARM64 and x64), and Windows x64. All five targets passed the required checks before publication.\n\nVerify downloads using `SHA256SUMS`. The checksum list and release manifest include Minisign signatures verified with the public key in this repository. Pilot desktop packages do not yet carry Apple Developer ID or Windows distribution certificates.\n\nInstalling the app does not enable sharing. See the repository README for prerequisites and fleet setup.\n')
+    if action=='create':
+        subprocess.run(['gh','release','create',tag,'--repo',repo,'--draft','--target',commit,'--title',f'NodeHarbor {tag}','--notes-file',str(notes)],check=True)
+    uploads=assets+[sums,folder/'SHA256SUMS.minisig',folder/'release-manifest.json.minisig',Path('nodeharbor.minisign.pub')]
+    subprocess.run(['gh','release','upload',tag,'--repo',repo,'--clobber',*[str(path) for path in uploads]],check=True)
+    # Re-read immediately before the transition to avoid editing a published
+    # release. Builds for different commits never share a tag.
+    current=github_release(repo,tag)
+    if not current or not current['draft'] or current['target_commitish']!=commit:
+        raise ValueError('Release publication state changed unexpectedly')
+    subprocess.run(['gh','release','edit',tag,'--repo',repo,'--draft=false','--latest=false'],check=True)
+
 def collect(root: Path, target_dir: Path, output: Path, target: str, version: str, commit: str):
     os_name,arch,extensions=TARGETS[target]
     output.mkdir(parents=True,exist_ok=True)
@@ -121,6 +179,8 @@ def main():
     collect_parser.add_argument('--target-dir',type=Path,default=Path('target'))
     collect_parser.add_argument('--output',type=Path,default=Path('dist'))
     latest_parser=commands.add_parser('reconcile-latest');latest_parser.add_argument('--repo',default='gu1p/nodeharbor')
+    publish_parser=commands.add_parser('publish');publish_parser.add_argument('folder',type=Path)
+    publish_parser.add_argument('version');publish_parser.add_argument('commit');publish_parser.add_argument('--repo',default='gu1p/nodeharbor');publish_parser.add_argument('--key',required=True,type=Path)
     args = parser.parse_args()
     root=Path(__file__).resolve().parents[1]
     if args.command == "version":
@@ -128,6 +188,7 @@ def main():
         print(version_for(args.base, count))
     elif args.command=='stamp':stamp(root,args.version,args.commit)
     elif args.command=='collect':collect(root,args.target_dir,args.output,args.target,args.version,args.commit)
+    elif args.command=='publish':publish(args.folder,args.version,args.commit,args.repo,args.key)
     elif args.command=='reconcile-latest':
         pages=json.loads(subprocess.check_output(['gh','api',f'repos/{args.repo}/releases','--paginate','--slurp'],text=True))
         history=subprocess.check_output(['git','rev-list','--first-parent','origin/main'],text=True).splitlines()

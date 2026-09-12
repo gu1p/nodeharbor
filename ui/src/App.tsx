@@ -7,19 +7,19 @@ const errorText=(error:unknown)=>error instanceof Error?error.message:String(err
 export function App({backend}:{backend:Backend}) {
  const [page,setPage]=useState<Page>(backend.mode==='fleet'?'Fleet':'Your machine');
  const [snapshot,setSnapshot]=useState<Snapshot|null>(null);const [policy,setPolicy]=useState<Policy|null>(null);
- const [error,setError]=useState('');const [busy,setBusy]=useState(false);const [notice,setNotice]=useState('');
+ const [actionError,setError]=useState('');const [connectionError,setConnectionError]=useState('');const [fleetError,setFleetError]=useState('');const [fleetRevision,setFleetRevision]=useState(0);const error=actionError||connectionError||(page==='Fleet'?fleetError:'');const [busy,setBusy]=useState(false);const [notice,setNotice]=useState('');
  const [fleet,setFleet]=useState<Device[]|null>(null);const [url,setUrl]=useState('');const [code,setCode]=useState('');
  const [confirmStop,setConfirmStop]=useState(false);const [filter,setFilter]=useState('all');
- const load=useCallback(async()=>{setError('');try{const s=await backend.snapshot();setSnapshot(s);setPolicy(p=>p??s.policy);setUrl(u=>u||s.controllerUrl);}catch(e){setError(errorText(e));}},[backend]);
+ const load=useCallback(async()=>{try{const s=await backend.snapshot();setSnapshot(s);setPolicy(p=>p??s.policy);setUrl(u=>u||s.controllerUrl);setConnectionError('');}catch(e){setConnectionError(errorText(e));}},[backend]);
  useEffect(()=>{void load();const interval=setInterval(()=>void load(),10000);return()=>clearInterval(interval);},[load]);
- useEffect(()=>{if(page==='Fleet'){setFleet(null);backend.fleet().then(setFleet).catch(e=>setError(errorText(e)));}},[page,backend]);
+ useEffect(()=>{if(page!=='Fleet')return;let active=true;let pending=false;setFleet(null);const refresh=()=>{if(pending)return;pending=true;backend.fleet().then(devices=>{if(active){setFleet(devices);setFleetError('');}}).catch(e=>{if(active)setFleetError(errorText(e));}).finally(()=>{pending=false;});};refresh();const interval=setInterval(refresh,10000);return()=>{active=false;clearInterval(interval);};},[page,backend,fleetRevision]);
  async function action(name:Action){setBusy(true);setError('');try{const s=await backend.action(name);setSnapshot(s);setPolicy(s.policy);setNotice(name==='prepare'?'Worker preparation started':name==='pause'?'Pausing new work and draining the worker':'Worker request saved');}catch(e){setError(errorText(e));}finally{setBusy(false);}}
  async function save(){if(!policy)return;setBusy(true);setError('');try{const s=await backend.savePolicy(policy);setSnapshot(s);setPolicy(s.policy);setNotice('Sharing rules saved');}catch(e){setError(errorText(e));}finally{setBusy(false);}}
  const nav: [Page,typeof Monitor][]=[['Your machine',Monitor],['Sharing rules',Settings2],['Fleet',Layers3],['Connection',Cable]];
  const visibleNav=backend.mode==='fleet'?nav.filter(([name])=>name==='Fleet'||name==='Connection'):nav;
  return <div className="app-shell"><aside className="sidebar"><a className="brand" href="#" aria-label="NodeHarbor home"><span><Anchor size={23}/></span>nodeharbor</a><p className="nav-caption">WORKSPACE</p><nav aria-label="Main navigation">{visibleNav.map(([name,Icon])=><button key={name} aria-current={page===name?'page':undefined} className={page===name?'active':''} onClick={()=>{setPage(name);setError('');setNotice('');}}><Icon size={18}/>{name}</button>)}</nav><div className="sidebar-bottom"><ShieldCheck size={19}/><div>Your computer. Your limits.<small>Sharing is always under your control.</small></div></div><span className="version">NodeHarbor {snapshot?.version??''}</span></aside>
  <main><header className="topbar"><span><span className="connection-dot"/> {backend.mode==='fleet'?'Fleet workspace':snapshot?.name??'This computer'}</span><span className="topbar-meta">{snapshot?.architecture?.toUpperCase()} <span className="pill">{backend.mode==='fleet'?'Fleet dashboard':'Desktop'}</span></span></header><div className="content">
- {error&&<div className="alert" role="alert"><span>{error}</span><button onClick={()=>void load()}>Try again</button></div>}
+ {error&&<div className="alert" role="alert"><span>{error}</span><button onClick={()=>{setError('');void load();setFleetRevision(value=>value+1);}}>Try again</button></div>}
  {notice&&<div className="notice" role="status">{notice}</div>}
  {!snapshot&&!error&&<p role="status" className="empty">Loading your workspace…</p>}
  {snapshot&&policy&&page==='Your machine'&&<><div className="section-heading"><div><div className="eyebrow">LOCAL WORKER</div><h1>Your machine</h1><p>Put your spare capacity to work.</p></div><button onClick={()=>void load()} aria-label="Refresh machine status"><RefreshCw size={16}/>Refresh</button></div>

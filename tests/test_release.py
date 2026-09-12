@@ -58,6 +58,14 @@ class ReleaseContract(unittest.TestCase):
                   {'tag_name':'v0.1.10','target_commitish':'pending','draft':True,'prerelease':False}]
         self.assertEqual(release.latest_release(releases,['pending','new','old']),'v0.1.9')
         self.assertEqual(release.latest_release(list(reversed(releases)),['pending','new','old']),'v0.1.9')
+
+    def test_a_published_release_is_immutable_and_rerunning_the_same_release_is_safe(self):
+        manifest={'version':'0.1.12','commit':'a'*40,'targets':[]}
+        self.assertEqual(release.publication_action(None,manifest),'create')
+        self.assertEqual(release.publication_action({'draft':True,'target_commitish':'a'*40},manifest),'resume')
+        self.assertEqual(release.publication_action({'draft':False,'target_commitish':'a'*40,'manifest':manifest},manifest),'skip')
+        with self.assertRaises(ValueError):release.publication_action({'draft':False,'target_commitish':'b'*40,'manifest':manifest},manifest)
+        with self.assertRaises(ValueError):release.publication_action({'draft':False,'target_commitish':'a'*40,'manifest':{'version':'0.1.12','commit':'a'*40,'targets':['different']}},manifest)
     def test_versions_are_stable_and_ordered_by_main_history(self):
         self.assertEqual(release.version_for("0.1.0", 12), "0.1.12")
         self.assertEqual(release.version_for("0.1.0", 12), release.version_for("0.1.0", 12))
