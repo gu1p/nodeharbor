@@ -17,6 +17,8 @@ use sqlx::{
 use std::{str::FromStr, sync::Arc};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
+mod health;
+pub use health::{assess_health, verify_worker_evidence, HealthSample};
 mod provision;
 pub use provision::{ApiClient, ClusterConfig, Provisioner};
 
