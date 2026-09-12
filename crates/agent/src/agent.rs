@@ -439,7 +439,17 @@ impl Agent {
     }
     async fn heartbeat(&self, config: &Configuration) -> Result<()> {
         let runtime = self.runtime.lock().await.clone();
-        let value=self.request(config,"/heartbeat",Some(json!({"state":runtime.state.unwrap_or_else(||"paused".into()),"reason":runtime.reason.unwrap_or_default(),"resources":config.policy.resources}))).await?;
+        let observation = crate::observe::observation(
+            &self.store.directory,
+            config
+                .allocated_resources
+                .as_ref()
+                .map(|r| r.disk_gib)
+                .unwrap_or(0),
+        );
+        let permitted = evaluate(&config.policy, &observation).allowed;
+        let value=self.request(config,"/heartbeat",Some(json!({"state":runtime.state.unwrap_or_else(||"paused".into()),"reason":runtime.reason.unwrap_or_default(),"resources":config.policy.resources,
+            "allowCi":config.policy.allow_ci,"allowServices":config.policy.allow_services,"permitted":permitted}))).await?;
         self.runtime.lock().await.remote_paused = value["remotePaused"].as_bool().unwrap_or(false);
         Ok(())
     }
