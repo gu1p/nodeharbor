@@ -357,3 +357,117 @@ async fn revoked_credentials_stay_revoked_while_failed_network_cleanup_is_retrie
     state.retry_revocations().await.unwrap();
     assert_eq!(backend.0.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn fleet_exposes_observed_qualification_and_owner_workload_choices() {
+    let state = State::open("sqlite::memory:", "test-admin").await.unwrap();
+    let app = router(state.clone());
+    let device = enrolled(&app).await;
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/heartbeat",
+        device["token"].as_str(),
+        json!({"state":"sharing","allowCi":true,"allowServices":false,"permitted":true}),
+    )
+    .await;
+    sqlx::query("INSERT INTO device_health(device_id,reason,observed_at) VALUES(?,?,?)")
+        .bind(device["deviceId"].as_str().unwrap())
+        .bind("CI ready; observing service reliability")
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let (_, fleet) = request(app, "GET", "/api/v1/fleet", Some("test-admin"), json!({})).await;
+    assert_eq!(
+        fleet[0]["healthReason"],
+        "CI ready; observing service reliability"
+    );
+    assert_eq!(fleet[0]["allowCi"], true);
+    assert_eq!(fleet[0]["allowServices"], false);
+}
+#[tokio::test]
+async fn a_fleet_administrator_can_pause_admission_without_changing_owner_preferences() {
+    let state = State::open("sqlite::memory:", "test-admin").await.unwrap();
+    let app = router(state.clone());
+    let device = enrolled(&app).await;
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/heartbeat",
+        device["token"].as_str(),
+        json!({"state":"sharing","allowCi":true,"permitted":true}),
+    )
+    .await;
+    let path = format!(
+        "/api/v1/devices/{}/pause",
+        device["deviceId"].as_str().unwrap()
+    );
+    assert_eq!(
+        request(
+            app.clone(),
+            "POST",
+            &path,
+            device["token"].as_str(),
+            json!({})
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        request(app.clone(), "POST", &path, Some("test-admin"), json!({}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (_, fleet) = request(
+        app.clone(),
+        "GET",
+        "/api/v1/fleet",
+        Some("test-admin"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(fleet[0]["remotePaused"], true);
+    assert_eq!(fleet[0]["allowCi"], true);
+    let path = path.replace("/pause", "/resume");
+    assert_eq!(
+        request(app.clone(), "POST", &path, Some("test-admin"), json!({}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let (_, fleet) = request(app, "GET", "/api/v1/fleet", Some("test-admin"), json!({})).await;
+    assert_eq!(fleet[0]["remotePaused"], false);
+    assert_eq!(fleet[0]["eligibleCi"], false);
+}
+
+#[tokio::test]
+async fn an_active_owner_heartbeat_does_not_keep_stale_network_qualification_alive() {
+    let state = State::open("sqlite::memory:", "test-admin").await.unwrap();
+    let app = router(state.clone());
+    let device = enrolled(&app).await;
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/heartbeat",
+        device["token"].as_str(),
+        json!({"state":"sharing","allowCi":true,"permitted":true}),
+    )
+    .await;
+    sqlx::query("UPDATE devices SET eligible_ci=1 WHERE id=?")
+        .bind(device["deviceId"].as_str().unwrap())
+        .execute(&state.db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO device_health(device_id,reason,observed_at) VALUES(?,?,?)")
+        .bind(device["deviceId"].as_str().unwrap())
+        .bind("CI ready")
+        .bind((chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339())
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let (_, fleet) = request(app, "GET", "/api/v1/fleet", Some("test-admin"), json!({})).await;
+    assert_eq!(fleet[0]["eligibleCi"], false);
+}

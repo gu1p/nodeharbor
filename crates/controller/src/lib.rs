@@ -252,6 +252,10 @@ pub struct Device {
     pub eligible_services: bool,
     pub resources: Option<Value>,
     pub remote_paused: bool,
+    pub allow_ci: bool,
+    pub allow_services: bool,
+    pub health_reason: String,
+    pub observed_at: Option<String>,
 }
 async fn fleet(Extract(state): Extract<State>, headers: HeaderMap) -> ApiResult<Json<Vec<Device>>> {
     admin(&state, &headers)?;
@@ -265,7 +269,7 @@ async fn device_fleet(
     fleet_rows(&state).await
 }
 async fn fleet_rows(state: &State) -> ApiResult<Json<Vec<Device>>> {
-    let rows=sqlx::query("SELECT id,name,platform,architecture,state,reason,last_seen,eligible_ci,eligible_services,resources,remote_paused FROM devices WHERE revoked=0 ORDER BY created_at")
+    let rows=sqlx::query("SELECT d.id,d.name,d.platform,d.architecture,d.state,d.reason,d.last_seen,d.eligible_ci,d.eligible_services,d.resources,d.remote_paused,COALESCE(p.allow_ci,0) AS allow_ci,COALESCE(p.allow_services,0) AS allow_services,h.reason AS health_reason,h.observed_at FROM devices d LEFT JOIN device_policy p ON p.device_id=d.id LEFT JOIN device_health h ON h.device_id=d.id WHERE d.revoked=0 ORDER BY d.created_at")
         .fetch_all(&state.db).await.map_err(ApiError::internal)?;
     let mut devices = Vec::new();
     for row in rows {
@@ -275,6 +279,13 @@ async fn fleet_rows(state: &State) -> ApiResult<Json<Vec<Device>>> {
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .is_none_or(|seen| Utc::now().signed_duration_since(seen).num_seconds() > 90);
         let resources: Option<String> = row.get("resources");
+        let observed_at: Option<String> = row.get("observed_at");
+        let observed = observed_at
+            .as_ref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .is_some_and(|at| {
+                (0..=90).contains(&Utc::now().signed_duration_since(at).num_seconds())
+            });
         devices.push(Device {
             device_id: row.get("id"),
             name: row.get("name"),
@@ -291,10 +302,19 @@ async fn fleet_rows(state: &State) -> ApiResult<Json<Vec<Device>>> {
                 row.get("reason")
             },
             last_seen,
-            eligible_ci: !stale && row.get::<bool, _>("eligible_ci"),
-            eligible_services: !stale && row.get::<bool, _>("eligible_services"),
+            eligible_ci: !stale && observed && row.get::<bool, _>("eligible_ci"),
+            eligible_services: !stale && observed && row.get::<bool, _>("eligible_services"),
             resources: resources.and_then(|s| serde_json::from_str(&s).ok()),
             remote_paused: row.get("remote_paused"),
+            allow_ci: row.get("allow_ci"),
+            allow_services: row.get("allow_services"),
+            health_reason: if observed && !stale {
+                row.get::<Option<String>, _>("health_reason")
+                    .unwrap_or_default()
+            } else {
+                "Waiting for a fresh network observation".into()
+            },
+            observed_at,
         });
     }
     Ok(Json(devices))
@@ -543,6 +563,34 @@ async fn ready(Extract(state): Extract<State>) -> ApiResult<Json<Value>> {
         json!({"status":"ready","version":env!("CARGO_PKG_VERSION")}),
     ))
 }
+async fn admin_control(
+    Extract(state): Extract<State>,
+    headers: HeaderMap,
+    Path((id, action)): Path<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    admin(&state, &headers)?;
+    if !["pause", "resume"].contains(&action.as_str()) {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "Fleet operation not found".into(),
+        ));
+    }
+    let _operation = state.operations.lock().await;
+    let device = identity(&state, &id).await?;
+    let paused = action == "pause";
+    let updated=sqlx::query("UPDATE devices SET remote_paused=?,eligible_ci=0,eligible_services=0 WHERE id=? AND revoked=0")
+        .bind(paused).bind(&id).execute(&state.db).await.map_err(ApiError::internal)?;
+    if updated.rows_affected() == 0 {
+        return Err(ApiError(StatusCode::NOT_FOUND, "Device not found".into()));
+    }
+    audit(&state, Some(&id), &format!("admin_{action}")).await?;
+    if paused {
+        if let Some(cluster) = &state.cluster {
+            cluster.drain(&device).await.map_err(cluster_error)?;
+        }
+    }
+    Ok(Json(json!({"remotePaused":paused})))
+}
 pub fn router(state: State) -> Router {
     Router::new()
         .route("/healthz", get(|| async { Json(json!({"status":"ok"})) }))
@@ -554,6 +602,7 @@ pub fn router(state: State) -> Router {
         .route("/api/v1/enroll", post(enroll))
         .route("/api/v1/heartbeat", post(heartbeat))
         .route("/api/v1/devices/{id}/revoke", post(revoke))
+        .route("/api/v1/devices/{id}/{action}", post(admin_control))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(axum::middleware::map_response(

@@ -80,3 +80,22 @@ describe('A person contributes a machine', () => {
   await waitFor(()=>expect(api.action).toHaveBeenCalledWith('stop'));
  });
 });
+
+it('shows independent qualification separately from the owner status and permits fleet pause', async()=>{
+ const controlDevice=vi.fn().mockResolvedValue({});
+ const fleet=vi.fn().mockResolvedValue([{deviceId:'worker',name:'My laptop',platform:'linux',architecture:'amd64',state:'sharing',reason:'Following your sharing rules',healthReason:'CI ready; observing service reliability',lastSeen:null,eligibleCi:true,eligibleServices:false,allowCi:true,allowServices:false,remotePaused:false}]);
+ const user=userEvent.setup();render(<App backend={backend({mode:'fleet',fleet,controlDevice})}/>);
+ expect(await screen.findByText('CI ready; observing service reliability')).toBeVisible();
+ expect(screen.getByText('Services disabled')).toBeVisible();
+ await user.click(screen.getByRole('button',{name:'Pause My laptop'}));
+ await waitFor(()=>expect(controlDevice).toHaveBeenCalledWith('worker','pause'));
+});
+it('keeps fleet revocation behind an explicit confirmation', async()=>{
+ const controlDevice=vi.fn().mockResolvedValue({});
+ const user=userEvent.setup();render(<App backend={backend({mode:'fleet',controlDevice,fleet:vi.fn().mockResolvedValue([{deviceId:'worker',name:'My laptop',platform:'linux',architecture:'amd64',state:'paused',reason:'Paused',lastSeen:null,eligibleCi:false,eligibleServices:false}])})}/>);
+ await user.click(await screen.findByRole('button',{name:'Revoke My laptop'}));
+ expect(screen.getByRole('dialog',{name:'Revoke this computer?'})).toBeVisible();
+ expect(controlDevice).not.toHaveBeenCalled();
+ await user.click(screen.getByRole('button',{name:'Revoke access'}));
+ await waitFor(()=>expect(controlDevice).toHaveBeenCalledWith('worker','revoke'));
+});
