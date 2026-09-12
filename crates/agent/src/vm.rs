@@ -91,6 +91,9 @@ impl Runner for MultipassRunner {
 pub struct VmInfo {
     pub installed: bool,
     pub running: bool,
+    /// Unknown and transitional states may consume resources but cannot run guest commands.
+    #[serde(default)]
+    pub reachable: bool,
     #[serde(default)]
     pub addresses: Vec<String>,
 }
@@ -98,6 +101,7 @@ pub struct Vm {
     pub name: String,
     device_id: String,
     runner: Arc<dyn Runner>,
+    receipt: Option<PathBuf>,
 }
 impl Vm {
     pub fn new(device_id: &str, runner: Arc<dyn Runner>) -> Result<Self> {
@@ -105,10 +109,54 @@ impl Vm {
             name: crate::managed_vm_name(device_id)?,
             device_id: device_id.into(),
             runner,
+            receipt: None,
         })
     }
     pub fn local(device_id: &str) -> Result<Self> {
         Self::new(device_id, Arc::new(MultipassRunner))
+    }
+    pub fn managed(device_id: &str, directory: &Path, runner: Arc<dyn Runner>) -> Result<Self> {
+        let mut vm = Self::new(device_id, runner)?;
+        vm.receipt = Some(directory.join(format!("{}.receipt.json", vm.name)));
+        Ok(vm)
+    }
+    pub fn local_in(device_id: &str, directory: &Path) -> Result<Self> {
+        Self::managed(device_id, directory, Arc::new(MultipassRunner))
+    }
+    pub fn has_receipt(&self) -> Result<bool> {
+        let Some(path) = &self.receipt else {
+            return Ok(false);
+        };
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let receipt: Value =
+            serde_json::from_reader(file).context("The VM creation receipt is damaged")?;
+        anyhow::ensure!(
+            receipt["version"] == 1
+                && receipt["deviceId"] == self.device_id
+                && receipt["name"] == self.name,
+            "The VM creation receipt does not match this device"
+        );
+        Ok(true)
+    }
+    fn record_creation(&self) -> Result<()> {
+        let path = self
+            .receipt
+            .as_ref()
+            .context("A local creation receipt is required to prepare a worker")?;
+        let mut file =
+            tempfile::NamedTempFile::new_in(path.parent().context("Invalid receipt directory")?)?;
+        serde_json::to_writer(
+            &mut file,
+            &json!({"version":1,"deviceId":self.device_id,"name":self.name}),
+        )?;
+        file.as_file().sync_all()?;
+        file.persist(path)
+            .context("Cannot save the VM creation receipt")?;
+        Ok(())
     }
     async fn command(
         &self,
@@ -141,7 +189,11 @@ impl Vm {
             None => Ok(VmInfo::default()),
             Some(item) => Ok(VmInfo {
                 installed: true,
-                running: item["state"] == "Running",
+                running: !matches!(
+                    item["state"].as_str(),
+                    Some("Stopped" | "Suspended" | "Deleted")
+                ),
+                reachable: item["state"] == "Running",
                 addresses: item["ipv4"]
                     .as_array()
                     .map(|items| {
@@ -175,12 +227,18 @@ impl Vm {
         Ok(())
     }
     pub async fn stop(&self) -> Result<()> {
-        self.verify_owner().await?;
+        if !self.has_receipt()? {
+            self.verify_owner().await?;
+        }
         self.command(vec!["stop".into(), self.name.clone()], None, 60)
             .await?;
         Ok(())
     }
     pub async fn start(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.has_receipt()?,
+            "This application has no creation receipt for the VM; it has been left untouched"
+        );
         self.command(vec!["start".into(), self.name.clone()], None, 180)
             .await?;
         self.verify_owner().await?;
@@ -211,6 +269,9 @@ impl Vm {
         use std::io::Write;
         writeln!(file, "#cloud-config\n{cloud_config}")?;
         file.flush()?;
+        // Persist before launch: the hypervisor may create the VM and then fail
+        // while waiting for guest networking. Recovery must not depend on SSH.
+        self.record_creation()?;
         self.command(
             vec![
                 "launch".into(),
@@ -230,6 +291,8 @@ impl Vm {
             1200,
         )
         .await?;
+        self.guest(&["sudo", "cloud-init", "status", "--wait"], None, 180)
+            .await?;
         self.verify_owner().await
     }
     pub async fn configure(&self, bootstrap: Value) -> Result<()> {

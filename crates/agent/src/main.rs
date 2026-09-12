@@ -37,10 +37,10 @@ enum Command {
 
 async fn wait_for_stop(agent: &Agent, timeout: u64) -> Result<()> {
     let config = agent.store.load()?;
-    if !config.vm_created && !config.prepare_requested {
+    let vm = Vm::local_in(&config.device_id, &agent.store.directory)?;
+    if !config.vm_created && !config.prepare_requested && !vm.has_receipt()? {
         return Ok(());
     }
-    let vm = Vm::local(&config.device_id)?;
     let deadline = Instant::now() + Duration::from_secs(timeout);
     // If the desktop is running it owns supervision. Otherwise this command
     // takes over only long enough to drain the enrolled device's worker.
@@ -70,7 +70,9 @@ async fn main() -> Result<()> {
         Command::Status => {
             let mut snapshot = agent.snapshot().await?;
             if agent.store.load()?.vm_created {
-                snapshot.worker = Vm::local(&snapshot.device_id)?.info().await?;
+                snapshot.worker = Vm::local_in(&snapshot.device_id, &agent.store.directory)?
+                    .info()
+                    .await?;
                 if snapshot.worker.running {
                     snapshot.state = "running".into();
                     snapshot.reason = "The local worker is running; the fleet dashboard reports its qualification".into();

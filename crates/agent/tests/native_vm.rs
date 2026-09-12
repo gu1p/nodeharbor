@@ -16,7 +16,7 @@ async fn a_native_vm_honors_its_budget_and_contains_the_owned_worker_runtime() {
         std::fs::write(&receipt, &id).unwrap();
         id
     };
-    let vm = Vm::local(&id).unwrap();
+    let vm = Vm::local_in(&id, &root).unwrap();
     let resources = Resources {
         cpus: 2,
         memory_mib: 3072,

@@ -21,6 +21,7 @@ pub struct Agent {
     runtime: Arc<Mutex<Runtime>>,
     operation: Arc<Mutex<()>>,
     client: reqwest::Client,
+    runner: Arc<dyn crate::Runner>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,7 +42,11 @@ pub struct Snapshot {
 }
 impl Agent {
     pub fn open(directory: &Path) -> Result<Self> {
+        Self::open_with_runner(directory, Arc::new(crate::vm::MultipassRunner))
+    }
+    pub fn open_with_runner(directory: &Path, runner: Arc<dyn crate::Runner>) -> Result<Self> {
         Ok(Self {
+            runner,
             store: Store::open(directory)?,
             runtime: Arc::new(Mutex::new(Runtime::default())),
             operation: Arc::new(Mutex::new(())),
@@ -250,17 +255,32 @@ impl Agent {
             .await;
             return Ok(());
         }
-        let vm = Vm::local(&config.device_id)?;
+        let vm = Vm::managed(
+            &config.device_id,
+            &self.store.directory,
+            self.runner.clone(),
+        )?;
+        let owned = config.vm_created || vm.has_receipt()?;
+        if config.stop_requested {
+            if owned && vm.info().await?.running {
+                vm.stop().await?;
+            }
+            self.store.update(|c| {
+                c.stop_requested = false;
+                Ok(())
+            })?;
+            self.runtime.lock().await.worker.running = false;
+            self.set_status("paused", "Worker stopped").await;
+            return Ok(());
+        }
         if config.prepare_requested {
             self.set_status(
                 "preparing",
                 "Preparing the Linux worker within your resource budget",
             )
             .await;
-            let bootstrap = self
-                .request(&config, "/device/bootstrap", Some(json!({})))
-                .await?;
-            if !config.vm_created {
+            let exists = owned && vm.info().await?.installed;
+            if !exists {
                 let observation = crate::observe::observation(&self.store.directory, 0);
                 validate_policy(&config.policy, &observation.resources)
                     .map_err(anyhow::Error::msg)?;
@@ -270,18 +290,22 @@ impl Agent {
                     crate::guest_files(),
                 )
                 .await?;
-                self.store.update(|c| {
-                    c.vm_created = true;
-                    c.allocated_resources = Some(config.policy.resources.clone());
-                    Ok(())
-                })?;
-            } else if !vm.info().await?.running {
+            } else if !vm.info().await?.reachable {
                 vm.start().await?;
             }
-            if self.store.load()?.stop_requested {
+            self.store.update(|c| {
+                c.vm_created = true;
+                c.allocated_resources = Some(config.policy.resources.clone());
+                Ok(())
+            })?;
+            if !self.store.load()?.prepare_requested {
                 vm.stop().await?;
                 return Ok(());
             }
+            // Bootstrap credentials must be fresh after a potentially slow first image download.
+            let bootstrap = self
+                .request(&config, "/device/bootstrap", Some(json!({})))
+                .await?;
             vm.configure(bootstrap).await?;
             self.store.update(|c| {
                 c.prepare_requested = false;
@@ -290,12 +314,22 @@ impl Agent {
             })?;
         }
         let config = self.store.load()?;
-        let info = if config.vm_created {
+        let info = if config.vm_created || vm.has_receipt()? {
             vm.info().await?
         } else {
             VmInfo::default()
         };
         self.runtime.lock().await.worker = info.clone();
+        if info.running && !config.vm_configured && !config.prepare_requested {
+            vm.stop().await?;
+            self.runtime.lock().await.worker.running = false;
+            self.set_status(
+                "paused",
+                "Incomplete worker stopped. Prepare it again to retry",
+            )
+            .await;
+            return Ok(());
+        }
         if !config.vm_created {
             self.set_status(
                 "paused",
