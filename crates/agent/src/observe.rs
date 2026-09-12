@@ -32,11 +32,19 @@ pub fn observation(directory: &Path, allocated_disk: u64) -> Observation {
         },
     }
 }
+#[cfg(target_os = "linux")]
 fn idle() -> Option<u64> {
-    #[cfg(target_os = "linux")]
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+    use x11rb::{connection::Connection, protocol::screensaver::ConnectionExt};
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_none() {
         return None;
     }
+    let (connection, screen) = x11rb::connect(None).ok()?;
+    let root = connection.setup().roots.get(screen)?.root;
+    let reply = connection.screensaver_query_info(root).ok()?.reply().ok()?;
+    Some(u64::from(reply.ms_since_user_input) / 1000)
+}
+#[cfg(not(target_os = "linux"))]
+fn idle() -> Option<u64> {
     user_idle::UserIdle::get_time()
         .ok()
         .map(|idle| idle.as_seconds())
