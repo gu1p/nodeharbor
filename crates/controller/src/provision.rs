@@ -130,12 +130,13 @@ pub struct ClusterConfig {
 }
 #[derive(Clone)]
 pub struct Provisioner {
+    pub(crate) probe: Option<crate::ProbeConfig>,
     pub(crate) config: ClusterConfig,
     pub(crate) kube: ApiClient,
     pub(crate) netbird: ApiClient,
     pub(crate) db: SqlitePool,
 }
-fn api_id(value: &str) -> Result<&str> {
+pub(crate) fn api_id(value: &str) -> Result<&str> {
     anyhow::ensure!(
         !value.is_empty()
             && value.len() <= 120
@@ -190,6 +191,7 @@ impl Provisioner {
             CREATE TABLE IF NOT EXISTS bootstrap_grants (device_id TEXT NOT NULL, token_id TEXT PRIMARY KEY, expires_at TEXT NOT NULL);").execute(&db).await?;
         Ok(Self {
             config,
+            probe: None,
             kube,
             netbird,
             db,

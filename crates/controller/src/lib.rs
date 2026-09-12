@@ -21,6 +21,8 @@ mod health;
 pub use health::{assess_health, verify_worker_evidence, HealthSample};
 mod reconcile;
 pub use reconcile::{HealthBackend, Reconciler};
+mod network;
+pub use network::ProbeConfig;
 mod provision;
 pub use provision::{ApiClient, ClusterConfig, Provisioner};
 
