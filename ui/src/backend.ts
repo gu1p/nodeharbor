@@ -1,0 +1,12 @@
+import { invoke } from '@tauri-apps/api/core';
+import { defaultPolicy, type Backend, type Snapshot } from './model';
+const desktop='__TAURI_INTERNALS__' in window;
+async function api<T>(path:string,body?:unknown):Promise<T> {
+ const response=await fetch(`/api/v1${path}`,{credentials:'same-origin',headers:{'content-type':'application/json','x-nodeharbor-request':'1'},...(body===undefined?{}:{method:'POST',body:JSON.stringify(body)})});
+ if(!response.ok){let message='Request failed';try{message=(await response.json()).error??message;}catch{/* Keep the readable fallback. */}throw new Error(`${message} (${response.status})`);}
+ return response.json() as Promise<T>;
+}
+export const backend:Backend=desktop?{mode:'desktop',snapshot:()=>invoke('snapshot'),savePolicy:policy=>invoke('save_policy',{policy}),action:action=>invoke('worker_action',{action}),enroll:(url,code)=>invoke('enroll',{url,code}),fleet:()=>invoke('fleet')}:{
+ mode:'fleet',snapshot:async()=>{await api('/fleet');return {deviceId:'',name:'Fleet dashboard',platform:'browser',architecture:'',state:'ready',reason:'Fleet dashboard',policy:defaultPolicy(),resources:{cpus:0,memoryMib:0,diskGib:0},worker:{installed:false,running:false},enrolled:false,controllerUrl:window.location.origin,version:__APP_VERSION__,workloads:[]} as Snapshot;},
+ savePolicy:async()=>{throw new Error('Change local sharing rules in the desktop application');},action:async()=>{throw new Error('Open the desktop application to control this computer');},enroll:async()=>{throw new Error('Enter the enrollment code in the desktop application');},fleet:()=>api('/fleet'),createEnrollment:()=>api('/enrollment-codes',{})};
+declare const __APP_VERSION__:string;

@@ -1,0 +1,26 @@
+{
+  "k3sVersion": "v1.36.4+k3s1",
+  "netbirdVersion": "0.78.1",
+  "assets": [
+    {
+      "component": "netbird",
+      "name": "netbird_0.78.1_linux_amd64.tar.gz",
+      "sha256": "9239c9e37c2acc0612563ef5ce0c3326397460d0eb811b5a59a8e373f1a4ebde"
+    },
+    {
+      "component": "netbird",
+      "name": "netbird_0.78.1_linux_arm64.tar.gz",
+      "sha256": "d686745aa64bb4c597602ce95e76558f5f848d0672c88d63f96397d2507005b2"
+    },
+    {
+      "component": "k3s_amd64",
+      "name": "k3s",
+      "sha256": "835873f37245fc615f547a2fe2af9402a347875f13fa64a1f136de644955ea3f"
+    },
+    {
+      "component": "k3s_arm64",
+      "name": "k3s-arm64",
+      "sha256": "c920706346d5ad4e5cd3c7bf1bb09ce71ebe07fec829e513e40f1caf98aed8bb"
+    }
+  ]
+}

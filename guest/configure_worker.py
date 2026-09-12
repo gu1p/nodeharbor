@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Configure an owned worker from a short-lived, authenticated bootstrap grant."""
+import hashlib
+import io
+import ipaddress
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.parse
+import urllib.request
+import uuid
+
+ROOT=Path('/etc/nodeharbor')
+
+def validate_config(config):
+    device=uuid.UUID(config['deviceId'])
+    if config['nodeName']!='nodeharbor-'+device.hex:
+        raise ValueError('Worker identity does not match its enrollment')
+    for key in ['netbirdManagementUrl','serverUrl']:
+        url=urllib.parse.urlparse(config[key])
+        if url.scheme!='https' or not url.hostname or url.username or url.password or url.query or url.fragment:
+            raise ValueError('Worker endpoints must use HTTPS without embedded credentials')
+    if not re.fullmatch(r'K10[0-9a-f]{64}::[a-z0-9]{6}\.[a-z0-9]{16}',config['k3sToken']):
+        raise ValueError('A secure expiring K3s bootstrap token is required')
+    runtime=config['runtime']
+    if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+',runtime['k3sVersion']):
+        raise ValueError('Invalid K3s runtime version')
+    if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+',runtime['netbirdVersion']):
+        raise ValueError('Invalid NetBird runtime version')
+
+def verify_download(data,expected):
+    if not re.fullmatch(r'[0-9a-f]{64}',expected) or hashlib.sha256(data).hexdigest()!=expected:
+        raise ValueError('Downloaded runtime failed checksum verification')
+
+def run(*command,env=None):
+    result=subprocess.run(command,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+    if result.returncode:
+        raise RuntimeError(f'{command[0]} failed; inspect the worker service logs')
+    return result.stdout
+
+def write(path,content,mode=0o600):
+    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent,delete=False) as temporary:
+        temporary.write(content.encode());temporary.flush();os.fsync(temporary.fileno());name=temporary.name
+    os.chmod(name,mode);os.replace(name,path)
+
+def download(url,expected):
+    with urllib.request.urlopen(url,timeout=120) as response:
+        data=response.read(512*1024*1024+1)
+    if len(data)>512*1024*1024: raise ValueError('Worker runtime download exceeds the supported size')
+    verify_download(data,expected)
+    return data
+
+def install_runtime(config):
+    runtime=config['runtime'];arch={'aarch64':'arm64','x86_64':'amd64'}.get(platform.machine())
+    if arch is None: raise ValueError('Unsupported Linux worker CPU architecture')
+    assets={asset['name']:asset['sha256'] for asset in runtime['assets']}
+    print('Installing verified worker runtime',flush=True)
+    nb_name=f"netbird_{runtime['netbirdVersion']}_linux_{arch}.tar.gz"
+    data=download(f"https://github.com/netbirdio/netbird/releases/download/v{runtime['netbirdVersion']}/{nb_name}",assets[nb_name])
+    with tarfile.open(fileobj=io.BytesIO(data),mode='r:gz') as archive:
+        members=[member for member in archive.getmembers() if member.name in ('netbird','./netbird') and member.isfile()]
+        if len(members)!=1:raise ValueError('NetBird archive has no unique executable')
+        binary=archive.extractfile(members[0]).read()
+    path=Path('/usr/local/bin/netbird');path.write_bytes(binary);path.chmod(0o755)
+    k3s_name='k3s' if arch=='amd64' else 'k3s-arm64'
+    binary=download(f"https://github.com/k3s-io/k3s/releases/download/{urllib.parse.quote(runtime['k3sVersion'],safe='')}/{k3s_name}",assets[k3s_name])
+    path=Path('/usr/local/bin/k3s');path.write_bytes(binary);path.chmod(0o755)
+
+def main():
+    if sys.platform!='linux' or os.geteuid()!=0:
+        raise SystemExit('Worker configuration only runs as root inside a managed Linux guest')
+    config=json.load(sys.stdin);validate_config(config)
+    if (ROOT/'device-id').read_text().strip()!=config['deviceId']:
+        raise SystemExit('Refusing to configure a VM owned by another device')
+    install_runtime(config)
+    if not Path('/etc/systemd/system/netbird.service').exists():run('/usr/local/bin/netbird','service','install')
+    run('systemctl','enable','--now','netbird')
+    environment=dict(os.environ)
+    if config.get('netbirdSetupKey'):environment['NB_SETUP_KEY']=config['netbirdSetupKey']
+    run('/usr/local/bin/netbird','up','--management-url',config['netbirdManagementUrl'],'--hostname',config['nodeName'],'--mtu','1280',env=environment)
+    peer_ip=None
+    for _ in range(60):
+        status=json.loads(run('/usr/local/bin/netbird','status','--json'))
+        value=status.get('netbirdIp','').split('/')[0]
+        try:peer_ip=str(ipaddress.IPv4Address(value));break
+        except ipaddress.AddressValueError:time.sleep(1)
+    if not peer_ip:raise RuntimeError('The private network did not assign a worker address')
+    for module in ['overlay','br_netfilter','vxlan']:run('modprobe',module)
+    write('/etc/modules-load.d/nodeharbor.conf','overlay\nbr_netfilter\nvxlan\n',0o644)
+    write('/etc/sysctl.d/90-nodeharbor.conf','net.ipv4.ip_forward=1\nnet.bridge.bridge-nf-call-iptables=1\n',0o644)
+    run('sysctl','--system')
+    write('/etc/rancher/k3s/agent-token',config['k3sToken']+'\n')
+    write('/etc/rancher/k3s/resolv.conf','nameserver 1.1.1.1\nnameserver 8.8.8.8\n',0o644)
+    k3s={'server':config['serverUrl'],'token-file':'/etc/rancher/k3s/agent-token','node-name':config['nodeName'],'node-ip':peer_ip,'flannel-iface':'wt0',
+         'node-taint':['nodeharbor.sikalio.dev/contributed=true:NoSchedule','nodeharbor.sikalio.dev/quarantine=true:NoSchedule'],
+         'node-label':['nodeharbor.sikalio.dev/device='+config['deviceId']],
+         'resolv-conf':'/etc/rancher/k3s/resolv.conf',
+         'kubelet-arg':['system-reserved=cpu=100m,memory=256Mi','kube-reserved=cpu=150m,memory=256Mi','eviction-hard=memory.available<256Mi,nodefs.available<10%,imagefs.available<15%','container-log-max-size=10Mi','container-log-max-files=2','max-pods=30']}
+    write('/etc/rancher/k3s/config.yaml',json.dumps(k3s,indent=2)+'\n')
+    unit='''[Unit]
+Description=NodeHarbor Kubernetes worker
+After=network-online.target netbird.service
+Wants=network-online.target
+Requires=netbird.service
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/k3s agent --config /etc/rancher/k3s/config.yaml
+Restart=always
+RestartSec=10
+Delegate=yes
+LimitNOFILE=1048576
+TasksMax=infinity
+[Install]
+WantedBy=multi-user.target
+'''
+    write('/etc/systemd/system/k3s-agent.service',unit,0o644)
+    run('systemctl','daemon-reload')
+    run('python3','/usr/local/lib/nodeharbor/watchdog.py','renew')
+    run('systemctl','enable','--now','nodeharbor-watchdog.timer')
+    run('systemctl','enable','--now','k3s-agent')
+    print('Worker connected; waiting for controller qualification',flush=True)
+
+if __name__=='__main__': main()

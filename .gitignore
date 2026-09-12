@@ -1,0 +1,17 @@
+/target/
+/ui/node_modules/
+/ui/dist/
+/dist/
+/.local/
+/test-results/
+/playwright-report/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+*.key
+*.p12
+/desktop/gen/
+/desktop/binaries/
+/ui/test-results/
+/ui/playwright-report/
