@@ -33,6 +33,7 @@ enrollment, local sharing policy, VM lifecycle, and fleet eligibility.
 
 Install Rust, Node.js, Python 3.11 or newer, and the
 [Tauri native prerequisites](https://v2.tauri.app/start/prerequisites/).
+Linux builds also require `libxss-dev` for the idle-time sensor.
 
 ```sh
 npm --prefix ui ci
