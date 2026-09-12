@@ -19,6 +19,8 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 mod health;
 pub use health::{assess_health, verify_worker_evidence, HealthSample};
+mod reconcile;
+pub use reconcile::{HealthBackend, Reconciler};
 mod provision;
 pub use provision::{ApiClient, ClusterConfig, Provisioner};
 
@@ -78,7 +80,9 @@ impl State {
                 resources TEXT, node_name TEXT, peer_id TEXT,
                 eligible_ci INTEGER NOT NULL DEFAULT 0, eligible_services INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, device_id TEXT, action TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS health_samples (device_id TEXT NOT NULL, at TEXT NOT NULL, ready INTEGER NOT NULL, rtt_ms REAL, PRIMARY KEY(device_id, at));")
+            CREATE TABLE IF NOT EXISTS health_samples (device_id TEXT NOT NULL, at TEXT NOT NULL, ready INTEGER NOT NULL, rtt_ms REAL, PRIMARY KEY(device_id, at));
+            CREATE TABLE IF NOT EXISTS device_policy (device_id TEXT PRIMARY KEY, allow_ci INTEGER NOT NULL DEFAULT 0, allow_services INTEGER NOT NULL DEFAULT 0, permitted INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS device_health (device_id TEXT PRIMARY KEY, reason TEXT NOT NULL, observed_at TEXT NOT NULL);")
             .execute(&db).await?;
         Ok(Self {
             db,
@@ -333,6 +337,12 @@ struct Heartbeat {
     #[serde(default)]
     reason: String,
     resources: Option<nodeharbor_core::Resources>,
+    #[serde(default)]
+    allow_ci: bool,
+    #[serde(default)]
+    allow_services: bool,
+    #[serde(default)]
+    permitted: bool,
 }
 async fn heartbeat(
     Extract(state): Extract<State>,
@@ -353,6 +363,7 @@ async fn heartbeat(
     {
         return Err(ApiError::bad("Invalid worker status"));
     }
+    let mut transaction = state.db.begin().await.map_err(ApiError::internal)?;
     sqlx::query("UPDATE devices SET state=?,reason=?,last_seen=?,resources=? WHERE id=?")
         .bind(input.state)
         .bind(input.reason)
@@ -363,9 +374,13 @@ async fn heartbeat(
                 .map(|r| serde_json::to_string(&r).unwrap_or_default()),
         )
         .bind(&id)
-        .execute(&state.db)
+        .execute(&mut *transaction)
         .await
         .map_err(ApiError::internal)?;
+    sqlx::query("INSERT INTO device_policy(device_id,allow_ci,allow_services,permitted) VALUES(?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET allow_ci=excluded.allow_ci,allow_services=excluded.allow_services,permitted=excluded.permitted")
+        .bind(&id).bind(input.allow_ci).bind(input.allow_services).bind(input.permitted)
+        .execute(&mut *transaction).await.map_err(ApiError::internal)?;
+    transaction.commit().await.map_err(ApiError::internal)?;
     let row =
         sqlx::query("SELECT remote_paused,eligible_ci,eligible_services FROM devices WHERE id=?")
             .bind(&id)

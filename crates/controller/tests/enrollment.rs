@@ -258,3 +258,39 @@ async fn missing_cluster_configuration_never_reports_a_worker_as_prepared_or_dra
         );
     }
 }
+
+#[tokio::test]
+async fn heartbeat_persists_owner_opt_ins_and_omitted_preferences_fail_closed() {
+    let state = State::open("sqlite::memory:", "test-admin").await.unwrap();
+    let app = router(state.clone());
+    let device = enrolled(&app).await;
+    for payload in [
+        json!({"state":"sharing","allowCi":true,"allowServices":false,"permitted":true}),
+        json!({"state":"sharing"}),
+    ] {
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/heartbeat",
+            device["token"].as_str(),
+            payload.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let values: (bool, bool, bool) = sqlx::query_as(
+            "SELECT allow_ci,allow_services,permitted FROM device_policy WHERE device_id=?",
+        )
+        .bind(device["deviceId"].as_str().unwrap())
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            values,
+            (
+                payload["allowCi"] == true,
+                false,
+                payload["permitted"] == true
+            )
+        );
+    }
+}
