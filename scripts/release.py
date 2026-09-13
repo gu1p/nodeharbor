@@ -92,12 +92,16 @@ def publication_action(existing: dict | None, manifest: dict) -> str:
 def github_release(repo: str, tag: str) -> dict | None:
     token=os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
     if not token:raise ValueError('A GitHub release credential is required')
-    request=urllib.request.Request(f'https://api.github.com/repos/{repo}/releases/tags/{tag}',headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json'})
-    try:
-        with urllib.request.urlopen(request,timeout=30) as response:return json.load(response)
-    except urllib.error.HTTPError as error:
-        if error.code==404:return None
-        raise
+    # The tag endpoint returns published releases only. The authenticated list
+    # includes drafts, including releases whose Git tag does not exist yet.
+    page=1
+    while True:
+        request=urllib.request.Request(f'https://api.github.com/repos/{repo}/releases?per_page=100&page={page}',headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json'})
+        with urllib.request.urlopen(request,timeout=30) as response:releases=json.load(response)
+        for item in releases:
+            if item['tag_name']==tag:return item
+        if len(releases)<100:return None
+        page+=1
 
 def publish(folder: Path, version: str, commit: str, repo: str, key: Path):
     manifests=validate_assets(folder,version,commit)

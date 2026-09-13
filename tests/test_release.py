@@ -5,6 +5,8 @@ import unittest
 import json
 import shutil
 import tomllib
+import io
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("release", ROOT / "scripts" / "release.py")
@@ -12,6 +14,38 @@ release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
 
 class ReleaseContract(unittest.TestCase):
+    def test_complete_draft_can_be_found_and_published_before_its_git_tag_exists(self):
+        draft={'id':12,'tag_name':'v0.1.12','draft':True,'target_commitish':'a'*40,'assets':[]}
+        requests=[];commands=[]
+        def response(request, timeout):
+            requests.append(request.full_url)
+            if '/releases/tags/' in request.full_url:
+                raise release.urllib.error.HTTPError(request.full_url,404,'Not Found',{},None)
+            return io.BytesIO(json.dumps([draft]).encode())
+        with tempfile.TemporaryDirectory() as directory:
+            folder=Path(directory);self.fixture(folder)
+            with patch.dict(release.os.environ,{'GH_TOKEN':'test-token'}), patch.object(release.urllib.request,'urlopen',side_effect=response), patch.object(release.subprocess,'run',side_effect=lambda args,**kwargs:commands.append(args)):
+                release.publish(folder,'0.1.12','a'*40,'owner/project',folder/'key')
+        self.assertFalse(any(command[:3]==['gh','release','create'] for command in commands))
+        self.assertIn(['gh','release','edit','v0.1.12','--repo','owner/project','--draft=false','--latest=false'],commands)
+        self.assertTrue(all('/releases?' in url for url in requests))
+
+    def test_draft_lookup_pages_past_newer_releases(self):
+        unrelated=[{'tag_name':f'v1.0.{index}'} for index in range(100)]
+        wanted={'id':12,'tag_name':'v0.1.12','draft':True,'target_commitish':'a'*40}
+        with patch.dict(release.os.environ,{'GH_TOKEN':'test-token'}), patch.object(release.urllib.request,'urlopen',side_effect=[io.BytesIO(json.dumps(unrelated).encode()),io.BytesIO(json.dumps([wanted]).encode())]) as request:
+            self.assertEqual(release.github_release('owner/project','v0.1.12'),wanted)
+        self.assertIn('page=2',request.call_args.args[0].full_url)
+
+    def test_missing_release_is_distinct_from_missing_repository_access(self):
+        error=release.urllib.error.HTTPError('https://api.github.com',404,'Not Found',{},None)
+        with patch.dict(release.os.environ,{'GH_TOKEN':'test-token'}), patch.object(release.urllib.request,'urlopen',return_value=io.BytesIO(b'[]')):
+            self.assertIsNone(release.github_release('owner/project','v0.1.12'))
+        with patch.dict(release.os.environ,{'GH_TOKEN':'test-token'}), patch.object(release.urllib.request,'urlopen',side_effect=error):
+            with self.assertRaises(release.urllib.error.HTTPError):
+                release.github_release('owner/project','v0.1.12')
+        error.close()
+
     def fixture(self, folder):
         for target, (os_name, arch, extensions) in release.TARGETS.items():
             assets=[]

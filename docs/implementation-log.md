@@ -154,8 +154,19 @@ shutdown finish. Regression checks cover each case, including restart recovery.
 
 ## Remaining acceptance work
 
+Controller telemetry has now been deployed and checked against the live
+Prometheus, Tempo and Loki APIs. The Grafana dashboard and scoped event collection
+are managed by the infrastructure repository. This does not verify an
+authenticated browser session or actual contributed worker execution.
+
+The first `main` release passed all five native builds and the container gates,
+then stopped during draft publication. A regression test reproduced GitHub's
+published-only tag lookup returning 404 for a complete draft. The release tool
+now uses GitHub's authenticated, paginated release listing so it can resume and
+publish the existing draft without relaxing source identity or asset checks.
+
 - Verify Kubernetes API, pod DNS and MTU connectivity from a real contributed VM.
-- Deploy and verify controller telemetry and the stateless acceptance workload.
+- Deploy and verify the stateless acceptance workload.
   Contributed runner pools and real no-capacity failures have been validated in
   the infrastructure project; successful contributed execution remains pending.
 - Verify worker recreation and runtime updates on real contributed machines;
