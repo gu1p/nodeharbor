@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { defaultPolicy } from './model';
 import { mockIPC, clearMocks } from '@tauri-apps/api/mocks';
 
 afterEach(() => { clearMocks(); vi.resetModules(); });
@@ -17,4 +18,12 @@ describe('The native desktop bridge', () => {
       { cmd: 'enroll', payload: { url: 'https://workers.example.com', code: 'one-use-code' } },
     ]);
   });
+});
+
+it('passes explicitly confirmed replacement through the native worker command',async()=>{
+ const commands: {cmd:string;payload:unknown}[]=[];
+ mockIPC((cmd,payload)=>{commands.push({cmd,payload}); return {state:'paused'};});
+ const {backend}=await import('./backend');
+ await (backend as typeof backend & {recreateWorker:(policy:ReturnType<typeof defaultPolicy>)=>Promise<unknown>}).recreateWorker(defaultPolicy());
+ expect(commands).toEqual([{cmd:'recreate_worker',payload:{policy:defaultPolicy()}}]);
 });

@@ -11,6 +11,25 @@ use tauri::{
     AppHandle, Manager, State,
 };
 use tauri_plugin_autostart::ManagerExt;
+mod settings;
+
+struct NativeStartup<'a>(&'a AppHandle);
+impl settings::StartupRegistration for NativeStartup<'_> {
+    fn is_enabled(&self) -> Result<bool, String> {
+        self.0
+            .autolaunch()
+            .is_enabled()
+            .map_err(|error| error.to_string())
+    }
+    fn set_enabled(&self, enabled: bool) -> Result<(), String> {
+        let result = if enabled {
+            self.0.autolaunch().enable()
+        } else {
+            self.0.autolaunch().disable()
+        };
+        result.map_err(|error| error.to_string())
+    }
+}
 
 struct Desktop {
     agent: Agent,
@@ -30,26 +49,31 @@ async fn save_policy(
     policy: Policy,
 ) -> Result<Snapshot, String> {
     let _settings = state.settings.lock().await;
-    let previous = state.agent.store.load().map_err(|e| e.to_string())?.policy;
-    let result = state
-        .agent
-        .save_policy(policy.clone())
-        .await
-        .map_err(|e| e.to_string())?;
-    let autostart = app.autolaunch();
-    let registered = if policy.start_at_login {
-        autostart.enable()
-    } else {
-        autostart.disable()
-    };
-    if let Err(error) = registered {
-        state.agent.store.update(|config| { config.policy = previous; Ok(()) })
-            .map_err(|rollback| format!("Could not update start at login: {error}. Settings rollback failed: {rollback}"))?;
-        return Err(format!(
-            "Could not update start at login: {error}. Your previous settings were restored."
-        ));
-    }
-    Ok(result)
+    settings::save_with_startup(&NativeStartup(&app), policy.start_at_login, || async {
+        state
+            .agent
+            .save_policy(policy)
+            .await
+            .map_err(|error| error.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn recreate_worker(
+    app: AppHandle,
+    state: State<'_, Desktop>,
+    policy: Policy,
+) -> Result<Snapshot, String> {
+    let _settings = state.settings.lock().await;
+    settings::save_with_startup(&NativeStartup(&app), policy.start_at_login, || async {
+        state
+            .agent
+            .recreate_worker(policy)
+            .await
+            .map_err(|error| error.to_string())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -161,6 +185,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             snapshot,
             save_policy,
+            recreate_worker,
             worker_action,
             enroll,
             fleet

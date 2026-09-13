@@ -95,6 +95,8 @@ pub struct VmInfo {
     #[serde(default)]
     pub reachable: bool,
     #[serde(default)]
+    pub stopped: bool,
+    #[serde(default)]
     pub addresses: Vec<String>,
 }
 pub struct Vm {
@@ -194,6 +196,7 @@ impl Vm {
                     Some("Stopped" | "Suspended" | "Deleted")
                 ),
                 reachable: item["state"] == "Running",
+                stopped: item["state"] == "Stopped",
                 addresses: item["ipv4"]
                     .as_array()
                     .map(|items| {
@@ -279,6 +282,36 @@ impl Vm {
                 60,
             )
             .await?;
+        }
+        Ok(())
+    }
+    /// Remove only this device's receipt-owned, stopped instance. Inventory is
+    /// authoritative on retries after a crash between deletion and bookkeeping.
+    pub async fn remove(&self) -> Result<()> {
+        let owned = self.has_receipt()?;
+        let info = self.info().await?;
+        if info.installed {
+            anyhow::ensure!(
+                owned,
+                "The worker has no ownership receipt; it has been left untouched"
+            );
+            anyhow::ensure!(
+                info.stopped,
+                "Multipass must confirm the worker is stopped before deleting its disk"
+            );
+            self.command(
+                vec!["delete".into(), "--purge".into(), self.name.clone()],
+                None,
+                60,
+            )
+            .await?;
+            anyhow::ensure!(
+                !self.info().await?.installed,
+                "Multipass has not confirmed that the worker disk was removed"
+            );
+        }
+        if owned {
+            std::fs::remove_file(self.receipt.as_ref().context("No VM receipt path")?)?;
         }
         Ok(())
     }

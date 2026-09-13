@@ -11,6 +11,13 @@ use uuid::Uuid;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkerRecreation {
+    pub request_id: Uuid,
+    pub access_removed: bool,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Configuration {
     pub format_version: u32,
     pub device_id: String,
@@ -30,6 +37,8 @@ pub struct Configuration {
     pub vm_configured: bool,
     #[serde(default)]
     pub allocated_resources: Option<nodeharbor_core::Resources>,
+    #[serde(default)]
+    pub recreation: Option<WorkerRecreation>,
 }
 impl Default for Configuration {
     fn default() -> Self {
@@ -46,6 +55,7 @@ impl Default for Configuration {
             vm_created: false,
             vm_configured: false,
             allocated_resources: None,
+            recreation: None,
         }
     }
 }

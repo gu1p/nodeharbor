@@ -40,6 +40,8 @@ pub struct Snapshot {
     pub reason: String,
     pub policy: Policy,
     pub resources: Resources,
+    pub allocated_resources: Option<Resources>,
+    pub recreation_pending: bool,
     pub worker: VmInfo,
     pub enrolled: bool,
     pub controller_url: String,
@@ -82,6 +84,8 @@ impl Agent {
             reason: runtime.reason.unwrap_or(decision.reason),
             policy: config.policy,
             resources: observation.resources,
+            allocated_resources: config.allocated_resources,
+            recreation_pending: config.recreation.is_some(),
             worker: runtime.worker,
             enrolled: config.device_token.is_some(),
             controller_url: config.controller_url.unwrap_or_default(),
@@ -93,6 +97,10 @@ impl Agent {
         let host = self.snapshot().await?.resources;
         validate_policy(&policy, &host).map_err(anyhow::Error::msg)?;
         self.store.update(|config| {
+            anyhow::ensure!(
+                config.recreation.is_none(),
+                "Wait for worker replacement to finish before changing sharing rules"
+            );
             if let Some(allocated) = &config.allocated_resources {
                 anyhow::ensure!(
                     policy.resources.disk_gib >= allocated.disk_gib,
@@ -113,6 +121,41 @@ impl Agent {
         })?;
         self.snapshot().await
     }
+    /// Called only by the explicit disk-deletion confirmation. The supervisor
+    /// performs cleanup from the durable request; the UI never deletes a VM.
+    pub async fn recreate_worker(&self, mut policy: Policy) -> Result<Snapshot> {
+        let host = self.snapshot().await?.resources;
+        policy.enabled = false;
+        validate_policy(&policy, &host).map_err(anyhow::Error::msg)?;
+        self.store.update(|config| {
+            anyhow::ensure!(
+                config.recreation.is_none(),
+                "Worker replacement is already pending"
+            );
+            anyhow::ensure!(
+                config.device_token.is_some(),
+                "Connect this computer to a fleet first"
+            );
+            let vm = Vm::managed(
+                &config.device_id,
+                &self.store.directory,
+                self.runner.clone(),
+            )?;
+            anyhow::ensure!(
+                vm.has_receipt()?,
+                "The worker has no ownership receipt; it has been left untouched"
+            );
+            config.policy = policy;
+            config.prepare_requested = false;
+            config.recreation = Some(crate::store::WorkerRecreation {
+                request_id: uuid::Uuid::new_v4(),
+                access_removed: false,
+            });
+            config.draining_since.get_or_insert_with(now_seconds);
+            Ok(())
+        })?;
+        self.snapshot().await
+    }
     pub async fn action(&self, action: &str) -> Result<Snapshot> {
         anyhow::ensure!(
             ["prepare", "resume", "pause", "stop"].contains(&action),
@@ -120,6 +163,10 @@ impl Agent {
         );
         self.store.update(|config| {
             if action == "prepare" || action == "resume" {
+                anyhow::ensure!(
+                    config.recreation.is_none(),
+                    "Wait for worker replacement to finish before preparing or sharing"
+                );
                 anyhow::ensure!(
                     config.device_token.is_some(),
                     "Connect this computer to a fleet first"
@@ -363,6 +410,9 @@ impl Agent {
         let owned = config.vm_created || vm.has_receipt()?;
         if config.stop_requested {
             return self.finish_immediate_stop().await;
+        }
+        if config.recreation.is_some() {
+            return self.recreate_inner(&config, &vm).await;
         }
         if config.prepare_requested && config.vm_configured {
             // An already prepared worker uses the normal policy and drain flow,
@@ -623,6 +673,79 @@ impl Agent {
             return Err(error);
         }
         self.heartbeat(&config).await?;
+        Ok(())
+    }
+    async fn recreate_inner(&self, config: &Configuration, vm: &Vm) -> Result<()> {
+        let request = config
+            .recreation
+            .as_ref()
+            .context("No worker replacement is pending")?;
+        let info = vm.info().await?;
+        self.runtime.lock().await.worker = info.clone();
+        if info.running {
+            self.set_status(
+                "draining",
+                "Draining running work before replacing the worker disk",
+            )
+            .await;
+            let drain = self.request(config, "/device/drain", Some(json!({}))).await;
+            if info.reachable {
+                vm.renew_lease().await?;
+                let workloads = vm.workloads().await?;
+                let empty = workloads.is_empty();
+                self.runtime.lock().await.workloads = workloads;
+                if empty && drain.is_ok() {
+                    vm.stop().await?;
+                    self.clear_drain()?;
+                    self.runtime.lock().await.worker.running = false;
+                }
+            }
+            drain?;
+            return Ok(());
+        }
+        self.clear_drain()?;
+        self.set_status(
+            "replacing",
+            "Removing the previous worker's access and disk",
+        )
+        .await;
+        if !request.access_removed {
+            self.request(
+                config,
+                "/device/reset",
+                Some(json!({"requestId":request.request_id})),
+            )
+            .await?;
+            self.store.update(|current| {
+                current
+                    .recreation
+                    .as_mut()
+                    .context("Worker replacement is no longer pending")?
+                    .access_removed = true;
+                Ok(())
+            })?;
+        }
+        vm.remove().await?;
+        self.store.update(|current| {
+            current.vm_created = false;
+            current.vm_configured = false;
+            current.allocated_resources = None;
+            current.prepare_requested = false;
+            current.policy.enabled = false;
+            current.recreation = None;
+            current.draining_since = None;
+            Ok(())
+        })?;
+        {
+            let mut runtime = self.runtime.lock().await;
+            runtime.worker = VmInfo::default();
+            runtime.workloads.clear();
+        }
+        self.set_status(
+            "paused",
+            "Previous worker removed. Prepare the replacement when you are ready",
+        )
+        .await;
         Ok(())
     }
     fn begin_drain(&self) -> Result<Configuration> {
