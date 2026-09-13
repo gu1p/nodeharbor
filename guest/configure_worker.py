@@ -172,6 +172,9 @@ Wants=network-online.target
 Requires=netbird.service
 [Service]
 Type=notify
+# Match the upstream K3s unit; the owner agent bounds preparation and renews
+# the guest watchdog lease while waiting for K3s's actual readiness notification.
+TimeoutStartSec=0
 ExecStart=/usr/local/bin/k3s agent --config /etc/rancher/k3s/config.yaml
 Restart=always
 RestartSec=10

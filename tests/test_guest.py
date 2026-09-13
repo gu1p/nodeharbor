@@ -112,6 +112,15 @@ class GuestNetworkConfiguration(unittest.TestCase):
             self.assertEqual(resolver.read_text(),resolver_text)
             return commands,writes,str(resolver)
 
+    def test_slow_k3s_startup_waits_for_real_readiness_under_the_owners_deadline(self):
+        import configparser
+        _,writes,_=self.prepare('nameserver 192.168.64.1\n')
+        service=configparser.ConfigParser(interpolation=None)
+        service.read_string(writes['/etc/systemd/system/k3s-agent.service'])
+        self.assertEqual(service['Service']['Type'],'notify')
+        self.assertEqual(service['Service'].get('TimeoutStartSec'),'0',
+            'K3s must not be killed by systemd before the supervising owner\'s bounded preparation operation expires')
+
     def test_preparation_restarts_services_to_apply_new_binaries_and_worker_configuration(self):
         commands,writes,_=self.prepare('nameserver 192.168.64.1\n')
         for service in ['netbird','k3s-agent']:
