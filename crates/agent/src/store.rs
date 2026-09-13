@@ -23,6 +23,8 @@ pub struct Configuration {
     #[serde(default)]
     pub stop_requested: bool,
     #[serde(default)]
+    pub draining_since: Option<u64>,
+    #[serde(default)]
     pub vm_created: bool,
     #[serde(default)]
     pub vm_configured: bool,
@@ -40,6 +42,7 @@ impl Default for Configuration {
             device_token: None,
             prepare_requested: false,
             stop_requested: false,
+            draining_since: None,
             vm_created: false,
             vm_configured: false,
             allocated_resources: None,

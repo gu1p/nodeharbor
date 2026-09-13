@@ -121,6 +121,7 @@ async fn an_unavailable_controller_cannot_prevent_the_owners_stop_deadline() {
 struct UnreachableGuest {
     halted: std::sync::atomic::AtomicBool,
     calls: Mutex<Vec<Vec<String>>>,
+    stop_delay: Duration,
 }
 #[async_trait]
 impl Runner for UnreachableGuest {
@@ -135,6 +136,7 @@ impl Runner for UnreachableGuest {
         // Multipass can return success for an ordinary stop in Unknown state
         // without halting the hypervisor. Only its supported forced stop does so.
         if args[0] == "stop" && args.iter().any(|arg| arg == "--force") {
+            tokio::time::sleep(self.stop_delay).await;
             self.halted.store(true, Ordering::SeqCst);
         }
         let stdout = if args[0] == "list" {
@@ -158,6 +160,15 @@ impl Runner for UnreachableGuest {
 #[tokio::test]
 async fn an_unreachable_configured_worker_is_halted_when_the_owner_deadline_expires() {
     use std::sync::atomic::Ordering;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().fallback(|| async {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"temporarily unavailable"})),
+        )
+    });
+    let server = tokio::spawn(axum::serve(listener, app).into_future());
     let dir = tempfile::tempdir().unwrap();
     let guest = Arc::new(UnreachableGuest::default());
     let agent = Agent::open_with_runner(dir.path(), guest.clone()).unwrap();
@@ -166,7 +177,7 @@ async fn an_unreachable_configured_worker_is_halted_when_the_owner_deadline_expi
         .update(|config| {
             config.device_id = ID.into();
             config.device_token = Some("test-token".into());
-            config.controller_url = Some("http://127.0.0.1:9".into());
+            config.controller_url = Some(url);
             config.vm_created = true;
             config.vm_configured = true;
             config.policy.enabled = false;
@@ -196,4 +207,263 @@ async fn an_unreachable_configured_worker_is_halted_when_the_owner_deadline_expi
             .any(|args| args[0] == "exec"),
         "An unreachable guest cannot perform an in-guest shutdown"
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn pausing_during_a_stalled_controller_request_obeys_the_owner_deadline() {
+    use std::sync::atomic::Ordering;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .fallback(
+            |State(entered): State<Arc<tokio::sync::Notify>>| async move {
+                entered.notify_one();
+                std::future::pending::<Json<serde_json::Value>>().await
+            },
+        )
+        .with_state(entered.clone());
+    let server = tokio::spawn(axum::serve(listener, app).into_future());
+    let dir = tempfile::tempdir().unwrap();
+    let guest = Arc::new(UnreachableGuest::default());
+    let agent = Agent::open_with_runner(dir.path(), guest.clone()).unwrap();
+    agent
+        .store
+        .update(|config| {
+            config.device_id = ID.into();
+            config.device_token = Some("test-token".into());
+            config.controller_url = Some(url);
+            config.vm_created = true;
+            config.vm_configured = true;
+            config.policy.enabled = true;
+            config.policy.drain_seconds = 0;
+            config.allocated_resources = Some(config.policy.resources.clone());
+            Ok(())
+        })
+        .unwrap();
+    std::fs::write(
+        dir.path().join(format!("{NAME}.receipt.json")),
+        json!({"version":1,"deviceId":ID,"name":NAME}).to_string(),
+    )
+    .unwrap();
+    let supervisor = agent.clone();
+    let mut tick = tokio::spawn(async move { supervisor.tick().await });
+    tokio::time::timeout(Duration::from_secs(3), entered.notified())
+        .await
+        .unwrap();
+    let owner = Agent::open_with_runner(dir.path(), guest.clone()).unwrap();
+    owner.action("pause").await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), &mut tick).await;
+    if result.is_err() {
+        tick.abort();
+    }
+    server.abort();
+    result
+        .expect("Local drain deadlines cannot wait for a stalled HTTP request")
+        .unwrap()
+        .unwrap();
+    assert!(guest.halted.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn pausing_records_one_durable_deadline_and_repeated_pause_does_not_extend_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = Agent::open_with_runner(dir.path(), Arc::new(UnreachableGuest::default())).unwrap();
+    agent
+        .store
+        .update(|config| {
+            config.device_id = ID.into();
+            config.device_token = Some("test-token".into());
+            config.vm_created = true;
+            config.vm_configured = true;
+            config.policy.enabled = true;
+            config.policy.drain_seconds = 300;
+            Ok(())
+        })
+        .unwrap();
+    agent.action("pause").await.unwrap();
+    let first = serde_json::to_value(agent.store.load().unwrap()).unwrap()["drainingSince"]
+        .as_u64()
+        .expect("Persist the start of the owner's drain before returning from Pause");
+    agent.action("pause").await.unwrap();
+    let reopened =
+        Agent::open_with_runner(dir.path(), Arc::new(UnreachableGuest::default())).unwrap();
+    assert_eq!(
+        serde_json::to_value(reopened.store.load().unwrap()).unwrap()["drainingSince"],
+        first
+    );
+}
+
+#[tokio::test]
+async fn restarting_supervision_does_not_restart_an_expired_drain_deadline() {
+    use std::sync::atomic::Ordering;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(
+        axum::serve(
+            listener,
+            Router::new().fallback(|| async {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error":"temporarily unavailable"})),
+                )
+            }),
+        )
+        .into_future(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let guest = Arc::new(UnreachableGuest::default());
+    let before = Agent::open_with_runner(dir.path(), guest.clone()).unwrap();
+    before
+        .store
+        .update(|config| {
+            config.device_id = ID.into();
+            config.device_token = Some("test-token".into());
+            config.controller_url = Some(url);
+            config.vm_created = true;
+            config.vm_configured = true;
+            config.policy.enabled = false;
+            config.policy.drain_seconds = 1;
+            Ok(())
+        })
+        .unwrap();
+    let mut saved = serde_json::to_value(before.store.load().unwrap()).unwrap();
+    saved["drainingSince"] = json!(chrono::Utc::now().timestamp() - 10);
+    std::fs::write(
+        dir.path().join("config.json"),
+        serde_json::to_vec(&saved).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join(format!("{NAME}.receipt.json")),
+        json!({"version":1,"deviceId":ID,"name":NAME}).to_string(),
+    )
+    .unwrap();
+    drop(before);
+    let restarted = Agent::open_with_runner(dir.path(), guest.clone()).unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(2), restarted.tick())
+        .await
+        .unwrap();
+    assert!(
+        guest.halted.load(Ordering::SeqCst),
+        "A restart must not grant a fresh grace period"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn an_expired_deadline_does_not_cancel_a_forced_stop_in_progress() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let guest = Arc::new(UnreachableGuest {
+        stop_delay: Duration::from_millis(600),
+        ..Default::default()
+    });
+    let agent = Agent::open_with_runner(dir.path(), guest.clone()).unwrap();
+    agent
+        .store
+        .update(|config| {
+            config.device_id = ID.into();
+            config.device_token = Some("test-token".into());
+            config.vm_created = true;
+            config.vm_configured = true;
+            config.policy.enabled = true;
+            config.policy.drain_seconds = 0;
+            Ok(())
+        })
+        .unwrap();
+    std::fs::write(
+        dir.path().join(format!("{NAME}.receipt.json")),
+        json!({"version":1,"deviceId":ID,"name":NAME}).to_string(),
+    )
+    .unwrap();
+    agent.action("pause").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), agent.tick())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(guest.halted.load(Ordering::SeqCst));
+    assert_eq!(
+        guest
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|args| args[0] == "stop")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn shortening_a_drain_deadline_wakes_an_idle_supervisor_before_its_next_heartbeat() {
+    use std::sync::atomic::Ordering;
+    let completed = Arc::new(tokio::sync::Notify::new());
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().fallback({
+        let completed = completed.clone();
+        let count = count.clone();
+        move || {
+            let completed = completed.clone();
+            let count = count.clone();
+            async move {
+                if count.fetch_add(1, Ordering::SeqCst) == 1 {
+                    completed.notify_one();
+                }
+                Json(json!({"remotePaused":false}))
+            }
+        }
+    });
+    let server = tokio::spawn(axum::serve(listener, app).into_future());
+    let dir = tempfile::tempdir().unwrap();
+    let guest = Arc::new(UnreachableGuest::default());
+    let agent = Agent::open_with_runner(dir.path(), guest.clone()).unwrap();
+    agent
+        .store
+        .update(|config| {
+            config.device_id = ID.into();
+            config.device_token = Some("test-token".into());
+            config.controller_url = Some(url);
+            config.vm_created = true;
+            config.vm_configured = true;
+            config.policy.enabled = false;
+            config.policy.resources = nodeharbor_core::Resources {
+                cpus: 1,
+                memory_mib: 2048,
+                disk_gib: 15,
+            };
+            config.allocated_resources = Some(config.policy.resources.clone());
+            config.policy.drain_seconds = 300;
+            Ok(())
+        })
+        .unwrap();
+    std::fs::write(
+        dir.path().join(format!("{NAME}.receipt.json")),
+        json!({"version":1,"deviceId":ID,"name":NAME}).to_string(),
+    )
+    .unwrap();
+    let supervisor = agent.clone();
+    let running = tokio::spawn(async move { supervisor.run().await });
+    tokio::time::timeout(Duration::from_secs(3), completed.notified())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!guest.halted.load(Ordering::SeqCst));
+    let owner = Agent::open_with_runner(dir.path(), guest.clone()).unwrap();
+    let mut policy = owner.store.load().unwrap().policy;
+    policy.drain_seconds = 0;
+    owner.save_policy(policy).await.unwrap();
+    owner.action("pause").await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), async {
+        while !guest.halted.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    running.abort();
+    server.abort();
+    result.expect("An idle supervisor must observe owner actions before its next heartbeat");
 }

@@ -16,10 +16,10 @@ struct Runtime {
     state: Option<String>,
     reason: Option<String>,
     worker: VmInfo,
-    draining_since: Option<u64>,
     workloads: Vec<Value>,
     remote_paused: bool,
     starting: Option<Starting>,
+    stopping_now: bool,
 }
 #[derive(Clone)]
 pub struct Agent {
@@ -106,6 +106,9 @@ impl Agent {
                 );
             }
             config.policy = policy;
+            if config.vm_configured && local_drain_required(config, &self.store.directory) {
+                config.draining_since.get_or_insert_with(now_seconds);
+            }
             Ok(())
         })?;
         self.snapshot().await
@@ -134,10 +137,14 @@ impl Agent {
                     );
                     config.policy.enabled = true;
                     config.stop_requested = false;
+                    config.draining_since = None;
                 }
                 "pause" => {
                     config.policy.enabled = false;
                     config.prepare_requested = false;
+                    if config.vm_created {
+                        config.draining_since.get_or_insert_with(now_seconds);
+                    }
                 }
                 "stop" => {
                     config.policy.enabled = false;
@@ -247,14 +254,27 @@ impl Agent {
             if let Err(error) = self.tick().await {
                 self.set_status("error", error.to_string()).await;
             }
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            let saved = serde_json::to_value(self.store.load()?)?;
+            let next = tokio::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let current = self.store.load()?;
+                if current.stop_requested
+                    || deadline_expired(&current)
+                    || serde_json::to_value(&current)? != saved
+                    || tokio::time::Instant::now() >= next
+                {
+                    break;
+                }
+            }
         }
     }
     pub async fn tick(&self) -> Result<()> {
         let _operation = self.operation.lock().await;
-        if self.store.load()?.stop_requested {
+        let config = self.store.load()?;
+        if config.stop_requested || deadline_expired(&config) {
             // Shutdown itself must finish before another shutdown is issued.
-            return self.tick_inner().await;
+            return self.finish_immediate_stop().await;
         }
         // The losing future is dropped before shutdown. MultipassRunner kills
         // its CLI child on drop; the owned VM is stopped through Multipass itself.
@@ -266,35 +286,40 @@ impl Agent {
         if let Some(result) = outcome {
             return result;
         }
-        let config = self.store.update(|current| {
-            // Keep retrying if the hypervisor rejects this shutdown attempt.
-            current.stop_requested = true;
+        self.finish_immediate_stop().await
+    }
+    async fn finish_immediate_stop(&self) -> Result<()> {
+        self.runtime.lock().await.stopping_now = true;
+        let result = async {
+            let config = self.store.update(|current| {
+                // A failed shutdown is retried even after the agent restarts.
+                current.stop_requested = true;
+                Ok(())
+            })?;
+            let vm = Vm::managed(
+                &config.device_id,
+                &self.store.directory,
+                self.runner.clone(),
+            )?;
+            if (config.vm_created || vm.has_receipt()?) && vm.info().await?.running {
+                vm.stop_now().await?;
+            }
+            self.store.update(|current| {
+                current.stop_requested = false;
+                current.draining_since = None;
+                Ok(())
+            })?;
+            {
+                let mut runtime = self.runtime.lock().await;
+                runtime.worker.running = false;
+                runtime.workloads.clear();
+            }
+            self.set_status("paused", "Worker stopped").await;
             Ok(())
-        })?;
-        let vm = Vm::managed(
-            &config.device_id,
-            &self.store.directory,
-            self.runner.clone(),
-        )?;
-        if (config.vm_created || vm.has_receipt()?) && vm.info().await?.running {
-            vm.stop_now().await?;
         }
-        self.store.update(|current| {
-            current.stop_requested = false;
-            Ok(())
-        })?;
-        {
-            let mut runtime = self.runtime.lock().await;
-            runtime.worker.running = false;
-            runtime.draining_since = None;
-            runtime.workloads.clear();
-        }
-        self.set_status(
-            "paused",
-            "Worker stopped; preparation can be retried when you are ready",
-        )
         .await;
-        Ok(())
+        self.runtime.lock().await.stopping_now = false;
+        result
     }
     async fn wait_for_owner_interruption(&self) -> Result<()> {
         loop {
@@ -302,12 +327,16 @@ impl Agent {
             // Poll the atomic store so installer actions in another process are
             // observed too. A normal pause of running workloads still drains.
             let config = self.store.load()?;
-            let pause = match self.runtime.lock().await.starting {
+            let runtime = self.runtime.lock().await;
+            if runtime.stopping_now {
+                continue;
+            }
+            let pause = match runtime.starting {
                 Some(Starting::Preparation) => !config.prepare_requested,
                 Some(Starting::Resume) => !config.policy.enabled,
                 None => false,
             };
-            if config.stop_requested || pause {
+            if config.stop_requested || pause || deadline_expired(&config) {
                 return Ok(());
             }
         }
@@ -329,16 +358,7 @@ impl Agent {
         )?;
         let owned = config.vm_created || vm.has_receipt()?;
         if config.stop_requested {
-            if owned && vm.info().await?.running {
-                vm.stop_now().await?;
-            }
-            self.store.update(|c| {
-                c.stop_requested = false;
-                Ok(())
-            })?;
-            self.runtime.lock().await.worker.running = false;
-            self.set_status("paused", "Worker stopped").await;
-            return Ok(());
+            return self.finish_immediate_stop().await;
         }
         if config.prepare_requested && config.vm_configured {
             // An already prepared worker uses the normal policy and drain flow,
@@ -438,15 +458,7 @@ impl Agent {
             return Ok(());
         }
         if config.stop_requested && info.running {
-            vm.stop_now().await?;
-            self.store.update(|c| {
-                c.stop_requested = false;
-                Ok(())
-            })?;
-            self.runtime.lock().await.worker.running = false;
-            self.set_status("paused", "Worker stopped").await;
-            self.heartbeat(&config).await?;
-            return Ok(());
+            return self.finish_immediate_stop().await;
         }
         let resize_pending = config.vm_configured
             && config.allocated_resources.as_ref() != Some(&config.policy.resources);
@@ -464,7 +476,21 @@ impl Agent {
             .await;
             return Ok(());
         }
-        let heartbeat_error = self.heartbeat(&config).await.err();
+        let was_draining = config.draining_since.is_some();
+        // Record local restrictions before HTTP or guest inspection can stall.
+        if info.running && local_drain_required(&config, &self.store.directory) {
+            let current = self.begin_drain()?;
+            if deadline_expired(&current) {
+                return self.finish_immediate_stop().await;
+            }
+        } else if !info.running {
+            self.clear_drain()?;
+        }
+        let heartbeat_error = self.heartbeat(&self.store.load()?).await.err();
+        // Owner actions can arrive from another process during the request.
+        let config = self.store.load()?;
+        let resize_pending = config.vm_configured
+            && config.allocated_resources.as_ref() != Some(&config.policy.resources);
         let observation = crate::observe::observation(
             &self.store.directory,
             config
@@ -478,6 +504,12 @@ impl Agent {
             && !resize_pending
             && heartbeat_error.is_none()
             && !self.runtime.lock().await.remote_paused;
+        if info.running && !allowed {
+            let current = self.begin_drain()?;
+            if deadline_expired(&current) {
+                return self.finish_immediate_stop().await;
+            }
+        }
         // An unreachable guest has an unknown workload count, not an empty one.
         // Keep the grace period, but never let a failed inspection cancel its deadline.
         let workloads = if info.running && info.reachable {
@@ -487,12 +519,13 @@ impl Agent {
         } else {
             Some(Vec::new())
         };
-        let now = chrono::Utc::now().timestamp().max(0) as u64;
-        let draining_since = self.runtime.lock().await.draining_since;
+        let now = now_seconds();
+        let draining_since = self.store.load()?.draining_since;
         let transition = worker_transition(&WorkerInput {
             permitted: allowed,
             running: info.running,
-            draining_since,
+            // The first drain still tells the controller to stop assignments.
+            draining_since: if was_draining { draining_since } else { None },
             now,
             drain_seconds: config.policy.drain_seconds,
             workloads: workloads.as_ref().map_or(usize::MAX, Vec::len),
@@ -513,8 +546,8 @@ impl Agent {
                 {
                     let mut runtime = self.runtime.lock().await;
                     runtime.starting = None;
-                    runtime.draining_since = None;
                 }
+                self.clear_drain_if_permitted()?;
             }
             WorkerAction::Drain => {
                 self.set_status(
@@ -526,8 +559,6 @@ impl Agent {
                     },
                 )
                 .await;
-                // Start the local timer before attempting network operations.
-                self.runtime.lock().await.draining_since = Some(now);
                 let drain = self
                     .request(&config, "/device/drain", Some(json!({})))
                     .await;
@@ -537,6 +568,8 @@ impl Agent {
                 drain?;
             }
             WorkerAction::Wait => {
+                self.set_status("draining", "Waiting for running work to finish")
+                    .await;
                 // Evictions denied by a disruption budget must be retried as work finishes.
                 let drain = self
                     .request(&config, "/device/drain", Some(json!({})))
@@ -551,19 +584,18 @@ impl Agent {
                     now.saturating_sub(since) >= u64::from(config.policy.drain_seconds)
                 });
                 if deadline_expired {
-                    vm.stop_now().await?;
+                    return self.finish_immediate_stop().await;
                 } else {
                     vm.stop().await?;
                 }
-                let mut runtime = self.runtime.lock().await;
-                runtime.worker.running = false;
-                runtime.draining_since = None;
+                self.clear_drain()?;
+                self.runtime.lock().await.worker.running = false;
             }
             WorkerAction::Keep if info.running => {
                 if draining_since.is_some() {
                     self.request(&config, "/device/resume", Some(json!({})))
                         .await?;
-                    self.runtime.lock().await.draining_since = None;
+                    self.clear_drain_if_permitted()?;
                 }
                 vm.renew_lease().await?;
                 self.set_status("sharing", "Your worker is available for eligible workloads")
@@ -589,6 +621,28 @@ impl Agent {
         self.heartbeat(&config).await?;
         Ok(())
     }
+    fn begin_drain(&self) -> Result<Configuration> {
+        self.store.update(|config| {
+            config.draining_since.get_or_insert_with(now_seconds);
+            Ok(())
+        })
+    }
+    fn clear_drain(&self) -> Result<()> {
+        self.store.update(|config| {
+            config.draining_since = None;
+            Ok(())
+        })?;
+        Ok(())
+    }
+    fn clear_drain_if_permitted(&self) -> Result<()> {
+        self.store.update(|config| {
+            if !config.stop_requested && !local_drain_required(config, &self.store.directory) {
+                config.draining_since = None;
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
     async fn heartbeat(&self, config: &Configuration) -> Result<()> {
         let runtime = self.runtime.lock().await.clone();
         let observation = crate::observe::observation(
@@ -605,6 +659,20 @@ impl Agent {
         self.runtime.lock().await.remote_paused = value["remotePaused"].as_bool().unwrap_or(false);
         Ok(())
     }
+}
+fn now_seconds() -> u64 {
+    chrono::Utc::now().timestamp().max(0) as u64
+}
+fn deadline_expired(config: &Configuration) -> bool {
+    config.draining_since.is_some_and(|since| {
+        now_seconds().saturating_sub(since) >= u64::from(config.policy.drain_seconds)
+    })
+}
+fn local_drain_required(config: &Configuration, directory: &Path) -> bool {
+    let allocated = config.allocated_resources.as_ref();
+    let observation = crate::observe::observation(directory, allocated.map_or(0, |r| r.disk_gib));
+    !evaluate(&config.policy, &observation).allowed
+        || (config.vm_configured && allocated != Some(&config.policy.resources))
 }
 async fn checked(mut response: reqwest::Response) -> Result<Value> {
     let status = response.status();

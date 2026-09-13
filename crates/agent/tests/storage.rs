@@ -1,5 +1,15 @@
 use nodeharbor_agent::Store;
 #[test]
+fn legacy_settings_have_no_active_drain_and_saved_deadlines_round_trip() {
+    let mut value = serde_json::to_value(nodeharbor_agent::Configuration::default()).unwrap();
+    value.as_object_mut().unwrap().remove("drainingSince");
+    let legacy: nodeharbor_agent::Configuration = serde_json::from_value(value.clone()).unwrap();
+    assert!(legacy.draining_since.is_none());
+    value["drainingSince"] = serde_json::json!(12345);
+    let saved: nodeharbor_agent::Configuration = serde_json::from_value(value).unwrap();
+    assert_eq!(saved.draining_since, Some(12345));
+}
+#[test]
 fn restarting_preserves_identity_and_opt_in_preferences() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();

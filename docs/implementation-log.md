@@ -61,6 +61,11 @@ All five native targets passed checks and packaging in these GitHub runs:
 - [Run 34731775785](https://github.com/gu1p/nodeharbor/actions/runs/34731775785):
   all five native targets, packaged-app checks, and controller image publication
   passed. The later owner-cancellation change still needs its own native builds.
+- [Run 34733159697](https://github.com/gu1p/nodeharbor/actions/runs/34733159697):
+  all five native targets, package checks, and container publication passed.
+- [Run 34734769578](https://github.com/gu1p/nodeharbor/actions/runs/34734769578):
+  macOS and Linux passed. Windows exposed a local drain deadline delayed by a
+  controller connection attempt. Publication remained blocked by that failed check.
 
 The native macOS ARM application was launched and inspected with actual IPC and
 host resource information. Its installer and worker acceptance are separate checks.
@@ -70,15 +75,22 @@ silent NSIS installation on Windows. Those checks must pass on their native buil
 
 ## Live deployment status
 
-The private infrastructure repository contains the NetBird bootstrap deployment,
-restricted initialization workflow, and deployment diagnostics. The network server
-is running on an existing cluster node. Private initialization succeeded through
-the existing GitLab Kubernetes agent; its temporary CI credential was removed.
+The private infrastructure repository contains the NetBird deployment and
+deployment diagnostics. Private initialization originally succeeded through the
+existing GitLab Kubernetes agent; its temporary CI credential was removed. The
+initialization workflow was retired after moving management outside Kubernetes.
 Public TLS and STUN checks passed. Both existing fixed hosts are connected through
 the official NetBird client, with explicit peer access policies. Full-MTU packets
 passed in both directions, with no loss in the 30-packet checks and approximately
-1.2 ms average round-trip time after connection establishment. Kubernetes still
-uses its existing private interface; the CNI transition remains separate work.
+1.2 ms average round-trip time after connection establishment. The fixed Kubernetes
+nodes now use the supported Flannel interface setting over
+NetBird, with pod MTU 1230. Their private node addresses and PodCIDR were preserved.
+The management service was moved through the supported combined-server/Traefik
+Compose deployment to the existing secondary server so it can start independently
+of Kubernetes. Database hashes, integrity, existing peer identities and access
+policies were verified after the transfer. All active deployments and daemonsets,
+plus the Kafka broker through Strimzi, adopted the new pod network and returned
+Ready. Cross-node DNS, service routing and intact 512-KiB transfers passed.
 Credentials remain outside this public repository. No additional cloud servers
 have been created.
 
@@ -93,7 +105,7 @@ requests. The existing infrastructure portals remained available.
 The single private Kubernetes API address is declared through NetBird Networks,
 with a TCP-only worker policy. Reapplying the declaration required no API writes.
 This is control-plane routing configuration; end-to-end worker connectivity still
-requires the remaining CNI transition and a real enrolled VM.
+requires a real enrolled VM; the fixed-node CNI transition has passed its live checks.
 
 The local Multipass VM boots Ubuntu but has not obtained a DHCP lease. Guest and
 host packet captures confirm requests without replies. A test involving the host's
@@ -108,10 +120,18 @@ test passed, including ten further supervisor observations. Its temporary VMs
 were removed after verifying they were stopped and had no host directory mounts.
 This verifies local cancellation, not fleet enrollment or workload qualification.
 
+Additional regression tests cover an unreachable configured VM when its owner’s
+drain deadline expires, and a controller response that omits Content-Length. The
+agent now uses the supported immediate shutdown command at the deadline and
+bounds streamed responses before accepting enrollment credentials. Full local
+checks passed for both fixes. The subsequent Windows deadline failure is recorded
+above. The follow-up persists the original drain time, observes it during stalled
+network requests and supervisor idle periods, and lets an already-started forced
+shutdown finish. Regression checks cover each case, including restart recovery.
+
 ## Remaining acceptance work
 
-- Complete Kubernetes connectivity and the supported CNI/MTU rollout while
-  preserving the existing cluster's node addresses and workloads.
+- Verify Kubernetes API, pod DNS and MTU connectivity from a real contributed VM.
 - Deploy telemetry, contributed runner pools, and the stateless acceptance workload.
 - Complete the explicit disk recreation flow and remaining lifecycle recovery;
   verify runtime binary updates and native installer recovery end to end.
