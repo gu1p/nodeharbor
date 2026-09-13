@@ -500,3 +500,44 @@ async fn a_missing_enrollment_does_not_make_an_owned_worker_safe_to_replace() {
     let _ = agent.tick().await;
     assert!(!agent.application_update_ready().await.unwrap_or(false));
 }
+
+#[tokio::test]
+async fn an_earlier_worker_error_does_not_reject_a_new_update_before_inspection() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(Host::default());
+    *host.state.lock().unwrap() = Some("Stopped".into());
+    let (url, _, server) = controller(host.clone()).await;
+    let agent = fixture(dir.path(), host.clone(), &format!("{url}/unavailable"));
+    let supervisor = agent.clone();
+    let task = tokio::spawn(async move { supervisor.run().await });
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if agent.snapshot().await.unwrap().state == "error" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    agent.begin_application_update().await.unwrap();
+    let fresh = agent.application_update_ready().await;
+    assert!(
+        fresh.is_ok(),
+        "A previous failure must not be mistaken for a failed update inspection"
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if agent.application_update_ready().await.unwrap() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(*host.state.lock().unwrap(), Some("Stopped".into()));
+    assert!(agent.store.load().unwrap().policy.enabled);
+    task.abort();
+    server.abort();
+}

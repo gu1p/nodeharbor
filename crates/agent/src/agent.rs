@@ -65,9 +65,15 @@ impl Agent {
             config.application_update_pending = true;
             Ok(())
         })?;
-        let mut runtime = self.runtime.lock().await;
-        runtime.application_update_ready = false;
-        runtime.update_idle_observed = false;
+        {
+            let mut runtime = self.runtime.lock().await;
+            runtime.application_update_ready = false;
+            runtime.update_idle_observed = false;
+        }
+        // A previous operation's error is not the result of this inspection.
+        // Readiness stays false until the supervisor verifies the stopped VM.
+        self.set_status("draining", "Preparing the worker for an application update")
+            .await;
         Ok(())
     }
     pub async fn application_update_ready(&self) -> Result<bool> {
