@@ -18,6 +18,23 @@ import urllib.request
 import uuid
 
 ROOT=Path('/etc/nodeharbor')
+RESOLV_CONF=Path('/run/systemd/resolve/resolv.conf')
+
+def validate_resolver(path):
+    try:lines=path.read_text().splitlines()
+    except OSError as error:raise ValueError('The guest upstream resolver is unavailable') from error
+    count=0
+    for line in lines:
+        fields=line.split('#',1)[0].split()
+        if not fields or fields[0]!='nameserver':continue
+        try:
+            if len(fields)!=2:raise ValueError('Malformed nameserver')
+            address=ipaddress.ip_address(fields[1])
+        except ValueError as error:raise ValueError('The guest upstream resolver has an invalid nameserver') from error
+        if address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified:
+            raise ValueError('The guest upstream resolver is not usable from Kubernetes pods')
+        count+=1
+    if not count:raise ValueError('The guest upstream resolver has no nameservers')
 
 def validate_config(config):
     device=uuid.UUID(config['deviceId'])
@@ -107,12 +124,16 @@ def main():
     config=json.load(sys.stdin);validate_config(config)
     if (ROOT/'device-id').read_text().strip()!=config['deviceId']:
         raise SystemExit('Refusing to configure a VM owned by another device')
+    # Use Ubuntu's DHCP-provided upstream DNS. NetBird must not replace it, and
+    # invalid DNS must not silently fall back to an unrelated public resolver.
+    validate_resolver(RESOLV_CONF)
     install_runtime(config)
     if not Path('/etc/systemd/system/netbird.service').exists():run('/usr/local/bin/netbird','service','install')
     run('systemctl','enable','--now','netbird')
     environment=dict(os.environ)
     if config.get('netbirdSetupKey'):environment['NB_SETUP_KEY']=config['netbirdSetupKey']
-    run('/usr/local/bin/netbird','up','--management-url',config['netbirdManagementUrl'],'--hostname',config['nodeName'],'--mtu','1280',env=environment)
+    run('/usr/local/bin/netbird','up','--management-url',config['netbirdManagementUrl'],'--hostname',config['nodeName'],'--mtu','1280',
+        '--disable-dns','--disable-server-routes','--disable-client-routes=false','--allow-server-ssh=false',env=environment)
     peer_ip=None
     for _ in range(60):
         status=json.loads(run('/usr/local/bin/netbird','status','--json'))
@@ -125,11 +146,10 @@ def main():
     write('/etc/sysctl.d/90-nodeharbor.conf','net.ipv4.ip_forward=1\nnet.bridge.bridge-nf-call-iptables=1\n',0o644)
     run('sysctl','--system')
     write('/etc/rancher/k3s/agent-token',config['k3sToken']+'\n')
-    write('/etc/rancher/k3s/resolv.conf','nameserver 1.1.1.1\nnameserver 8.8.8.8\n',0o644)
     k3s={'server':config['serverUrl'],'token-file':'/etc/rancher/k3s/agent-token','node-name':config['nodeName'],'node-ip':peer_ip,'flannel-iface':'wt0',
          'node-taint':['nodeharbor.sikalio.dev/contributed=true:NoSchedule','nodeharbor.sikalio.dev/quarantine=true:NoSchedule'],
          'node-label':['nodeharbor.sikalio.dev/device='+config['deviceId']],
-         'resolv-conf':'/etc/rancher/k3s/resolv.conf',
+         'resolv-conf':str(RESOLV_CONF),
          'kubelet-arg':['system-reserved=cpu=100m,memory=256Mi','kube-reserved=cpu=150m,memory=256Mi','eviction-hard=memory.available<256Mi,nodefs.available<10%,imagefs.available<15%','container-log-max-size=10Mi','container-log-max-files=2','max-pods=30']}
     write('/etc/rancher/k3s/config.yaml',json.dumps(k3s,indent=2)+'\n')
     unit='''[Unit]

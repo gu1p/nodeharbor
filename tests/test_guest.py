@@ -1,12 +1,13 @@
 import importlib.util
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 ROOT=Path(__file__).resolve().parents[1]
 def module(name):
     spec=importlib.util.spec_from_file_location(name,ROOT/'guest'/f'{name}.py')
@@ -94,3 +95,51 @@ class RuntimeInstallation(unittest.TestCase):
             with patch.object(configure,'download',side_effect=[next(iter(contents.values())),OSError('offline')]):
                 with self.assertRaises(OSError):configure.install_runtime(config,bin_dir=binary,cache_dir=root/'cache')
             for name in ['netbird','k3s']:self.assertEqual((binary/name).read_bytes(),b'old '+name.encode())
+
+class GuestNetworkConfiguration(unittest.TestCase):
+    def prepare(self, resolver_text, install=None):
+        config=GuestContract().config()
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'device-id').write_text(config['deviceId'])
+            resolver=root/'resolv.conf';resolver.write_text(resolver_text)
+            writes={};commands=[]
+            def run(*args, **kwargs):
+                commands.append(args)
+                return json.dumps({'netbirdIp':'100.75.1.2/16'}) if 'status' in args else ''
+            with patch.object(configure,'ROOT',root), patch.object(configure,'RESOLV_CONF',resolver,create=True), patch.object(configure.sys,'platform','linux'), patch.object(configure.os,'geteuid',return_value=0,create=True), patch.object(configure.sys,'stdin',io.StringIO(json.dumps(config))), patch.object(configure,'install_runtime',new=install if install is not None else Mock()), patch.object(configure,'run',side_effect=run), patch.object(configure,'write',side_effect=lambda path,content,mode=0o600:writes.update({str(path):content})):
+                configure.main()
+            self.assertEqual(resolver.read_text(),resolver_text)
+            return commands,writes,str(resolver)
+
+    def test_preparation_preserves_guest_dns_and_uses_its_upstream_resolver_for_pods(self):
+        commands,writes,resolver=self.prepare('nameserver 192.168.64.1\nsearch local.example\n')
+        up=next(args for args in commands if args[:2]==('/usr/local/bin/netbird','up'))
+        for flag in ['--disable-dns','--disable-server-routes','--allow-server-ssh=false']:
+            self.assertIn(flag,up)
+        self.assertIn('--disable-client-routes=false',up,'Keep the authenticated private API route available')
+        k3s=json.loads(writes['/etc/rancher/k3s/config.yaml'])
+        self.assertEqual(k3s['resolv-conf'],resolver)
+        self.assertNotIn('/etc/rancher/k3s/resolv.conf',writes)
+        self.assertEqual(k3s['flannel-iface'],'wt0')
+
+    def test_unusable_guest_dns_is_reported_without_installing_or_starting_a_worker(self):
+        install=Mock()
+        with self.assertRaisesRegex(ValueError,'resolver'):
+            self.prepare('nameserver 127.0.0.53\n',install=install)
+        install.assert_not_called()
+
+class ResolverValidation(unittest.TestCase):
+    def test_only_nonlocal_upstream_nameservers_are_usable_from_pods(self):
+        cases=[('',False),('search example.com\n',False),('nameserver 127.0.0.53\n',False),
+            ('nameserver ::1\n',False),('nameserver 169.254.1.1\n',False),
+            ('nameserver 224.0.0.1\n',False),('nameserver invalid\n',False),
+            ('nameserver 0.0.0.0\n',False),('nameserver\n',False),
+            ('# DHCP resolvers\nnameserver 192.168.64.1\n',True),
+            ('nameserver 10.0.0.53 # upstream\n',True),
+            ('nameserver 192.168.64.1\nnameserver ::1\n',False)]
+        for contents,valid in cases:
+            with self.subTest(contents=contents), tempfile.TemporaryDirectory() as directory:
+                resolver=Path(directory)/'resolv.conf';resolver.write_text(contents)
+                if valid:configure.validate_resolver(resolver)
+                else:
+                    with self.assertRaisesRegex(ValueError,'resolver'):configure.validate_resolver(resolver)
