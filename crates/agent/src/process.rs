@@ -7,14 +7,24 @@ use tokio::{
     process::Command,
 };
 
+#[derive(Clone, Copy)]
+pub enum OutputFormat {
+    Lines,
+    /// Multipass's stdout uses ANSI redraws and a backspace followed by a spinner glyph.
+    Terminal,
+}
+
 async fn read_output(
     mut reader: impl AsyncRead + Unpin,
     stream: OutputStream,
     progress: Option<ProgressSink>,
+    format: OutputFormat,
 ) -> Result<String> {
     let mut output = Vec::new();
     let mut line = Vec::new();
     let mut overflow = false;
+    let terminal = matches!(format, OutputFormat::Terminal) && stream == OutputStream::Stdout;
+    let mut spinner_glyph = false;
     let mut buffer = [0u8; 4096];
     loop {
         let count = reader.read(&mut buffer).await?;
@@ -28,7 +38,15 @@ async fn read_output(
         output.extend_from_slice(&buffer[..count]);
         if let Some(progress) = &progress {
             for byte in &buffer[..count] {
-                if *byte == b'\n' || *byte == b'\r' {
+                if spinner_glyph && !byte.is_ascii_control() {
+                    spinner_glyph = false;
+                    continue;
+                }
+                spinner_glyph = false;
+                if *byte == b'\n'
+                    || *byte == b'\r'
+                    || (terminal && matches!(byte, b'\x08' | b'\x1b'))
+                {
                     if overflow {
                         progress(stream, "[Output omitted: line exceeds 4096 bytes]");
                     } else if !line.is_empty() {
@@ -36,6 +54,11 @@ async fn read_output(
                     }
                     line.clear();
                     overflow = false;
+                    if *byte == b'\x1b' {
+                        // Keep the escape sequence intact for the log's terminal-control sanitizer.
+                        line.push(*byte);
+                    }
+                    spinner_glyph = terminal && *byte == b'\x08';
                 } else if line.len() < 4096 {
                     line.push(*byte);
                 } else {
@@ -59,6 +82,7 @@ pub async fn run_command(
     stdin: Option<Vec<u8>>,
     timeout: u64,
     progress: Option<ProgressSink>,
+    format: OutputFormat,
 ) -> Result<CommandOutput> {
     command
         .stdin(if stdin.is_some() {
@@ -94,8 +118,8 @@ pub async fn run_command(
         };
         let (status, stdout, stderr, ()) = tokio::try_join!(
             async { Ok::<_, anyhow::Error>(child.wait().await?) },
-            read_output(stdout, OutputStream::Stdout, progress.clone()),
-            read_output(stderr, OutputStream::Stderr, progress),
+            read_output(stdout, OutputStream::Stdout, progress.clone(), format),
+            read_output(stderr, OutputStream::Stderr, progress, format),
             write
         )?;
         Ok(CommandOutput {

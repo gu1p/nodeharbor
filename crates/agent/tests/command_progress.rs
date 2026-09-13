@@ -1,4 +1,7 @@
-use nodeharbor_agent::{process::run_command, OutputStream, ProgressSink};
+use nodeharbor_agent::{
+    process::{run_command, OutputFormat},
+    OutputStream, ProgressSink,
+};
 use std::{
     io::Write,
     sync::{Arc, Mutex},
@@ -22,6 +25,20 @@ fn process_fixture() {
         std::env::var_os("NODEHARBOR_TEST_CHILD_DIRECTORY").expect("Controlled subprocess only"),
     );
     std::fs::write(directory.join("pid"), std::process::id().to_string()).unwrap();
+    if std::env::var("NODEHARBOR_TEST_CHILD_MODE").unwrap() == "spinner" {
+        print!("\x1b[2K\x1b[0A\x1b[0EWaiting for the VM to receive an IP address  ");
+        std::io::stdout().flush().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !directory.join("release").exists() && std::time::Instant::now() < deadline {
+            for glyph in ['/', '-', '\\', '|'] {
+                print!("\x08{glyph}");
+                std::io::stdout().flush().unwrap();
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+        println!("\x08 \x1b[2K\x1b[0A\x1b[0ELaunched");
+        return;
+    }
     if std::env::var("NODEHARBOR_TEST_CHILD_MODE").unwrap() == "fragmented" {
         print!("Access denied for private-");
         std::io::stdout().flush().unwrap();
@@ -50,6 +67,42 @@ fn process_fixture() {
 }
 
 #[tokio::test]
+async fn multipass_spinner_messages_appear_without_waiting_for_a_newline() {
+    let directory = tempfile::tempdir().unwrap();
+    let log = nodeharbor_agent::activity::ActivityLog::default();
+    let copy = log.clone();
+    let progress: ProgressSink = Arc::new(move |_, line| copy.record("info", "multipass", line));
+    let task = tokio::spawn(run_command(
+        child(directory.path(), "spinner"),
+        None,
+        10,
+        Some(progress),
+        OutputFormat::Terminal,
+    ));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !log
+            .snapshot()
+            .entries
+            .iter()
+            .any(|entry| entry.message == "Waiting for the VM to receive an IP address")
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Multipass spinner progress must appear before its command finishes");
+    assert!(!task.is_finished());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!log
+        .snapshot()
+        .entries
+        .iter()
+        .any(|entry| matches!(entry.message.as_str(), "/" | "-" | "\\" | "|")));
+    std::fs::write(directory.path().join("release"), "").unwrap();
+    assert!(task.await.unwrap().unwrap().success);
+}
+
+#[tokio::test]
 async fn split_output_is_reassembled_before_redaction_and_cancellation_stops_the_process() {
     let directory = tempfile::tempdir().unwrap();
     let lines = Arc::new(Mutex::new(Vec::new()));
@@ -68,6 +121,7 @@ async fn split_output_is_reassembled_before_redaction_and_cancellation_stops_the
         None,
         10,
         Some(progress),
+        OutputFormat::Lines,
     ));
     tokio::time::timeout(Duration::from_secs(5), async {
         while !directory.path().join("fragment").exists() {
@@ -93,6 +147,7 @@ async fn split_output_is_reassembled_before_redaction_and_cancellation_stops_the
         None,
         10,
         None,
+        OutputFormat::Lines,
     ));
     tokio::time::timeout(Duration::from_secs(5), async {
         while !directory.path().join("pid").exists() {
@@ -139,6 +194,7 @@ async fn actual_process_output_is_read_while_it_is_running_on_both_streams() {
         None,
         10,
         Some(progress),
+        OutputFormat::Terminal,
     ));
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -170,15 +226,27 @@ async fn actual_process_output_is_read_while_it_is_running_on_both_streams() {
 #[tokio::test]
 async fn excessive_output_is_bounded_and_a_timeout_terminates_the_child() {
     let directory = tempfile::tempdir().unwrap();
-    let error = run_command(child(directory.path(), "large"), None, 10, None)
-        .await
-        .err()
-        .unwrap();
+    let error = run_command(
+        child(directory.path(), "large"),
+        None,
+        10,
+        None,
+        OutputFormat::Lines,
+    )
+    .await
+    .err()
+    .unwrap();
     assert!(error.to_string().contains("output limit"));
-    let error = run_command(child(directory.path(), "timeout"), None, 1, None)
-        .await
-        .err()
-        .unwrap();
+    let error = run_command(
+        child(directory.path(), "timeout"),
+        None,
+        1,
+        None,
+        OutputFormat::Lines,
+    )
+    .await
+    .err()
+    .unwrap();
     assert!(error.to_string().contains("timed out"));
     let pid = sysinfo::Pid::from(
         std::fs::read_to_string(directory.path().join("pid"))

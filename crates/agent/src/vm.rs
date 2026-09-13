@@ -91,7 +91,12 @@ async fn multipass_command(
     let program = multipass_program();
     let mut command = Command::new(&program);
     command.args(args);
-    let result = crate::process::run_command(command, stdin, timeout, progress).await;
+    let format = if args.first().is_some_and(|arg| arg == "exec") {
+        crate::process::OutputFormat::Lines
+    } else {
+        crate::process::OutputFormat::Terminal
+    };
+    let result = crate::process::run_command(command, stdin, timeout, progress, format).await;
     match result {
         Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|error|error.kind()==std::io::ErrorKind::NotFound)=>
             Err(error.context("Multipass is unavailable. Install it from canonical.com/multipass/install, then try again")),
