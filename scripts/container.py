@@ -12,6 +12,9 @@ from release import validate_assets, checksum
 
 ROOT=Path(__file__).resolve().parents[1]
 IMAGE='registry.gitlab.com/sikalio/infra/nodeharbor-controller'
+# BuildKit 0.32.1 fixes ordering of new attestation subjects in GitLab registries.
+# https://github.com/moby/buildkit/issues/7007
+BUILDKIT='moby/buildkit:v0.32.1@sha256:c2ffdf4f39cb9d0fd0f63413d9354721cb83868a3f2f29583c3504a0c43a254b'
 
 def prepare(folder,version,commit,output):
     manifests=validate_assets(folder,version,commit)
@@ -79,7 +82,7 @@ def main():
             if 'not found' not in existing.stderr.lower() and 'manifest_unknown' not in existing.stderr.lower():
                 raise RuntimeError('Cannot verify whether the controller image already exists')
         builder='nodeharbor-'+args.commit[:12]
-        run(['docker','buildx','create','--name',builder,'--driver','docker-container','--use'])
+        run(['docker','buildx','create','--name',builder,'--driver','docker-container','--driver-opt','image='+BUILDKIT,'--use'])
         try:
             common=['docker','buildx','build','--build-arg',f'VERSION={args.version}','--build-arg',f'COMMIT={args.commit}']
             local='nodeharbor-controller-smoke:'+args.commit[:12]

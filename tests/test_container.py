@@ -6,6 +6,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts'))
@@ -50,3 +51,13 @@ class ControllerContainer(unittest.TestCase):
         self.assertTrue(container.matches(index,'0.1.20','a'*40))
         self.assertFalse(container.matches(index,'0.1.20','b'*40))
         index['manifests'].pop();self.assertFalse(container.matches(index,'0.1.20','a'*40))
+
+    def test_container_builds_use_a_pinned_builder_with_the_gitlab_attestation_fix(self):
+        calls=[]
+        with patch.object(sys,'argv',['container.py','unused','0.1.20','a'*40]), patch.object(container,'prepare'), patch.object(container,'run',side_effect=lambda args,**kwargs:calls.append(args)), patch.object(container.subprocess,'check_output',return_value='0.1.20 ('+'a'*40+')'):
+            container.main()
+        create=next(call for call in calls if call[:3]==['docker','buildx','create'])
+        self.assertIn('--driver-opt',create)
+        image=create[create.index('--driver-opt')+1]
+        self.assertEqual(image,'image=moby/buildkit:v0.32.1@sha256:c2ffdf4f39cb9d0fd0f63413d9354721cb83868a3f2f29583c3504a0c43a254b')
+        self.assertFalse(any('--provenance=false' in call for call in calls),'Keep build attestations')
