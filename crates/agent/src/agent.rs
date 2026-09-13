@@ -547,7 +547,14 @@ impl Agent {
                 drain?;
             }
             WorkerAction::Stop => {
-                vm.stop().await?;
+                let deadline_expired = draining_since.is_some_and(|since| {
+                    now.saturating_sub(since) >= u64::from(config.policy.drain_seconds)
+                });
+                if deadline_expired {
+                    vm.stop_now().await?;
+                } else {
+                    vm.stop().await?;
+                }
                 let mut runtime = self.runtime.lock().await;
                 runtime.worker.running = false;
                 runtime.draining_since = None;

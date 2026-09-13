@@ -116,3 +116,84 @@ async fn an_unavailable_controller_cannot_prevent_the_owners_stop_deadline() {
     );
     server.abort();
 }
+
+#[derive(Default)]
+struct UnreachableGuest {
+    halted: std::sync::atomic::AtomicBool,
+    calls: Mutex<Vec<Vec<String>>>,
+}
+#[async_trait]
+impl Runner for UnreachableGuest {
+    async fn run(
+        &self,
+        args: &[String],
+        _: Option<Vec<u8>>,
+        _: u64,
+    ) -> anyhow::Result<CommandOutput> {
+        use std::sync::atomic::Ordering;
+        self.calls.lock().unwrap().push(args.to_vec());
+        // Multipass can return success for an ordinary stop in Unknown state
+        // without halting the hypervisor. Only its supported forced stop does so.
+        if args[0] == "stop" && args.iter().any(|arg| arg == "--force") {
+            self.halted.store(true, Ordering::SeqCst);
+        }
+        let stdout = if args[0] == "list" {
+            let state = if self.halted.load(Ordering::SeqCst) {
+                "Stopped"
+            } else {
+                "Unknown"
+            };
+            json!({"list":[{"name":NAME,"state":state}]}).to_string()
+        } else {
+            String::new()
+        };
+        Ok(CommandOutput {
+            success: true,
+            stdout,
+            stderr: String::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn an_unreachable_configured_worker_is_halted_when_the_owner_deadline_expires() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let guest = Arc::new(UnreachableGuest::default());
+    let agent = Agent::open_with_runner(dir.path(), guest.clone()).unwrap();
+    agent
+        .store
+        .update(|config| {
+            config.device_id = ID.into();
+            config.device_token = Some("test-token".into());
+            config.controller_url = Some("http://127.0.0.1:9".into());
+            config.vm_created = true;
+            config.vm_configured = true;
+            config.policy.enabled = false;
+            config.policy.drain_seconds = 0;
+            Ok(())
+        })
+        .unwrap();
+    std::fs::write(
+        dir.path().join(format!("{NAME}.receipt.json")),
+        json!({"version":1,"deviceId":ID,"name":NAME}).to_string(),
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let _ = tokio::time::timeout(Duration::from_secs(3), agent.tick())
+            .await
+            .unwrap();
+    }
+    assert!(guest.halted.load(Ordering::SeqCst),
+        "A successful CLI response must not leave an unreachable worker consuming resources past its deadline");
+    assert!(!agent.snapshot().await.unwrap().worker.running);
+    assert!(
+        !guest
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|args| args[0] == "exec"),
+        "An unreachable guest cannot perform an in-guest shutdown"
+    );
+}
