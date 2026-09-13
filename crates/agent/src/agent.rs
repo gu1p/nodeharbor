@@ -350,6 +350,22 @@ impl Agent {
             self.heartbeat(&config).await?;
             return Ok(());
         }
+        let resize_pending = config.vm_configured
+            && config.allocated_resources.as_ref() != Some(&config.policy.resources);
+        if resize_pending && !info.running {
+            vm.resize(&config.policy.resources).await?;
+            self.store.update(|current| {
+                // Record exactly what was applied, even if the owner edits settings again.
+                current.allocated_resources = Some(config.policy.resources.clone());
+                Ok(())
+            })?;
+            self.set_status(
+                "paused",
+                "Worker resources updated; your sharing rules still apply",
+            )
+            .await;
+            return Ok(());
+        }
         let heartbeat_error = self.heartbeat(&config).await.err();
         let observation = crate::observe::observation(
             &self.store.directory,
@@ -361,6 +377,7 @@ impl Agent {
         );
         let decision = evaluate(&config.policy, &observation);
         let allowed = decision.allowed
+            && !resize_pending
             && heartbeat_error.is_none()
             && !self.runtime.lock().await.remote_paused;
         // An unreachable guest has an unknown workload count, not an empty one.
@@ -399,7 +416,11 @@ impl Agent {
             WorkerAction::Drain => {
                 self.set_status(
                     "draining",
-                    "Pausing new assignments and waiting for running work",
+                    if resize_pending {
+                        "Waiting for running work before applying your new resource limits"
+                    } else {
+                        "Pausing new assignments and waiting for running work"
+                    },
                 )
                 .await;
                 // Start the local timer before attempting network operations.

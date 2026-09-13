@@ -244,6 +244,30 @@ impl Vm {
         self.verify_owner().await?;
         Ok(())
     }
+    pub async fn resize(&self, resources: &nodeharbor_core::Resources) -> Result<()> {
+        anyhow::ensure!(
+            self.has_receipt()?,
+            "This application has no creation receipt for the VM"
+        );
+        let info = self.info().await?;
+        anyhow::ensure!(
+            info.installed && !info.running,
+            "Stop the worker before changing its resources"
+        );
+        for (key, value) in [
+            ("cpus", resources.cpus.to_string()),
+            ("memory", format!("{}M", resources.memory_mib)),
+            ("disk", format!("{}G", resources.disk_gib)),
+        ] {
+            self.command(
+                vec!["set".into(), format!("local.{}.{key}={value}", self.name)],
+                None,
+                60,
+            )
+            .await?;
+        }
+        Ok(())
+    }
     pub async fn create(
         &self,
         resources: &nodeharbor_core::Resources,
