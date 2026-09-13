@@ -325,7 +325,27 @@ impl Vm {
         } else {
             vec!["start".into(), self.name.clone()]
         };
-        self.command(args, None, 180).await?;
+        let startup = self.command(args, None, 180);
+        tokio::pin!(startup);
+        let period = std::time::Duration::from_secs(30);
+        let mut renewals = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        renewals.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                result = &mut startup => { result?; break; }
+                _ = renewals.tick() => {
+                    // SSH can become available before the VM runtime finishes its
+                    // boot checks. Keep this owned startup alive within its existing
+                    // deadline; dropping startup also drops every lease renewal.
+                    let Ok(owner) = self.guest(&["sudo", "cat", "/etc/nodeharbor/device-id"], None, 15).await else {
+                        continue;
+                    };
+                    anyhow::ensure!(owner.trim() == self.device_id,
+                        "This VM does not belong to the enrolled device; it has been left untouched");
+                    self.renew_lease().await?;
+                }
+            }
+        }
         self.verify_owner().await?;
         Ok(())
     }
