@@ -96,3 +96,9 @@ class ReleaseContract(unittest.TestCase):
             archive=next((root/'dist').glob('*-tools.tar.gz'))
             with tarfile.open(archive) as package:
                 self.assertTrue({'nodeharbor-agent','nodeharbor-controller','nodeharbor-probe','ui/index.html'}.issubset(package.getnames()))
+
+    def test_image_publication_waits_for_all_platforms_and_is_required_before_a_release(self):
+        workflow=(ROOT/'.github/workflows/release.yml').read_text()
+        self.assertIn('container-check:\n    needs: [identity, native]',workflow)
+        self.assertIn('needs: [identity, native, container-check]',workflow)
+        self.assertIn('needs: [identity, native, container-publish]',workflow)

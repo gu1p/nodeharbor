@@ -93,8 +93,60 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  publish:
+  container-check:
     needs: [identity, native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.identity.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: native-*
+          path: dist
+          merge-multiple: true
+      - name: Build both controller images and run the container smoke test
+        env:
+          BUILD_VERSION: ${{ needs.identity.outputs.version }}
+          BUILD_COMMIT: ${{ needs.identity.outputs.commit }}
+        run: python scripts/container.py dist "$BUILD_VERSION" "$BUILD_COMMIT"
+
+  container-publish:
+    needs: [identity, native, container-check]
+    if: github.event_name == 'push' && github.repository == 'gu1p/nodeharbor'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    concurrency:
+      group: container-${{ needs.identity.outputs.commit }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.identity.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: native-*
+          path: dist
+          merge-multiple: true
+      - name: Publish immutable images to Sikalio's registry
+        env:
+          BUILD_VERSION: ${{ needs.identity.outputs.version }}
+          BUILD_COMMIT: ${{ needs.identity.outputs.commit }}
+          NODEHARBOR_REGISTRY_USERNAME: ${{ secrets.NODEHARBOR_REGISTRY_USERNAME }}
+          NODEHARBOR_REGISTRY_PASSWORD: ${{ secrets.NODEHARBOR_REGISTRY_PASSWORD }}
+        run: python scripts/container.py dist "$BUILD_VERSION" "$BUILD_COMMIT" --publish
+
+  publish:
+    needs: [identity, native, container-publish]
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     concurrency:
