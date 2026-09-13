@@ -289,6 +289,13 @@ async fn pausing_and_resuming_keeps_the_health_check_in_the_screen_inventory() {
         .store
         .update(|config| {
             config.policy.allow_battery = true;
+            // The resume path evaluates real host capacity, including on small CI runners.
+            config.policy.resources = Resources {
+                cpus: 1,
+                memory_mib: 2048,
+                disk_gib: 15,
+            };
+            config.allocated_resources = Some(config.policy.resources.clone());
             Ok(())
         })
         .unwrap();
@@ -308,7 +315,8 @@ async fn pausing_and_resuming_keeps_the_health_check_in_the_screen_inventory() {
             .any(|item| item["name"] == "health-probe"));
         assert!(snapshot.worker.running);
     }
-    assert_eq!(agent.snapshot().await.unwrap().state, "sharing");
+    let snapshot = agent.snapshot().await.unwrap();
+    assert_eq!(snapshot.state, "sharing", "{}", snapshot.reason);
     host.work.store(false, Ordering::SeqCst);
     agent.action("pause").await.unwrap();
     agent.tick().await.unwrap();
