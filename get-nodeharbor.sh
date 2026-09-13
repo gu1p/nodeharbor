@@ -52,6 +52,60 @@ nodeharbor_close_application() {
   "$agent" wait-for-app-exit --executable "$executable" --timeout 30
 }
 
+nodeharbor_activation_cleanup() {
+    local status=$1 committed=$2 work=$3 bin_stage=$4 menu_stage=$5 launcher=$6 entry=$7 bin_started=$8 menu_started=$9
+    local failed=0 directory
+    if [[ $committed == 0 ]]; then
+      if [[ $menu_started == 1 ]]; then
+        if [[ -e "$menu_stage/previous" || -L "$menu_stage/previous" ]]; then
+          mv -Tf -- "$menu_stage/previous" "$entry" || failed=1
+        else rm -f -- "$entry" || failed=1; fi
+      fi
+      if [[ $bin_started == 1 ]]; then
+        if [[ -e "$bin_stage/previous" || -L "$bin_stage/previous" ]]; then
+          mv -Tf -- "$bin_stage/previous" "$launcher" || failed=1
+        else rm -f -- "$launcher" || failed=1; fi
+      fi
+    fi
+    if [[ $failed == 1 ]]; then
+      printf 'NodeHarbor: launcher restoration failed; previous files remain in %s and %s\n' "$bin_stage" "$menu_stage" >&2
+      return 1
+    fi
+    for directory in "$work" "$bin_stage" "$menu_stage"; do
+      if [[ -n "$directory" ]]; then rm -rf -- "$directory"; fi
+    done
+    return "$status"
+  }
+
+# Publish the Linux version last. Each rename stays on its target filesystem;
+# an interrupted update restores the previous launcher and desktop entry.
+nodeharbor_activate_linux() (
+  local install_dir=$1 release_dir=$2 launcher=$3 entry=$4
+  local work='' bin_stage='' menu_stage='' committed=0 bin_started=0 menu_started=0
+  [[ ! -e "$install_dir/current" || -L "$install_dir/current" ]] || nodeharbor_error 'The current installation is not a managed version link'
+  [[ ! -e "$launcher" || -L "$launcher" ]] || nodeharbor_error 'The application launcher is not a managed symbolic link'
+  [[ ! -e "$entry" || -f "$entry" ]] || nodeharbor_error 'The application menu entry is not a regular file'
+  exec 9>"$install_dir/.install.lock"
+  flock -n 9 || nodeharbor_error 'Another NodeHarbor installation is in progress'
+  trap 'nodeharbor_activation_cleanup "$?" "$committed" "$work" "$bin_stage" "$menu_stage" "$launcher" "$entry" "$bin_started" "$menu_started"' EXIT
+  trap 'exit 130' INT TERM HUP
+  work=$(mktemp -d "$install_dir/.nodeharbor-activation.XXXXXX")
+  bin_stage=$(mktemp -d "$(dirname "$launcher")/.nodeharbor-activation.XXXXXX")
+  menu_stage=$(mktemp -d "$(dirname "$entry")/.nodeharbor-activation.XXXXXX")
+  if [[ -e "$launcher" || -L "$launcher" ]]; then cp -a -- "$launcher" "$bin_stage/previous"; fi
+  if [[ -e "$entry" || -L "$entry" ]]; then cp -a -- "$entry" "$menu_stage/previous"; fi
+  ln -s -- "$release_dir" "$work/current"
+  ln -s -- "$install_dir/current/AppRun" "$bin_stage/next"
+  printf '[Desktop Entry]\nType=Application\nName=NodeHarbor\nExec="%s/current/AppRun"\nIcon=%s/current/nodeharbor.png\nCategories=Development;System;\nTerminal=false\n' "$install_dir" "$install_dir" > "$menu_stage/next"
+  chmod 644 "$menu_stage/next"
+  bin_started=1
+  mv -Tf -- "$bin_stage/next" "$launcher"
+  menu_started=1
+  mv -Tf -- "$menu_stage/next" "$entry"
+  mv -Tf -- "$work/current" "$install_dir/current"
+  committed=1
+)
+
 nodeharbor_main() {
   local target version name base expected actual install_dir stage binary agent
   target=$(nodeharbor_target)
@@ -118,10 +172,7 @@ nodeharbor_main() {
       local release_dir
       release_dir=$(mktemp -d "$install_dir/releases/v${version}.XXXXXX")
       cp -a "$stage/." "$release_dir/"
-      ln -s "$release_dir" "$install_dir/.current.$$"
-      mv -Tf "$install_dir/.current.$$" "$install_dir/current"
-      ln -sfn "$install_dir/current/AppRun" "$HOME/.local/bin/nodeharbor"
-      printf '[Desktop Entry]\nType=Application\nName=NodeHarbor\nExec="%s/current/AppRun"\nIcon=%s/current/nodeharbor.png\nCategories=Development;System;\nTerminal=false\n' "$install_dir" "$install_dir" > "$HOME/.local/share/applications/nodeharbor.desktop"
+      nodeharbor_activate_linux "$install_dir" "$release_dir" "$HOME/.local/bin/nodeharbor" "$HOME/.local/share/applications/nodeharbor.desktop"
       printf 'Installed %s. Launch from your application menu or ~/.local/bin/nodeharbor.\n' "$install_dir"
       ;;
   esac

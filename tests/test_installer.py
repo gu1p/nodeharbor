@@ -85,3 +85,45 @@ esac"""}
             result=subprocess.run(['bash','-c','source "$1"; nodeharbor_target','test',str(ROOT/'get-nodeharbor.sh')],env={**os.environ,'PATH':str(folder)+os.pathsep+os.environ['PATH']},capture_output=True,text=True)
             self.assertNotEqual(result.returncode,0)
             self.assertIn('unsupported',result.stderr.lower())
+
+@unittest.skipUnless(__import__('sys').platform.startswith('linux'), 'Linux activation uses native GNU filesystem commands')
+class LinuxActivation(unittest.TestCase):
+    def activate(self, root, *, existing=True, fail=False):
+        install=root/'app';install.mkdir();bin_dir=root/'bin';bin_dir.mkdir();menu=root/'menu';menu.mkdir()
+        old=install/'old';old.mkdir();new=install/'new';new.mkdir();(new/'AppRun').write_text('new application')
+        launcher=bin_dir/'nodeharbor';entry=menu/'nodeharbor.desktop'
+        if existing:
+            (install/'current').symlink_to(old,target_is_directory=True)
+            launcher.symlink_to(install/'current'/'AppRun');entry.write_text('previous desktop entry')
+        tools=root/'tools';tools.mkdir()
+        if fail:
+            mv=tools/'mv';mv.write_text('#!/bin/bash\nif [[ "${*: -1}" == "$NODEHARBOR_TEST_FAIL_DEST" ]]; then exit 42; fi\nexec /usr/bin/mv "$@"\n');mv.chmod(0o755)
+        result=subprocess.run(['bash','-c','source "$1"; nodeharbor_activate_linux "$2" "$3" "$4" "$5"','test',str(ROOT/'get-nodeharbor.sh'),str(install),str(new),str(launcher),str(entry)],env={**os.environ,'PATH':str(tools)+os.pathsep+os.environ['PATH'],'NODEHARBOR_TEST_FAIL_DEST':str(install/'current')},capture_output=True,text=True)
+        return result,install,old,new,launcher,entry
+
+    def test_update_failure_restores_launchers_and_preserves_the_active_application(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result,install,old,new,launcher,entry=self.activate(Path(directory),fail=True)
+            self.assertEqual(result.returncode,42,result.stderr)
+            self.assertEqual((install/'current').resolve(),old)
+            self.assertTrue(launcher.is_symlink())
+            self.assertEqual(os.readlink(launcher),str(install/'current'/'AppRun'))
+            self.assertEqual(entry.read_text(),'previous desktop entry')
+            self.assertFalse(list(Path(directory).rglob('.nodeharbor-activation.*')))
+
+    def test_first_install_failure_leaves_no_broken_application_menu_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result,install,old,new,launcher,entry=self.activate(Path(directory),existing=False,fail=True)
+            self.assertEqual(result.returncode,42,result.stderr)
+            self.assertFalse((install/'current').is_symlink())
+            self.assertFalse(launcher.is_symlink());self.assertFalse(entry.exists())
+
+    def test_success_publishes_the_version_after_installing_its_launchers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result,install,old,new,launcher,entry=self.activate(Path(directory))
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual((install/'current').resolve(),new)
+            self.assertEqual(launcher.resolve(),new/'AppRun')
+            self.assertIn('Name=NodeHarbor',entry.read_text())
+            self.assertTrue(old.is_dir())
+            self.assertFalse(list(Path(directory).rglob('.nodeharbor-activation.*')))

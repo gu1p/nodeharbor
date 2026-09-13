@@ -19,8 +19,11 @@ Implemented and covered:
 - Guest network/bootstrap setup and a lease watchdog that shuts down an abandoned VM.
 - Local drain deadlines that still progress during a controller outage, retrying
   evictions deferred by disruption budgets, and draining before resource changes.
-- VM CPU/RAM changes and disk growth after stopping the worker. Disk shrinking
-  remains rejected until the explicit recreation flow is implemented.
+- VM CPU/RAM changes and disk growth after stopping the worker. A smaller disk
+  requires an accessible deletion confirmation. The agent drains and stops its
+  receipt-owned VM, durably resets old cluster access, and deletes the old disk
+  through Multipass. Enrollment survives; replacement preparation is explicit and
+  sharing stays off. Retries retain the same request identity across restarts.
 - Preparation retries apply changed resource limits before starting an existing
   partial worker; preparing a configured worker retains its normal drain behavior.
 - Owner Stop now and installer pause requests interrupt long preparation operations,
@@ -29,6 +32,8 @@ Implemented and covered:
   partial-worker states. Normal pauses of running workloads retain their drain.
 - Verified runtime downloads are cached by checksum and installed atomically,
   preserving executables used by running processes and surviving failed downloads.
+  Existing guests receive the packaged management scripts before configuration;
+  services restart through systemd after their verified binaries are installed.
 - SQLite controller state, one-use enrollment codes, hashed device credentials,
   trusted gateway authentication, fleet pause/resume, and revocation with retries.
 - Independent Kubernetes/NetBird identity and resource verification, a DNS and pod
@@ -40,6 +45,22 @@ Implemented and covered:
   metadata, immutable publication, and ordering of the latest successful main push.
 - Controller images for both Linux architectures, using only verified native
   artifacts and an unprivileged runtime image.
+- Private Prometheus metrics and standard OTLP HTTP/protobuf tracing. Request
+  attributes use bounded route templates and omit credentials, bodies, device
+  identities, raw URLs, and arbitrary incoming baggage. Exporter failure leaves
+  the controller available; process tests cover delivery and shutdown flushing.
+- Workload drains exclude a probe only after its pod UID and actual DaemonSet
+  owner have been verified through the authenticated Kubernetes API. Malformed
+  guest workload inventory is an error, not an empty worker.
+- Desktop settings register start-at-login before committing a replacement
+  request. Failure restores the actual previous OS registration.
+- Installers wait for the previous application to exit without killing it. Linux
+  thread entries are distinguished from application processes. Linux activation
+  publishes the version last and restores launchers after failure; its rollback
+  contracts also run on a native Linux host in an isolated temporary directory.
+  Windows checks the installed application's exact version and source identity.
+  Windows fallback currently restores application files, not the complete NSIS
+  registration state.
 
 ## Native build evidence
 
@@ -132,9 +153,11 @@ shutdown finish. Regression checks cover each case, including restart recovery.
 ## Remaining acceptance work
 
 - Verify Kubernetes API, pod DNS and MTU connectivity from a real contributed VM.
-- Deploy telemetry, contributed runner pools, and the stateless acceptance workload.
-- Complete the explicit disk recreation flow and remaining lifecycle recovery;
-  verify runtime binary updates and native installer recovery end to end.
+- Deploy and verify controller telemetry and the stateless acceptance workload.
+  Contributed runner pools and real no-capacity failures have been validated in
+  the infrastructure project; successful contributed execution remains pending.
+- Verify worker recreation and runtime updates on real contributed machines;
+  complete Windows registration recovery and native desktop acceptance.
 - Publish the first complete release from `main`, verify the one-line installers,
   and confirm each package on its native operating system.
 - Enroll a real contributed VM, observe the CI qualification window, run a real CI

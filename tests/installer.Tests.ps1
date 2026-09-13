@@ -43,3 +43,11 @@ try {
     if ((Get-Content -Raw -LiteralPath $previous).Trim() -ne 'verified-new-application') { throw 'Successful installer changes were rolled back' }
 } finally { Remove-Item -LiteralPath $transactionRoot -Recurse -Force }
 Write-Host 'Windows installation rollback contracts passed'
+
+foreach ($output in @('NodeHarbor 0.1.2 (' + ('a' * 40) + ')', 'NodeHarbor 0.1.20 (' + ('a' * 40) + ')', 'unreadable application', 'NodeHarbor 0.1.3 (development)')) {
+    $rejected = $false
+    try { Assert-NodeHarborInstalledVersion -VersionOutput $output -Expected '0.1.3' } catch { $rejected = $true }
+    if (-not $rejected) { throw 'An incorrect or unidentifiable application was accepted after installation' }
+}
+Assert-NodeHarborInstalledVersion -VersionOutput ('NodeHarbor 0.1.3 (' + ('b' * 40) + ")`r`n") -Expected '0.1.3'
+Write-Host 'Windows installed-version contracts passed'

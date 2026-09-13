@@ -14,6 +14,14 @@ function Test-NodeHarborChecksum {
     }
 }
 
+function Assert-NodeHarborInstalledVersion {
+    param([Parameter(Mandatory)][string] $VersionOutput, [Parameter(Mandatory)][string] $Expected)
+    $pattern = '^NodeHarbor ' + [regex]::Escape($Expected) + ' \([0-9a-f]{40}\)$'
+    if ($VersionOutput.Trim() -cnotmatch $pattern) {
+        throw 'The installed application does not identify the requested release and source commit.'
+    }
+}
+
 function Invoke-NodeHarborInstallTransaction {
     param([Parameter(Mandatory)][string] $InstallDirectory, [Parameter(Mandatory)][scriptblock] $Install)
     $backup = $null
@@ -98,6 +106,9 @@ function Install-NodeHarbor {
             $process = Start-Process -FilePath $package -ArgumentList "/S /D=$install" -Wait -PassThru
             if ($process.ExitCode -ne 0) { throw "The NodeHarbor installer failed with exit code $($process.ExitCode)." }
             if (-not (Test-Path -LiteralPath (Join-Path $install 'nodeharbor.exe'))) { throw 'The installer did not produce the expected application.' }
+            $versionOutput = (& (Join-Path $install 'nodeharbor.exe') --version | Out-String)
+            if ($LASTEXITCODE -ne 0) { throw 'The installed application could not report its version.' }
+            Assert-NodeHarborInstalledVersion -VersionOutput $versionOutput -Expected $version
         }
         Write-Host "Installed NodeHarbor $version. Open it from the Start menu. Enrollment and resource limits were preserved; sharing stays paused after an update."
     } finally {
