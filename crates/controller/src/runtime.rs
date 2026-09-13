@@ -43,6 +43,12 @@ pub struct ConfiguredController {
 }
 impl ConfiguredController {
     pub async fn maintain_once(&self) -> Result<()> {
+        self.state
+            .telemetry
+            .operation(crate::Operation::Maintenance, self.maintain_inner())
+            .await
+    }
+    async fn maintain_inner(&self) -> Result<()> {
         let mut errors = Vec::new();
         if let Err(error) = self.state.retry_revocations().await {
             errors.push(error.to_string());
@@ -103,8 +109,10 @@ pub async fn configure_runtime(mut state: State, path: &Path) -> Result<Configur
         let provisioner = Arc::new(
             Provisioner::new(
                 cluster.worker,
-                api(cluster.kubernetes, base, "Bearer")?,
-                api(cluster.netbird, base, "Token")?,
+                api(cluster.kubernetes, base, "Bearer")?
+                    .with_telemetry(state.telemetry.clone(), crate::Peer::Kubernetes),
+                api(cluster.netbird, base, "Token")?
+                    .with_telemetry(state.telemetry.clone(), crate::Peer::NetBird),
                 state.db.clone(),
             )
             .await?

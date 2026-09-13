@@ -16,6 +16,7 @@ pub struct ApiClient {
     token_file: PathBuf,
     scheme: String,
     client: reqwest::Client,
+    telemetry: Option<(crate::Telemetry, crate::Peer)>,
 }
 impl ApiClient {
     pub fn new(base: &str, token_file: &Path, scheme: &str, ca_pem: Option<&[u8]>) -> Result<Self> {
@@ -50,9 +51,32 @@ impl ApiClient {
             token_file: token_file.into(),
             scheme: scheme.into(),
             client: builder.build()?,
+            telemetry: None,
         })
     }
+    pub fn with_telemetry(mut self, telemetry: crate::Telemetry, peer: crate::Peer) -> Self {
+        self.telemetry = Some((telemetry, peer));
+        self
+    }
     pub(crate) async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<(u16, Value)> {
+        if let Some((telemetry, peer)) = &self.telemetry {
+            telemetry
+                .infrastructure(
+                    *peer,
+                    method.as_str(),
+                    self.request_inner(method.clone(), path, body),
+                )
+                .await
+        } else {
+            self.request_inner(method, path, body).await
+        }
+    }
+    async fn request_inner(
         &self,
         method: Method,
         path: &str,
@@ -71,6 +95,16 @@ impl ApiClient {
             .client
             .request(method.clone(), self.base.join(path)?)
             .header("authorization", format!("{} {}", self.scheme, token.trim()));
+        // Propagate only the standard trace identity, never baggage or credentials.
+        if self.telemetry.is_some() {
+            use opentelemetry::{propagation::TextMapPropagator, Context};
+            let mut headers = std::collections::HashMap::new();
+            opentelemetry_sdk::propagation::TraceContextPropagator::new()
+                .inject_context(&Context::current(), &mut headers);
+            if let Some(parent) = headers.get("traceparent") {
+                request = request.header("traceparent", parent);
+            }
+        }
         if let Some(body) = body {
             request = request.json(&body);
         }

@@ -26,6 +26,12 @@ impl Reconciler {
         Self { state, backend }
     }
     pub async fn tick_at(&self, now: DateTime<Utc>) -> Result<()> {
+        self.state
+            .telemetry
+            .operation(crate::Operation::Reconcile, self.reconcile_at(now))
+            .await
+    }
+    async fn reconcile_at(&self, now: DateTime<Utc>) -> Result<()> {
         // Serialize admission against revocation and explicit device controls.
         let _operation = self.state.operations.lock().await;
         let rows = sqlx::query("SELECT d.id,d.architecture,d.last_seen,d.remote_paused,d.state,d.resources,COALESCE(p.allow_ci,0) AS allow_ci,COALESCE(p.allow_services,0) AS allow_services,COALESCE(p.permitted,0) AS permitted FROM devices d LEFT JOIN device_policy p ON p.device_id=d.id WHERE d.revoked=0")

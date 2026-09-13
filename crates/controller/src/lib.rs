@@ -15,7 +15,6 @@ use sqlx::{
     Row, SqlitePool,
 };
 use std::{str::FromStr, sync::Arc};
-use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 mod health;
 pub use health::{assess_health, verify_worker_evidence, HealthSample};
@@ -29,6 +28,8 @@ mod network;
 pub use network::ProbeConfig;
 mod provision;
 pub use provision::{ApiClient, ClusterConfig, Provisioner};
+mod telemetry;
+pub use telemetry::{metrics_router, Operation, Peer, Telemetry};
 
 #[derive(Clone)]
 pub struct DeviceIdentity {
@@ -58,6 +59,7 @@ struct ProxyAuth {
 #[derive(Clone)]
 pub struct State {
     pub db: SqlitePool,
+    pub(crate) telemetry: Telemetry,
     admin_hash: Arc<String>,
     proxy: Option<Arc<ProxyAuth>>,
     cluster: Option<Arc<dyn Cluster>>,
@@ -93,6 +95,7 @@ impl State {
             .execute(&db).await?;
         Ok(Self {
             db,
+            telemetry: Telemetry::new(None)?,
             admin_hash: Arc::new(hash(admin_token)),
             proxy: None,
             cluster: None,
@@ -101,6 +104,10 @@ impl State {
     }
     pub fn with_cluster(mut self, cluster: Arc<dyn Cluster>) -> Self {
         self.cluster = Some(cluster);
+        self
+    }
+    pub fn with_telemetry(mut self, telemetry: Telemetry) -> Self {
+        self.telemetry = telemetry;
         self
     }
     pub async fn retry_revocations(&self) -> anyhow::Result<()> {
@@ -604,7 +611,10 @@ pub fn router(state: State) -> Router {
         .route("/api/v1/devices/{id}/revoke", post(revoke))
         .route("/api/v1/devices/{id}/{action}", post(admin_control))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
-        .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn_with_state(
+            state.telemetry.clone(),
+            telemetry::http,
+        ))
         .layer(axum::middleware::map_response(
             |mut response: Response| async move {
                 response
