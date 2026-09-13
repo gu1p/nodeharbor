@@ -36,11 +36,20 @@ nodeharbor_download() { curl --proto '=https' --tlsv1.2 --fail --silent --show-e
 NODEHARBOR_TEMP_WORK=''
 NODEHARBOR_BACKUP=''
 NODEHARBOR_DESTINATION=''
+NODEHARBOR_STAGE=''
 nodeharbor_cleanup() {
   if [[ -n "$NODEHARBOR_BACKUP" && -e "$NODEHARBOR_BACKUP" && ! -e "$NODEHARBOR_DESTINATION" ]]; then
     mv "$NODEHARBOR_BACKUP" "$NODEHARBOR_DESTINATION"
   fi
   if [[ -n "$NODEHARBOR_TEMP_WORK" ]]; then rm -rf -- "$NODEHARBOR_TEMP_WORK"; fi
+  if [[ -n "$NODEHARBOR_STAGE" ]]; then rm -rf -- "$NODEHARBOR_STAGE"; fi
+}
+
+nodeharbor_close_application() {
+  local agent=$1 launcher=$2 executable=$3
+  "$agent" prepare-update
+  "$launcher" --quit
+  "$agent" wait-for-app-exit --executable "$executable" --timeout 30
 }
 
 nodeharbor_main() {
@@ -72,6 +81,7 @@ nodeharbor_main() {
       install_dir=${NODEHARBOR_INSTALL_DIR:-"$HOME/Applications"}
       mkdir -p "$install_dir"
       stage=$(mktemp -d "$install_dir/.nodeharbor-stage.XXXXXX")
+      NODEHARBOR_STAGE="$stage"
       # The verified release contains one application bundle.
       tar -xzf "$NODEHARBOR_TEMP_WORK/$name" -C "$stage"
       binary="$stage/NodeHarbor.app/Contents/MacOS/nodeharbor"
@@ -81,13 +91,13 @@ nodeharbor_main() {
       agent="$NODEHARBOR_DESTINATION/Contents/MacOS/nodeharbor-agent"
       if [[ -e "$NODEHARBOR_DESTINATION" ]]; then
         [[ -x "$agent" ]] || nodeharbor_error 'The existing app has no drain helper; quit it and move it aside before installing'
-        "$agent" prepare-update
-        "$NODEHARBOR_DESTINATION/Contents/MacOS/nodeharbor" --quit
+        nodeharbor_close_application "$agent" "$NODEHARBOR_DESTINATION/Contents/MacOS/nodeharbor" "$NODEHARBOR_DESTINATION/Contents/MacOS/nodeharbor"
         NODEHARBOR_BACKUP="$install_dir/.NodeHarbor.previous.$(date +%s).$$.app"
         mv "$NODEHARBOR_DESTINATION" "$NODEHARBOR_BACKUP"
       fi
       mv "$stage/NodeHarbor.app" "$NODEHARBOR_DESTINATION"
       rmdir "$stage"
+      NODEHARBOR_STAGE=''
       printf 'Installed %s\n' "$NODEHARBOR_DESTINATION"
       ;;
     *)
@@ -101,7 +111,7 @@ nodeharbor_main() {
       if [[ -e "$install_dir/current" ]]; then
         agent="$install_dir/current/usr/bin/nodeharbor-agent"
         [[ -x "$agent" ]] || nodeharbor_error 'The existing app has no drain helper; quit it and move it aside before installing'
-        "$agent" prepare-update
+        nodeharbor_close_application "$agent" "$install_dir/current/AppRun" "$install_dir/current/usr/bin/nodeharbor"
       fi
       # Every extracted version has its own directory; replacing the symlink
       # is atomic and keeps the previous version available for recovery.

@@ -22,6 +22,13 @@ enum Command {
     Resume,
     Prepare,
     Stop,
+    /// Wait for the previous application process before installing an update.
+    WaitForAppExit {
+        #[arg(long)]
+        executable: PathBuf,
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
+    },
     /// Drain the owned VM before replacing the application. Fails on timeout.
     PrepareUpdate {
         #[arg(long, default_value_t = 2100)]
@@ -33,6 +40,46 @@ enum Command {
         #[arg(long)]
         code_file: PathBuf,
     },
+}
+
+async fn wait_for_app_exit(executable: &std::path::Path, timeout: u64) -> Result<()> {
+    anyhow::ensure!(
+        (1..=3600).contains(&timeout),
+        "Application exit timeout must be between 1 and 3600 seconds"
+    );
+    anyhow::ensure!(
+        executable.is_absolute(),
+        "Use the previous application's absolute executable path"
+    );
+    let executable = executable
+        .canonicalize()
+        .context("Cannot identify the previous application executable")?;
+    let own_pid = sysinfo::get_current_pid().map_err(anyhow::Error::msg)?;
+    let mut system = sysinfo::System::new();
+    let deadline = Instant::now() + Duration::from_secs(timeout);
+    loop {
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::nothing().with_exe(sysinfo::UpdateKind::Always),
+        );
+        let running = system.processes().iter().any(|(pid, process)| {
+            *pid != own_pid
+                && process
+                    .exe()
+                    .and_then(|path| path.canonicalize().ok())
+                    .as_ref()
+                    == Some(&executable)
+        });
+        if !running {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "The previous application is still running; its installation must be preserved"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 async fn wait_for_stop(agent: &Agent, timeout: u64) -> Result<()> {
@@ -61,12 +108,20 @@ async fn wait_for_stop(agent: &Agent, timeout: u64) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if let Command::WaitForAppExit {
+        executable,
+        timeout,
+    } = &args.command
+    {
+        return wait_for_app_exit(executable, *timeout).await;
+    }
     let directory = args
         .config_dir
         .map(Ok)
         .unwrap_or_else(Store::default_directory)?;
     let agent = Agent::open(&directory)?;
     match args.command {
+        Command::WaitForAppExit { .. } => unreachable!(),
         Command::Status => {
             let mut snapshot = agent.snapshot().await?;
             if agent.store.load()?.vm_created {
