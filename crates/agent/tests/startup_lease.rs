@@ -34,8 +34,9 @@ impl Runner for BootingGuest {
         timeout: u64,
     ) -> anyhow::Result<CommandOutput> {
         if args[0] == "start" {
-            assert_eq!(timeout, 180, "Boot must retain its existing deadline");
             self.entered.notify_one();
+            assert_eq!(timeout, 600, "An older guest can wait five minutes for its first fresh Ready report before receiving the update");
+            assert!(args.iter().any(|arg| arg == "--timeout=10m"));
             self.complete.notified().await;
         }
         let mut stdout = String::new();
@@ -88,7 +89,7 @@ async fn slow_boot_keeps_the_owner_lease_alive_until_completion_or_cancellation(
         );
         assert_eq!(guest.leases.load(Ordering::SeqCst), 0);
         guest.reachable.store(true, Ordering::SeqCst);
-        for expected in 1..=3 {
+        for expected in 1..=11 {
             tokio::time::advance(Duration::from_secs(30)).await;
             tokio::time::timeout(Duration::from_millis(1), guest.renewed.notified())
                 .await
@@ -105,7 +106,7 @@ async fn slow_boot_keeps_the_owner_lease_alive_until_completion_or_cancellation(
         tokio::time::advance(Duration::from_secs(300)).await;
         assert_eq!(
             guest.leases.load(Ordering::SeqCst),
-            3,
+            11,
             "No detached renewal may survive boot"
         );
         tokio::time::resume();

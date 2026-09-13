@@ -122,6 +122,15 @@ class GuestNetworkConfiguration(unittest.TestCase):
         self.assertEqual(service['Service'].get('TimeoutStartSec'),'0',
             'K3s must not be killed by systemd before the supervising owner\'s bounded preparation operation expires')
 
+    def test_restart_reports_fresh_node_status_before_the_network_policy_startup_wait(self):
+        _,writes,_=self.prepare('nameserver 192.168.64.1\n')
+        path='/var/lib/rancher/k3s/agent/etc/kubelet.conf.d/10-nodeharbor.conf'
+        self.assertIn(path,writes,
+            'K3s waits for a new Ready heartbeat; the default five-minute report interval stalls warm boots')
+        config=json.loads(writes[path])
+        self.assertEqual(config,{'apiVersion':'kubelet.config.k8s.io/v1beta1',
+            'kind':'KubeletConfiguration','nodeStatusReportFrequency':'30s'})
+
     def test_preparation_restarts_services_to_apply_new_binaries_and_worker_configuration(self):
         commands,writes,_=self.prepare('nameserver 192.168.64.1\n')
         for service in ['netbird','k3s-agent']:

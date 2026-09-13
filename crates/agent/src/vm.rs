@@ -321,11 +321,13 @@ impl Vm {
             "This application has no creation receipt for the VM; it has been left untouched"
         );
         let args = if self.is_lima() {
-            vec!["start".into(), "--timeout=3m".into(), self.name.clone()]
+            vec!["start".into(), "--timeout=10m".into(), self.name.clone()]
         } else {
             vec!["start".into(), self.name.clone()]
         };
-        let startup = self.command(args, None, 180);
+        // Older guests can wait five minutes for K3s's first fresh Ready report
+        // before receiving the packaged kubelet reporting update.
+        let startup = self.command(args, None, 600);
         tokio::pin!(startup);
         let period = std::time::Duration::from_secs(30);
         let mut renewals = tokio::time::interval_at(tokio::time::Instant::now() + period, period);

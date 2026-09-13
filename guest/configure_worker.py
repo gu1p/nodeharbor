@@ -171,6 +171,12 @@ def main():
          'resolv-conf':str(RESOLV_CONF),
          'kubelet-arg':['system-reserved=cpu=100m,memory=256Mi','kube-reserved=cpu=150m,memory=256Mi','eviction-hard=memory.available<256Mi,nodefs.available<10%,imagefs.available<15%','container-log-max-size=10Mi','container-log-max-files=2','max-pods=30']}
     write('/etc/rancher/k3s/config.yaml',json.dumps(k3s,indent=2)+'\n')
+    # K3s netpol startup waits for a Ready heartbeat newer than CNI startup.
+    # The default five-minute reporting interval can stall an otherwise healthy
+    # warm boot. Use K3s's supported kubelet drop-in for timely node reports.
+    write('/var/lib/rancher/k3s/agent/etc/kubelet.conf.d/10-nodeharbor.conf',json.dumps({
+        'apiVersion':'kubelet.config.k8s.io/v1beta1','kind':'KubeletConfiguration',
+        'nodeStatusReportFrequency':'30s'})+'\n',0o644)
     unit='''[Unit]
 Description=NodeHarbor Kubernetes worker
 After=network-online.target netbird.service
