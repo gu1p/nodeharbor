@@ -335,15 +335,31 @@ impl Vm {
     }
     pub async fn configure(&self, bootstrap: Value) -> Result<()> {
         self.renew_lease().await?;
-        let configuration = self.guest(
-            &[
-                "sudo",
-                "python3",
-                "/usr/local/lib/nodeharbor/configure_worker.py",
-            ],
-            Some(serde_json::to_vec(&bootstrap)?),
-            600,
-        );
+        let configuration = async {
+            self.guest(
+                &[
+                    "sudo",
+                    "python3",
+                    "-c",
+                    include_str!("../../../guest/install_guest.py"),
+                ],
+                Some(serde_json::to_vec(
+                    &json!({"deviceId":self.device_id,"files":crate::guest_files()}),
+                )?),
+                30,
+            )
+            .await?;
+            self.guest(
+                &[
+                    "sudo",
+                    "python3",
+                    "/usr/local/lib/nodeharbor/configure_worker.py",
+                ],
+                Some(serde_json::to_vec(&bootstrap)?),
+                600,
+            )
+            .await
+        };
         tokio::pin!(configuration);
         let period = std::time::Duration::from_secs(30);
         let mut renewals = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
