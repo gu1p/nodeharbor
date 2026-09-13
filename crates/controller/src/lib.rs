@@ -30,6 +30,7 @@ mod provision;
 pub use provision::{ApiClient, ClusterConfig, Provisioner};
 mod telemetry;
 pub use telemetry::{metrics_router, Operation, Peer, Telemetry};
+mod reset;
 
 #[derive(Clone)]
 pub struct DeviceIdentity {
@@ -91,7 +92,9 @@ impl State {
             CREATE TABLE IF NOT EXISTS health_samples (device_id TEXT NOT NULL, at TEXT NOT NULL, ready INTEGER NOT NULL, rtt_ms REAL, PRIMARY KEY(device_id, at));
             CREATE TABLE IF NOT EXISTS device_policy (device_id TEXT PRIMARY KEY, allow_ci INTEGER NOT NULL DEFAULT 0, allow_services INTEGER NOT NULL DEFAULT 0, permitted INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS device_health (device_id TEXT PRIMARY KEY, reason TEXT NOT NULL, observed_at TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS pending_revocations (device_id TEXT PRIMARY KEY);")
+            CREATE TABLE IF NOT EXISTS pending_revocations (device_id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS worker_resets (device_id TEXT NOT NULL,request_id TEXT NOT NULL,complete INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(device_id,request_id));
+            CREATE UNIQUE INDEX IF NOT EXISTS one_pending_worker_reset ON worker_resets(device_id) WHERE complete=0;")
             .execute(&db).await?;
         Ok(Self {
             db,
@@ -516,6 +519,9 @@ async fn device_control(
     let _operation = state.operations.lock().await;
     let id = device_id(&state, &headers).await?;
     let device = identity(&state, &id).await?;
+    if ["bootstrap", "resume"].contains(&action.as_str()) {
+        state.ensure_not_resetting(&id).await?;
+    }
     let cluster = state.cluster.as_ref().ok_or_else(|| {
         ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -584,6 +590,9 @@ async fn admin_control(
     }
     let _operation = state.operations.lock().await;
     let device = identity(&state, &id).await?;
+    if action == "resume" {
+        state.ensure_not_resetting(&id).await?;
+    }
     let paused = action == "pause";
     let updated=sqlx::query("UPDATE devices SET remote_paused=?,eligible_ci=0,eligible_services=0 WHERE id=? AND revoked=0")
         .bind(paused).bind(&id).execute(&state.db).await.map_err(ApiError::internal)?;
@@ -604,6 +613,7 @@ pub fn router(state: State) -> Router {
         .route("/readyz", get(ready))
         .route("/api/v1/fleet", get(fleet))
         .route("/api/v1/device/fleet", get(device_fleet))
+        .route("/api/v1/device/reset", post(reset::reset))
         .route("/api/v1/device/{action}", post(device_control))
         .route("/api/v1/enrollment-codes", post(create_code))
         .route("/api/v1/enroll", post(enroll))

@@ -53,6 +53,9 @@ impl ConfiguredController {
         if let Err(error) = self.state.retry_revocations().await {
             errors.push(error.to_string());
         }
+        if let Err(error) = self.state.retry_worker_resets().await {
+            errors.push(error.to_string());
+        }
         if let Some(provisioner) = &self.provisioner {
             let _operation = self.state.operations.lock().await;
             if let Err(error) = provisioner.expire_grants().await {
