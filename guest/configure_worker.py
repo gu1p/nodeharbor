@@ -46,10 +46,18 @@ def run(*command,env=None):
     return result.stdout
 
 def write(path,content,mode=0o600):
+    write_bytes(path,content.encode(),mode)
+
+def write_bytes(path,content,mode=0o600):
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent,delete=False) as temporary:
-        temporary.write(content.encode());temporary.flush();os.fsync(temporary.fileno());name=temporary.name
-    os.chmod(name,mode);os.replace(name,path)
+    name=None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent,delete=False) as temporary:
+            name=temporary.name
+            temporary.write(content);temporary.flush();os.fsync(temporary.fileno())
+        os.chmod(name,mode);os.replace(name,path)
+    finally:
+        if name is not None:Path(name).unlink(missing_ok=True)
 
 def download(url,expected):
     with urllib.request.urlopen(url,timeout=120) as response:
@@ -58,21 +66,40 @@ def download(url,expected):
     verify_download(data,expected)
     return data
 
-def install_runtime(config):
+def cached_download(url,expected,cache_dir):
+    if not re.fullmatch(r'[0-9a-f]{64}',expected):raise ValueError('Invalid runtime checksum')
+    cache_dir.mkdir(parents=True,exist_ok=True,mode=0o700)
+    cached=cache_dir/expected
+    if cached.is_file() and cached.stat().st_size<=512*1024*1024:
+        data=cached.read_bytes()
+        try:verify_download(data,expected);return data
+        except ValueError:pass
+    data=download(url,expected)
+    verify_download(data,expected)
+    write_bytes(cached,data)
+    return data
+
+def install_runtime(config,bin_dir=Path('/usr/local/bin'),cache_dir=Path('/var/cache/nodeharbor/runtime')):
     runtime=config['runtime'];arch={'aarch64':'arm64','x86_64':'amd64'}.get(platform.machine())
     if arch is None: raise ValueError('Unsupported Linux worker CPU architecture')
     assets={asset['name']:asset['sha256'] for asset in runtime['assets']}
     print('Installing verified worker runtime',flush=True)
     nb_name=f"netbird_{runtime['netbirdVersion']}_linux_{arch}.tar.gz"
-    data=download(f"https://github.com/netbirdio/netbird/releases/download/v{runtime['netbirdVersion']}/{nb_name}",assets[nb_name])
+    data=cached_download(f"https://github.com/netbirdio/netbird/releases/download/v{runtime['netbirdVersion']}/{nb_name}",assets[nb_name],cache_dir)
     with tarfile.open(fileobj=io.BytesIO(data),mode='r:gz') as archive:
         members=[member for member in archive.getmembers() if member.name in ('netbird','./netbird') and member.isfile()]
         if len(members)!=1:raise ValueError('NetBird archive has no unique executable')
-        binary=archive.extractfile(members[0]).read()
-    path=Path('/usr/local/bin/netbird');path.write_bytes(binary);path.chmod(0o755)
+        if members[0].size>512*1024*1024:raise ValueError('NetBird executable exceeds the supported size')
+        netbird_binary=archive.extractfile(members[0]).read()
     k3s_name='k3s' if arch=='amd64' else 'k3s-arm64'
-    binary=download(f"https://github.com/k3s-io/k3s/releases/download/{urllib.parse.quote(runtime['k3sVersion'],safe='')}/{k3s_name}",assets[k3s_name])
-    path=Path('/usr/local/bin/k3s');path.write_bytes(binary);path.chmod(0o755)
+    k3s_binary=cached_download(f"https://github.com/k3s-io/k3s/releases/download/{urllib.parse.quote(runtime['k3sVersion'],safe='')}/{k3s_name}",assets[k3s_name],cache_dir)
+    # Verify both downloads before changing either installed runtime. Rename on the
+    # same filesystem preserves executables already mapped by running processes.
+    for name,binary in [('netbird',netbird_binary),('k3s',k3s_binary)]:
+        path=bin_dir/name
+        if path.is_file() and path.stat().st_size==len(binary) and path.read_bytes()==binary:
+            path.chmod(0o755)
+        else:write_bytes(path,binary,0o755)
 
 def main():
     if sys.platform!='linux' or os.geteuid()!=0:
