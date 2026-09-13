@@ -161,6 +161,17 @@ impl HealthBackend for Provisioner {
             "Probe pod address is outside this node’s assigned subnet"
         );
         let nonce = uuid::Uuid::new_v4().simple().to_string();
+        // Measure a TCP handshake to the verified pod as network RTT. Timing
+        // the full HTTP request also counts the probe's separate DNS round trips.
+        let start = Instant::now();
+        let connection = tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::net::TcpStream::connect((ip, config.port)),
+        )
+        .await
+        .context("Worker network probe connection timed out")??;
+        let rtt_ms = start.elapsed().as_secs_f64() * 1000.0;
+        drop(connection);
         // Direct pod traffic tests the overlay. Never send infrastructure tokens
         // or honor a host HTTP proxy for this request.
         let client = reqwest::Client::builder()
@@ -169,7 +180,6 @@ impl HealthBackend for Provisioner {
             .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(3))
             .build()?;
-        let start = Instant::now();
         let mut response = client
             .get(format!("http://{ip}:{}/readyz?nonce={nonce}", config.port))
             .send()
@@ -196,7 +206,7 @@ impl HealthBackend for Provisioner {
                     .is_some_and(|p| p.len() == 4096 && p.bytes().all(|b| b == b'x')),
             "Worker probe did not verify DNS, identity, and a complete multi-packet response"
         );
-        Ok(start.elapsed().as_secs_f64() * 1000.0)
+        Ok(rtt_ms)
     }
     async fn place(
         &self,

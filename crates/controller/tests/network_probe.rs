@@ -53,6 +53,8 @@ fn valid_probe() -> Value {
     json!({"metadata":{"name":"probe-123","namespace":"nodeharbor-system","uid":"a8b219f7-a1a0-44a8-a876-bd06a64d91cb","ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"nodeharbor-probe","uid":"9be3051c-af26-4c75-84ed-250c843cefa2","controller":true}]},"spec":{"nodeName":NAME},"status":{"phase":"Running","podIP":"127.0.0.1","conditions":[{"type":"Ready","status":"True"}]}})
 }
 async fn probe(Query(query): Query<HashMap<String, String>>) -> Json<Value> {
+    // DNS resolution is required application work, not network round-trip time.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     Json(json!({"nodeName":NAME,"dns":true,"nonce":query["nonce"],"padding":"x".repeat(4096)}))
 }
 #[tokio::test]
@@ -103,12 +105,18 @@ async fn admission_requires_a_real_probe_on_the_enrolled_nodes_pod_network() {
         id: ID.into(),
         architecture: "arm64".into(),
     };
+    let elapsed = std::time::Instant::now();
+    let rtt = cluster
+        .observe(&device, &nodeharbor_core::Resources::default())
+        .await
+        .unwrap();
     assert!(
-        cluster
-            .observe(&device, &nodeharbor_core::Resources::default())
-            .await
-            .unwrap()
-            >= 0.0
+        elapsed.elapsed() >= std::time::Duration::from_millis(500),
+        "Qualification must still wait for the complete DNS and overlay response"
+    );
+    assert!(
+        (0.0..500.0).contains(&rtt),
+        "Network RTT must exclude the probe's DNS processing time; measured {rtt}ms"
     );
     assert_eq!(
         cluster.probe_pod_uids(&device).await.unwrap(),
