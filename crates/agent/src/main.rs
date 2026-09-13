@@ -101,12 +101,12 @@ async fn wait_for_stop(agent: &Agent, timeout: u64) -> Result<()> {
     // takes over only long enough to drain the enrolled device's worker.
     let supervisor = agent.store.supervisor_lock().ok();
     loop {
-        if supervisor.is_some() {
-            agent.tick().await?;
-        }
         let state = vm.info().await?;
         if !state.running {
             return Ok(());
+        }
+        if supervisor.is_some() {
+            agent.tick().await?;
         }
         anyhow::ensure!(Instant::now() < deadline, "The worker did not finish draining in time; the existing application must be preserved");
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -212,4 +212,70 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    use nodeharbor_agent::{CommandOutput, Runner};
+    use serde_json::json;
+    use std::sync::Arc;
+
+    struct Worker(bool);
+    #[async_trait::async_trait]
+    impl Runner for Worker {
+        async fn run(&self, args: &[String], _: Option<Vec<u8>>, _: u64) -> Result<CommandOutput> {
+            anyhow::ensure!(
+                args[0] == "list",
+                "Shutdown verification must only inspect this worker"
+            );
+            Ok(CommandOutput {
+                success: true,
+                stdout: json!({"list":[{"name":"nodeharbor-9511182e9c484d20a15b1da8bb441386","state":if self.0 {"Running"} else {"Stopped"}}]}).to_string(),
+                stderr: String::new(),
+            })
+        }
+    }
+    fn fixture(directory: &std::path::Path, running: bool) -> Agent {
+        let agent = Agent::open_with_runner(directory, Arc::new(Worker(running))).unwrap();
+        agent.store.update(|config| {
+            config.format_version = 2;
+            config.device_id = "9511182e-9c48-4d20-a15b-1da8bb441386".into();
+            config.vm_created = true;
+            config.policy.enabled = false;
+            config.device_token = Some("test-device-credential".into());
+            config.controller_url = Some("http://127.0.0.1:1".into());
+            config.recreation = Some(serde_json::from_value(json!({"requestId":"67345f21-3878-4d50-82aa-19bca630407e","accessRemoved":false,"targetProvider":"lima"}))?);
+            Ok(())
+        }).unwrap();
+        std::fs::write(directory.join("nodeharbor-9511182e9c484d20a15b1da8bb441386.receipt.json"),
+            json!({"version":1,"deviceId":"9511182e-9c48-4d20-a15b-1da8bb441386","name":"nodeharbor-9511182e9c484d20a15b1da8bb441386"}).to_string()).unwrap();
+        agent
+    }
+
+    #[tokio::test]
+    async fn a_stopped_worker_can_update_while_controller_replacement_cleanup_is_unavailable() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent = fixture(directory.path(), false);
+        let before = std::fs::read(directory.path().join("config.json")).unwrap();
+        wait_for_stop(&agent, 1).await.unwrap();
+        assert_eq!(
+            before,
+            std::fs::read(directory.path().join("config.json")).unwrap()
+        );
+        assert!(agent.local_vm().unwrap().has_receipt().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_running_worker_still_prevents_an_update_until_its_supervisor_stops_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent = fixture(directory.path(), true);
+        let _supervisor = agent.store.supervisor_lock().unwrap();
+        assert!(wait_for_stop(&agent, 1)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("did not finish draining"));
+        assert!(agent.local_vm().unwrap().has_receipt().unwrap());
+    }
 }
