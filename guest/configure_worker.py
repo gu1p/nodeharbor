@@ -143,7 +143,10 @@ def main():
     environment=dict(os.environ)
     if config.get('netbirdSetupKey'):environment['NB_SETUP_KEY']=config['netbirdSetupKey']
     progress('Connecting to the private network')
+    # Flannel runs over NetBird. Its interfaces cannot carry NetBird's own ICE
+    # transport: selecting them creates a recursive tunnel after Kubernetes starts.
     run('/usr/local/bin/netbird','up','--management-url',config['netbirdManagementUrl'],'--hostname',config['nodeName'],'--mtu','1280',
+        '--extra-iface-blacklist','flannel,cni,kube-ipvs',
         '--disable-dns','--disable-server-routes','--disable-client-routes=false','--allow-server-ssh=false',env=environment)
     peer_ip=None
     progress('Waiting for a private network address')

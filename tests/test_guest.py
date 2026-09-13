@@ -157,6 +157,17 @@ class GuestNetworkConfiguration(unittest.TestCase):
         self.assertNotIn('/etc/rancher/k3s/resolv.conf',writes)
         self.assertEqual(k3s['flannel-iface'],'wt0')
 
+    def test_kubernetes_tunnels_cannot_become_netbirds_transport(self):
+        commands,_,_=self.prepare('nameserver 192.168.64.1\n')
+        up=next(args for args in commands if args[:2]==('/usr/local/bin/netbird','up'))
+        self.assertIn('--extra-iface-blacklist',up,
+            'NetBird otherwise selects Flannel addresses after K3s starts, recursively tunneling its own transport')
+        excluded=up[up.index('--extra-iface-blacklist')+1].split(',')
+        for interface in ['flannel.1','cni0','kube-ipvs0']:
+            self.assertTrue(any(interface.startswith(prefix) for prefix in excluded))
+        for interface in ['eth0','enp7s0']:
+            self.assertFalse(any(interface.startswith(prefix) for prefix in excluded))
+
     def test_unusable_guest_dns_is_reported_without_installing_or_starting_a_worker(self):
         install=Mock()
         with self.assertRaisesRegex(ValueError,'resolver'):
