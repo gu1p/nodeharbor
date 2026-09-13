@@ -59,8 +59,10 @@ Implemented and covered:
   publishes the version last and restores launchers after failure; its rollback
   contracts also run on a native Linux host in an isolated temporary directory.
   Windows checks the installed application's exact version and source identity.
-  Windows fallback currently restores application files, not the complete NSIS
-  registration state.
+  Windows upgrades first obtain a checksum-verified copy of the previous native
+  installer. A failed upgrade invokes that installer to restore registration and
+  then restores saved application files. Failed native repair is reported
+  separately, with the previous files retained for recovery.
 
 ## Native build evidence
 
@@ -157,7 +159,7 @@ shutdown finish. Regression checks cover each case, including restart recovery.
   Contributed runner pools and real no-capacity failures have been validated in
   the infrastructure project; successful contributed execution remains pending.
 - Verify worker recreation and runtime updates on real contributed machines;
-  complete Windows registration recovery and native desktop acceptance.
+  complete native desktop and installer acceptance on each supported OS.
 - Publish the first complete release from `main`, verify the one-line installers,
   and confirm each package on its native operating system.
 - Enroll a real contributed VM, observe the CI qualification window, run a real CI

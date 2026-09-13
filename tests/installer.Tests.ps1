@@ -51,3 +51,58 @@ foreach ($output in @('NodeHarbor 0.1.2 (' + ('a' * 40) + ')', 'NodeHarbor 0.1.2
 }
 Assert-NodeHarborInstalledVersion -VersionOutput ('NodeHarbor 0.1.3 (' + ('b' * 40) + ")`r`n") -Expected '0.1.3'
 Write-Host 'Windows installed-version contracts passed'
+
+$repairRoot = Join-Path ([IO.Path]::GetTempPath()) ('nodeharbor-native-repair-test-' + [guid]::NewGuid())
+$repairApp = Join-Path $repairRoot 'application'
+New-Item -ItemType Directory -Path $repairApp -Force | Out-Null
+try {
+    $repairBinary = Join-Path $repairApp 'nodeharbor.exe'
+    Set-Content -LiteralPath $repairBinary -Value 'previous application'
+    $script:registration = 'previous registration'
+    $script:repairCalls = 0
+    $failed = $false
+    try {
+        Invoke-NodeHarborInstallTransaction -InstallDirectory $repairApp -Install {
+            Set-Content -LiteralPath $repairBinary -Value 'partly upgraded application'
+            $script:registration = 'new registration'
+            throw 'Upgrade could not verify its installed version'
+        } -Restore {
+            $script:repairCalls += 1
+            Set-Content -LiteralPath $repairBinary -Value 'previous application'
+            $script:registration = 'previous registration'
+        }
+    } catch { $failed = $true }
+    if (-not $failed -or $script:repairCalls -ne 1) { throw 'A failed upgrade did not invoke the previous native installer exactly once' }
+    if ($script:registration -ne 'previous registration') { throw 'Native installation registration was not restored' }
+    if ((Get-Content -Raw -LiteralPath $repairBinary).Trim() -ne 'previous application') { throw 'Native restoration did not restore the previous application' }
+} finally { Remove-Item -LiteralPath $repairRoot -Recurse -Force }
+Write-Host 'Windows native installer recovery contracts passed'
+
+$downloadRoot = Join-Path ([IO.Path]::GetTempPath()) ('nodeharbor-release-download-test-' + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $downloadRoot | Out-Null
+try {
+    $script:downloadCalls = @()
+    $script:badChecksum = $false
+    $fixture = Join-Path $downloadRoot 'fixture'
+    [IO.File]::WriteAllText($fixture, 'verified installer fixture')
+    $script:fixtureHash = (Get-FileHash -LiteralPath $fixture -Algorithm SHA256).Hash.ToLowerInvariant()
+    function Invoke-WebRequest {
+        param([switch]$UseBasicParsing, [string]$Uri, [string]$OutFile)
+        $script:downloadCalls += $Uri
+        if ($Uri.EndsWith('/SHA256SUMS')) {
+            $hash = if ($script:badChecksum) { '0' * 64 } else { $script:fixtureHash }
+            [IO.File]::WriteAllText($OutFile, ($hash + "  nodeharbor-v0.1.3-x86_64-pc-windows-msvc.exe`n"))
+        } else { [IO.File]::WriteAllText($OutFile, 'verified installer fixture') }
+    }
+    $downloaded = Get-NodeHarborReleasePackage -Version '0.1.3' -Target 'x86_64-pc-windows-msvc' -Directory $downloadRoot
+    if (-not (Test-Path -LiteralPath $downloaded)) { throw 'Verified native recovery package is unavailable' }
+    if ($script:downloadCalls.Count -ne 2 -or ($script:downloadCalls | Where-Object { -not $_.StartsWith('https://github.com/gu1p/nodeharbor/releases/download/v0.1.3/') })) { throw 'Recovery package was not fetched from the exact published release' }
+    $script:badChecksum = $true
+    $rejected = $false
+    try { Get-NodeHarborReleasePackage -Version '0.1.3' -Target 'x86_64-pc-windows-msvc' -Directory $downloadRoot | Out-Null } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Unverified recovery package was accepted' }
+} finally {
+    Remove-Item Function:Invoke-WebRequest -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $downloadRoot -Recurse -Force
+}
+Write-Host 'Windows verified recovery-download contracts passed'
