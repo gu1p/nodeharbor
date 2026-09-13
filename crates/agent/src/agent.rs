@@ -350,7 +350,7 @@ impl Agent {
             self.heartbeat(&config).await?;
             return Ok(());
         }
-        self.heartbeat(&config).await?;
+        let heartbeat_error = self.heartbeat(&config).await.err();
         let observation = crate::observe::observation(
             &self.store.directory,
             config
@@ -360,11 +360,17 @@ impl Agent {
                 .unwrap_or(0),
         );
         let decision = evaluate(&config.policy, &observation);
-        let allowed = decision.allowed && !self.runtime.lock().await.remote_paused;
-        let workloads = if info.running {
-            vm.workloads().await?
+        let allowed = decision.allowed
+            && heartbeat_error.is_none()
+            && !self.runtime.lock().await.remote_paused;
+        // An unreachable guest has an unknown workload count, not an empty one.
+        // Keep the grace period, but never let a failed inspection cancel its deadline.
+        let workloads = if info.running && info.reachable {
+            vm.workloads().await.ok()
+        } else if info.running {
+            None
         } else {
-            Vec::new()
+            Some(Vec::new())
         };
         let now = chrono::Utc::now().timestamp().max(0) as u64;
         let draining_since = self.runtime.lock().await.draining_since;
@@ -374,7 +380,7 @@ impl Agent {
             draining_since,
             now,
             drain_seconds: config.policy.drain_seconds,
-            workloads: workloads.len(),
+            workloads: workloads.as_ref().map_or(usize::MAX, Vec::len),
         });
         match transition {
             WorkerAction::Start => {
@@ -396,13 +402,25 @@ impl Agent {
                     "Pausing new assignments and waiting for running work",
                 )
                 .await;
-                self.request(&config, "/device/drain", Some(json!({})))
-                    .await?;
+                // Start the local timer before attempting network operations.
                 self.runtime.lock().await.draining_since = Some(now);
-                vm.renew_lease().await?;
+                let drain = self
+                    .request(&config, "/device/drain", Some(json!({})))
+                    .await;
+                if info.reachable {
+                    vm.renew_lease().await?;
+                }
+                drain?;
             }
             WorkerAction::Wait => {
-                vm.renew_lease().await?;
+                // Evictions denied by a disruption budget must be retried as work finishes.
+                let drain = self
+                    .request(&config, "/device/drain", Some(json!({})))
+                    .await;
+                if info.reachable {
+                    vm.renew_lease().await?;
+                }
+                drain?;
             }
             WorkerAction::Stop => {
                 vm.stop().await?;
@@ -433,7 +451,10 @@ impl Agent {
                 .await
             }
         }
-        self.runtime.lock().await.workloads = workloads;
+        self.runtime.lock().await.workloads = workloads.unwrap_or_default();
+        if let Some(error) = heartbeat_error {
+            return Err(error);
+        }
         self.heartbeat(&config).await?;
         Ok(())
     }
