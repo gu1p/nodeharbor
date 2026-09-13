@@ -18,3 +18,28 @@ try {
     Test-NodeHarborChecksum -Path $package -Expected (Get-FileHash -Algorithm SHA256 -Path $package).Hash.ToLowerInvariant()
 } finally { Remove-Item -LiteralPath $directory -Recurse -Force }
 Write-Host 'Windows installer contracts passed'
+
+$transactionRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('nodeharbor-rollback-test-' + [guid]::NewGuid())
+$application = Join-Path $transactionRoot 'app'
+New-Item -ItemType Directory -Path $application -Force | Out-Null
+try {
+    $previous = Join-Path $application 'nodeharbor.exe'
+    $settings = Join-Path $transactionRoot 'settings.json'
+    Set-Content -LiteralPath $previous -Value 'previous-working-application'
+    Set-Content -LiteralPath $settings -Value 'existing-device-credential'
+    $failed = $false
+    try {
+        Invoke-NodeHarborInstallTransaction -InstallDirectory $application -Install {
+            Set-Content -LiteralPath $previous -Value 'partial-new-application'
+            throw 'simulated NSIS failure after replacing an existing file'
+        }
+    } catch { $failed = $true }
+    if (-not $failed) { throw 'Partial installation unexpectedly succeeded' }
+    if ((Get-Content -Raw -LiteralPath $previous).Trim() -ne 'previous-working-application') { throw 'Partial installer failure destroyed the previous application' }
+    if ((Get-Content -Raw -LiteralPath $settings).Trim() -ne 'existing-device-credential') { throw 'Installer rollback changed device credentials' }
+    Invoke-NodeHarborInstallTransaction -InstallDirectory $application -Install {
+        Set-Content -LiteralPath $previous -Value 'verified-new-application'
+    }
+    if ((Get-Content -Raw -LiteralPath $previous).Trim() -ne 'verified-new-application') { throw 'Successful installer changes were rolled back' }
+} finally { Remove-Item -LiteralPath $transactionRoot -Recurse -Force }
+Write-Host 'Windows installation rollback contracts passed'

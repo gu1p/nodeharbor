@@ -14,6 +14,40 @@ function Test-NodeHarborChecksum {
     }
 }
 
+function Invoke-NodeHarborInstallTransaction {
+    param([Parameter(Mandatory)][string] $InstallDirectory, [Parameter(Mandatory)][scriptblock] $Install)
+    $backup = $null
+    $completed = $false
+    if (Test-Path -LiteralPath (Join-Path $InstallDirectory 'nodeharbor.exe')) {
+        $parent = Split-Path -Parent ([IO.Path]::GetFullPath($InstallDirectory))
+        if (-not $parent) { throw 'The application must have its own installation directory.' }
+        $backup = Join-Path $parent ('.nodeharbor-backup-' + [guid]::NewGuid().ToString())
+        Copy-Item -LiteralPath $InstallDirectory -Destination $backup -Recurse -Force
+    }
+    try {
+        & $Install
+        $completed = $true
+    } catch {
+        $failure = $_
+        if ($backup) {
+            try {
+                # Restore existing application files without deleting unrelated files
+                # the owner may have placed in a custom installation directory.
+                New-Item -ItemType Directory -Path $InstallDirectory -Force | Out-Null
+                Get-ChildItem -LiteralPath $backup -Force | ForEach-Object {
+                    Copy-Item -LiteralPath $_.FullName -Destination $InstallDirectory -Recurse -Force
+                }
+            } catch {
+                throw "Installation and file restoration failed. The previous application is preserved at $backup."
+            }
+            throw "Installation failed; previous application files were restored. Backup retained at $backup. Cause: $($failure.Exception.Message)"
+        }
+        throw $failure
+    } finally {
+        if ($completed -and $backup) { Remove-Item -LiteralPath $backup -Recurse -Force }
+    }
+}
+
 function Install-NodeHarbor {
     if ($env:OS -ne 'Windows_NT') { throw 'This installer runs on Windows. macOS and Linux use get-nodeharbor.sh.' }
     $target = Get-NodeHarborTarget
@@ -60,9 +94,11 @@ function Install-NodeHarbor {
         }
         # NSIS expects /D to be the final, unquoted argument. The download has
         # already passed integrity checks and the running worker is stopped.
-        $process = Start-Process -FilePath $package -ArgumentList "/S /D=$install" -Wait -PassThru
-        if ($process.ExitCode -ne 0) { throw "The NodeHarbor installer failed with exit code $($process.ExitCode)." }
-        if (-not (Test-Path -LiteralPath (Join-Path $install 'nodeharbor.exe'))) { throw 'The installer did not produce the expected application.' }
+        Invoke-NodeHarborInstallTransaction -InstallDirectory $install -Install {
+            $process = Start-Process -FilePath $package -ArgumentList "/S /D=$install" -Wait -PassThru
+            if ($process.ExitCode -ne 0) { throw "The NodeHarbor installer failed with exit code $($process.ExitCode)." }
+            if (-not (Test-Path -LiteralPath (Join-Path $install 'nodeharbor.exe'))) { throw 'The installer did not produce the expected application.' }
+        }
         Write-Host "Installed NodeHarbor $version. Open it from the Start menu. Enrollment and resource limits were preserved; sharing stays paused after an update."
     } finally {
         Remove-Item -LiteralPath $directory -Recurse -Force -ErrorAction SilentlyContinue
