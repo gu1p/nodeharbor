@@ -606,16 +606,26 @@ impl Agent {
         Ok(())
     }
 }
-async fn checked(response: reqwest::Response) -> Result<Value> {
+async fn checked(mut response: reqwest::Response) -> Result<Value> {
     let status = response.status();
     anyhow::ensure!(
         response.content_length().unwrap_or(0) <= 1024 * 1024,
         "The controller response is too large"
     );
-    let value: Value = response
-        .json()
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .context("The controller returned an unreadable response")?;
+        .context("The controller returned an unreadable response")?
+    {
+        anyhow::ensure!(
+            body.len() + chunk.len() <= 1024 * 1024,
+            "The controller response is too large"
+        );
+        body.extend_from_slice(&chunk);
+    }
+    let value: Value =
+        serde_json::from_slice(&body).context("The controller returned an unreadable response")?;
     anyhow::ensure!(
         status.is_success(),
         "{} ({status})",
