@@ -333,6 +333,14 @@ impl Provisioner {
 
 #[async_trait::async_trait]
 impl Cluster for Provisioner {
+    async fn probe_pod_uids(&self, device: &DeviceIdentity) -> Result<Vec<String>> {
+        Ok(self
+            .verified_probe_pods(device)
+            .await?
+            .iter()
+            .filter_map(|pod| pod["metadata"]["uid"].as_str().map(str::to_owned))
+            .collect())
+    }
     async fn bootstrap(&self, device: &DeviceIdentity) -> Result<Value> {
         uuid::Uuid::parse_str(&device.id)?;
         anyhow::ensure!(

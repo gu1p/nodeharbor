@@ -26,6 +26,9 @@ impl Cluster for ClusterRecorder {
         self.0.lock().unwrap().push(format!("drain:{}", device.id));
         Ok(())
     }
+    async fn probe_pod_uids(&self, _: &DeviceIdentity) -> anyhow::Result<Vec<String>> {
+        Ok(vec!["a8b219f7-a1a0-44a8-a876-bd06a64d91cb".into()])
+    }
     async fn resume(&self, device: &DeviceIdentity) -> anyhow::Result<()> {
         self.0.lock().unwrap().push(format!("resume:{}", device.id));
         Ok(())
@@ -80,7 +83,18 @@ async fn worker_controls_use_the_authenticated_identity_and_revocation_removes_c
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(grant["deviceId"], id);
-    for action in ["drain", "resume"] {
+    let (_, drained) = call(
+        &app,
+        "/api/v1/device/drain",
+        token,
+        json!({"deviceId":"someone-else"}),
+    )
+    .await;
+    assert_eq!(
+        drained["systemPodUids"],
+        json!(["a8b219f7-a1a0-44a8-a876-bd06a64d91cb"])
+    );
+    for action in ["resume"] {
         assert_eq!(
             call(&app, &format!("/api/v1/device/{action}"), token, json!({}))
                 .await

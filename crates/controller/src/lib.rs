@@ -49,6 +49,10 @@ pub trait Cluster: Send + Sync {
     async fn drain(&self, device: &DeviceIdentity) -> anyhow::Result<()>;
     async fn resume(&self, device: &DeviceIdentity) -> anyhow::Result<()>;
     async fn revoke(&self, device: &DeviceIdentity) -> anyhow::Result<()>;
+    /// Only independently verified system pods may be omitted from owner drains.
+    async fn probe_pod_uids(&self, _device: &DeviceIdentity) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 }
 
 struct ProxyAuth {
@@ -551,7 +555,11 @@ async fn device_control(
                 .execute(&state.db)
                 .await
                 .map_err(ApiError::internal)?;
-            json!({"draining":true})
+            let system_pods = cluster
+                .probe_pod_uids(&device)
+                .await
+                .map_err(cluster_error)?;
+            json!({"draining":true,"systemPodUids":system_pods})
         }
         "resume" => {
             cluster.resume(&device).await.map_err(cluster_error)?;

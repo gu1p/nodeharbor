@@ -17,6 +17,7 @@ struct Runtime {
     reason: Option<String>,
     worker: VmInfo,
     workloads: Vec<Value>,
+    system_pod_uids: Vec<String>,
     remote_paused: bool,
     starting: Option<Starting>,
     stopping_now: bool,
@@ -567,7 +568,8 @@ impl Agent {
         // An unreachable guest has an unknown workload count, not an empty one.
         // Keep the grace period, but never let a failed inspection cancel its deadline.
         let workloads = if info.running && info.reachable {
-            vm.workloads().await.ok()
+            let system_pods = self.runtime.lock().await.system_pod_uids.clone();
+            vm.workloads(&system_pods).await.ok()
         } else if info.running {
             None
         } else {
@@ -619,7 +621,7 @@ impl Agent {
                 if info.reachable {
                     vm.renew_lease().await?;
                 }
-                drain?;
+                self.remember_system_pods(&drain?).await?;
             }
             WorkerAction::Wait => {
                 self.set_status("draining", "Waiting for running work to finish")
@@ -631,7 +633,7 @@ impl Agent {
                 if info.reachable {
                     vm.renew_lease().await?;
                 }
-                drain?;
+                self.remember_system_pods(&drain?).await?;
             }
             WorkerAction::Stop => {
                 let deadline_expired = draining_since.is_some_and(|since| {
@@ -675,6 +677,10 @@ impl Agent {
         self.heartbeat(&config).await?;
         Ok(())
     }
+    async fn remember_system_pods(&self, response: &Value) -> Result<()> {
+        self.runtime.lock().await.system_pod_uids = system_pod_uids(response)?;
+        Ok(())
+    }
     async fn recreate_inner(&self, config: &Configuration, vm: &Vm) -> Result<()> {
         let request = config
             .recreation
@@ -691,7 +697,13 @@ impl Agent {
             let drain = self.request(config, "/device/drain", Some(json!({}))).await;
             if info.reachable {
                 vm.renew_lease().await?;
-                let workloads = vm.workloads().await?;
+                let exclusions = drain
+                    .as_ref()
+                    .ok()
+                    .map(system_pod_uids)
+                    .transpose()?
+                    .unwrap_or_default();
+                let workloads = vm.workloads(&exclusions).await?;
                 let empty = workloads.is_empty();
                 self.runtime.lock().await.workloads = workloads;
                 if empty && drain.is_ok() {
@@ -786,6 +798,26 @@ impl Agent {
         self.runtime.lock().await.remote_paused = value["remotePaused"].as_bool().unwrap_or(false);
         Ok(())
     }
+}
+fn system_pod_uids(response: &Value) -> Result<Vec<String>> {
+    let Some(value) = response.get("systemPodUids") else {
+        return Ok(Vec::new());
+    };
+    let items = value
+        .as_array()
+        .context("The controller returned an invalid system pod inventory")?;
+    anyhow::ensure!(
+        items.len() <= 16,
+        "The controller returned too many system pods"
+    );
+    items
+        .iter()
+        .map(|item| {
+            let uid = item.as_str().context("Missing system pod identity")?;
+            uuid::Uuid::parse_str(uid).context("Invalid system pod identity")?;
+            Ok(uid.to_owned())
+        })
+        .collect()
 }
 fn now_seconds() -> u64 {
     chrono::Utc::now().timestamp().max(0) as u64

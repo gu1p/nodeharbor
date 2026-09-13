@@ -5,7 +5,8 @@ use axum::{
     Json, Router,
 };
 use nodeharbor_controller::{
-    ApiClient, ClusterConfig, DeviceIdentity, HealthBackend, ProbeConfig, Provisioner, State,
+    ApiClient, Cluster, ClusterConfig, DeviceIdentity, HealthBackend, ProbeConfig, Provisioner,
+    State,
 };
 use serde_json::{json, Value};
 use std::{
@@ -18,6 +19,7 @@ const NAME: &str = "nodeharbor-9511182e9c484d20a15b1da8bb441386";
 #[derive(Clone, Default)]
 struct Fixture {
     writes: Arc<Mutex<Vec<Value>>>,
+    probe_override: Arc<Mutex<Option<Value>>>,
 }
 async fn upstream(
     Extract(f): Extract<Fixture>,
@@ -35,7 +37,10 @@ async fn upstream(
             json!({"metadata":{"name":NAME,"resourceVersion":"123","labels":{"nodeharbor.sikalio.dev/device":ID,"kubernetes.io/arch":"arm64"}},"spec":{"podCIDR":"127.0.0.0/24","taints":[{"key":"example.org/custom","value":"keep","effect":"NoSchedule"},{"key":"nodeharbor.sikalio.dev/quarantine","effect":"NoSchedule"}]},"status":{"addresses":[{"type":"InternalIP","address":"100.90.1.2"}],"capacity":{"cpu":"2","memory":"3900000Ki","ephemeral-storage":"29000000Ki"},"conditions":[{"type":"Ready","status":"True"},{"type":"MemoryPressure","status":"False"},{"type":"DiskPressure","status":"False"},{"type":"PIDPressure","status":"False"}]}})
         }
         ("GET", "/api/v1/namespaces/nodeharbor-system/pods") => {
-            json!({"items":[{"metadata":{"name":"probe-123","ownerReferences":[{"kind":"DaemonSet","name":"nodeharbor-probe","controller":true}]},"spec":{"nodeName":NAME},"status":{"phase":"Running","podIP":"127.0.0.1","conditions":[{"type":"Ready","status":"True"}]}}]})
+            json!({"items":[f.probe_override.lock().unwrap().clone().unwrap_or_else(valid_probe)]})
+        }
+        ("GET", "/apis/apps/v1/namespaces/nodeharbor-system/daemonsets/nodeharbor-probe") => {
+            json!({"apiVersion":"apps/v1","kind":"DaemonSet","metadata":{"name":"nodeharbor-probe","namespace":"nodeharbor-system","uid":"9be3051c-af26-4c75-84ed-250c843cefa2"}})
         }
         ("PATCH", p) if p.starts_with("/api/v1/nodes/") => {
             f.writes.lock().unwrap().push(value);
@@ -43,6 +48,9 @@ async fn upstream(
         }
         _ => panic!("Unexpected request {method} {uri}"),
     })
+}
+fn valid_probe() -> Value {
+    json!({"metadata":{"name":"probe-123","namespace":"nodeharbor-system","uid":"a8b219f7-a1a0-44a8-a876-bd06a64d91cb","ownerReferences":[{"apiVersion":"apps/v1","kind":"DaemonSet","name":"nodeharbor-probe","uid":"9be3051c-af26-4c75-84ed-250c843cefa2","controller":true}]},"spec":{"nodeName":NAME},"status":{"phase":"Running","podIP":"127.0.0.1","conditions":[{"type":"Ready","status":"True"}]}})
 }
 async fn probe(Query(query): Query<HashMap<String, String>>) -> Json<Value> {
     Json(json!({"nodeName":NAME,"dns":true,"nonce":query["nonce"],"padding":"x".repeat(4096)}))
@@ -102,6 +110,32 @@ async fn admission_requires_a_real_probe_on_the_enrolled_nodes_pod_network() {
             .unwrap()
             >= 0.0
     );
+    assert_eq!(
+        cluster.probe_pod_uids(&device).await.unwrap(),
+        vec!["a8b219f7-a1a0-44a8-a876-bd06a64d91cb"]
+    );
+    for pointer in [
+        "/metadata/ownerReferences/0/uid",
+        "/metadata/ownerReferences/0/apiVersion",
+        "/metadata/namespace",
+        "/spec/nodeName",
+    ] {
+        let mut counterfeit = valid_probe();
+        *counterfeit.pointer_mut(pointer).unwrap() = json!("different-object");
+        *fixture.probe_override.lock().unwrap() = Some(counterfeit);
+        assert!(
+            cluster
+                .observe(&device, &nodeharbor_core::Resources::default())
+                .await
+                .is_err(),
+            "Reject mismatched {pointer}"
+        );
+        assert!(
+            cluster.probe_pod_uids(&device).await.unwrap().is_empty(),
+            "Never hide an unrelated workload"
+        );
+    }
+    *fixture.probe_override.lock().unwrap() = None;
     cluster.place(&device, true, false, true).await.unwrap();
     let patch = fixture.writes.lock().unwrap()[0].clone();
     assert_eq!(

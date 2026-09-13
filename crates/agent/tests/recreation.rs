@@ -13,6 +13,7 @@ const NAME: &str = "nodeharbor-9511182e9c484d20a15b1da8bb441386";
 struct Host {
     state: Mutex<Option<String>>,
     work: AtomicBool,
+    probe: AtomicBool,
     fail_delete: AtomicBool,
     events: Arc<Mutex<Vec<String>>>,
 }
@@ -36,7 +37,12 @@ impl Runner for Host {
                 *state=None; String::new()
             },
             "exec" => {
-                if args.iter().any(|a| a=="pods") { json!({"items":if self.work.load(Ordering::SeqCst){vec![json!({"metadata":{"name":"build","namespace":"nodeharbor-ci"},"state":"SANDBOX_READY"})]}else{vec![]}}).to_string() }
+                if args.iter().any(|a| a=="pods") {
+                    let mut pods=vec![];
+                    if self.work.load(Ordering::SeqCst) {pods.push(json!({"metadata":{"name":"build","namespace":"nodeharbor-ci"},"state":"SANDBOX_READY"}));}
+                    if self.probe.load(Ordering::SeqCst) {pods.push(json!({"metadata":{"name":"health-probe","namespace":"nodeharbor-system","uid":"a8b219f7-a1a0-44a8-a876-bd06a64d91cb"},"state":"SANDBOX_READY"}));}
+                    json!({"items":pods}).to_string()
+                }
                 else if args.last().is_some_and(|a| a=="/etc/nodeharbor/device-id") { ID.into() }
                 else { String::new() }
             },
@@ -113,7 +119,10 @@ async fn reset(
             Json(json!({"error":"Cleanup pending"})),
         )
     } else {
-        (axum::http::StatusCode::OK, Json(json!({"ok":true})))
+        (
+            axum::http::StatusCode::OK,
+            Json(json!({"ok":true,"systemPodUids":["a8b219f7-a1a0-44a8-a876-bd06a64d91cb"]})),
+        )
     }
 }
 async fn controller(host: Arc<Host>) -> (String, Controller, tokio::task::JoinHandle<()>) {
@@ -128,7 +137,7 @@ async fn controller(host: Arc<Host>) -> (String, Controller, tokio::task::JoinHa
             "/api/v1/device/drain",
             post(|State(state): State<Controller>| async move {
                 state.host.events.lock().unwrap().push("drain".into());
-                Json(json!({"ok":true}))
+                Json(json!({"ok":true,"systemPodUids":["a8b219f7-a1a0-44a8-a876-bd06a64d91cb"]}))
             }),
         )
         .with_state(state.clone());
@@ -185,6 +194,7 @@ async fn running_work_drains_before_old_access_and_disk_are_removed_and_enrollme
     let host = Arc::new(Host::default());
     *host.state.lock().unwrap() = Some("Running".into());
     host.work.store(true, Ordering::SeqCst);
+    host.probe.store(true, Ordering::SeqCst);
     let (url, _, server) = controller(host.clone()).await;
     let agent = fixture(dir.path(), host.clone(), &url);
     agent.recreate_worker(policy()).await.unwrap();

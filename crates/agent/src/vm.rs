@@ -421,7 +421,7 @@ impl Vm {
         .await?;
         Ok(())
     }
-    pub async fn workloads(&self) -> Result<Vec<Value>> {
+    pub async fn workloads(&self, system_pod_uids: &[String]) -> Result<Vec<Value>> {
         self.verify_owner().await?;
         let output = self
             .guest(
@@ -431,6 +431,34 @@ impl Vm {
             )
             .await?;
         let value: Value = serde_json::from_str(&output)?;
-        Ok(value["items"].as_array().into_iter().flatten().filter(|pod|pod["state"]=="SANDBOX_READY"&&pod["metadata"]["namespace"]!="kube-system").map(|pod|json!({"name":pod["metadata"]["name"],"namespace":pod["metadata"]["namespace"],"state":"running"})).collect())
+        let items = value["items"]
+            .as_array()
+            .context("The worker returned no workload inventory")?;
+        let mut workloads = Vec::new();
+        for pod in items {
+            let state = pod["state"].as_str().context("A workload has no state")?;
+            anyhow::ensure!(
+                ["SANDBOX_READY", "SANDBOX_NOTREADY"].contains(&state),
+                "A workload has an unknown state"
+            );
+            if state != "SANDBOX_READY" {
+                continue;
+            }
+            let name = pod["metadata"]["name"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .context("A workload has no name")?;
+            let namespace = pod["metadata"]["namespace"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .context("A workload has no namespace")?;
+            let system = pod["metadata"]["uid"]
+                .as_str()
+                .is_some_and(|uid| system_pod_uids.iter().any(|known| known == uid));
+            if namespace != "kube-system" && !system {
+                workloads.push(json!({"name":name,"namespace":namespace,"state":"running"}));
+            }
+        }
+        Ok(workloads)
     }
 }

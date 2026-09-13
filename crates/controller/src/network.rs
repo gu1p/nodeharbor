@@ -22,6 +22,68 @@ pub struct ProbeConfig {
     pub port: u16,
 }
 impl Provisioner {
+    pub(crate) async fn verified_probe_pods(&self, device: &DeviceIdentity) -> Result<Vec<Value>> {
+        let Some(config) = &self.probe else {
+            return Ok(Vec::new());
+        };
+        let (status, daemonset) = self
+            .kube
+            .request(
+                Method::GET,
+                &format!(
+                    "/apis/apps/v1/namespaces/{}/daemonsets/nodeharbor-probe",
+                    config.namespace
+                ),
+                None,
+            )
+            .await?;
+        if status == 404 {
+            return Ok(Vec::new());
+        }
+        anyhow::ensure!(
+            (200..300).contains(&status),
+            "Cannot inspect the worker probe's DaemonSet"
+        );
+        let uid = daemonset["metadata"]["uid"]
+            .as_str()
+            .context("Probe DaemonSet identity is unavailable")?;
+        uuid::Uuid::parse_str(uid).context("Invalid probe DaemonSet identity")?;
+        anyhow::ensure!(
+            daemonset["apiVersion"] == "apps/v1"
+                && daemonset["kind"] == "DaemonSet"
+                && daemonset["metadata"]["name"] == "nodeharbor-probe"
+                && daemonset["metadata"]["namespace"] == config.namespace
+                && daemonset["metadata"]["deletionTimestamp"].is_null(),
+            "Probe DaemonSet identity changed"
+        );
+        let pods = self.kube.call(Method::GET,
+            &format!("/api/v1/namespaces/{}/pods?fieldSelector=spec.nodeName%3D{}&labelSelector=app.kubernetes.io/name%3Dnodeharbor-probe", config.namespace, device.node_name()), None).await?;
+        Ok(pods["items"]
+            .as_array()
+            .context("Probe inventory is unavailable")?
+            .iter()
+            .filter(|pod| {
+                pod["metadata"]["namespace"] == config.namespace
+                    && pod["spec"]["nodeName"] == device.node_name()
+                    && pod["metadata"]["uid"]
+                        .as_str()
+                        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+                    && pod["metadata"]["annotations"]["kubernetes.io/config.mirror"].is_null()
+                    && pod["metadata"]["ownerReferences"]
+                        .as_array()
+                        .is_some_and(|owners| {
+                            owners.iter().any(|owner| {
+                                owner["apiVersion"] == "apps/v1"
+                                    && owner["kind"] == "DaemonSet"
+                                    && owner["name"] == "nodeharbor-probe"
+                                    && owner["uid"] == uid
+                                    && owner["controller"] == true
+                            })
+                        })
+            })
+            .cloned()
+            .collect())
+    }
     pub fn with_probe(mut self, config: ProbeConfig) -> Result<Self> {
         api_id(&config.namespace)?;
         config.cluster_cidr.parse::<ipnet::Ipv4Net>()?;
@@ -75,25 +137,12 @@ impl HealthBackend for Provisioner {
             cluster.contains(&subnet.network()) && cluster.contains(&subnet.broadcast()),
             "Node pod subnet is outside the configured cluster network"
         );
-        let pods=self.kube.call(Method::GET,&format!("/api/v1/namespaces/{}/pods?fieldSelector=spec.nodeName%3D{}&labelSelector=app.kubernetes.io/name%3Dnodeharbor-probe",config.namespace,device.node_name()),None).await?;
-        let pod = pods["items"]
-            .as_array()
-            .context("Probe inventory is unavailable")?
+        let pods = self.verified_probe_pods(device).await?;
+        let pod = pods
             .iter()
             .find(|pod| {
-                pod["spec"]["nodeName"] == device.node_name()
-                    && pod["status"]["phase"] == "Running"
+                pod["status"]["phase"] == "Running"
                     && pod["metadata"]["deletionTimestamp"].is_null()
-                    && pod["metadata"]["annotations"]["kubernetes.io/config.mirror"].is_null()
-                    && pod["metadata"]["ownerReferences"]
-                        .as_array()
-                        .is_some_and(|owners| {
-                            owners.iter().any(|o| {
-                                o["kind"] == "DaemonSet"
-                                    && o["name"] == "nodeharbor-probe"
-                                    && o["controller"] == true
-                            })
-                        })
                     && pod["status"]["conditions"]
                         .as_array()
                         .is_some_and(|conditions| {
