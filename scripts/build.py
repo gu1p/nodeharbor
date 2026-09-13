@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 from release import TARGETS, collect
+from package_smoke import smoke_packages
 
 ROOT=Path(__file__).resolve().parents[1]
 def run(command,cwd=ROOT,env=None):
@@ -39,5 +40,6 @@ def main():
     if 'linux' in args.target:
         run(['cargo','build','--locked','--release','-p','nodeharbor-controller','--target',args.target],env=env)
     collect(ROOT,target_dir,ROOT/'dist',args.target,args.version,args.commit)
+    smoke_packages(ROOT/'dist',args.target,args.version,args.commit)
 
 if __name__=='__main__':main()
