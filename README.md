@@ -8,6 +8,32 @@ NodeHarbor runs the worker inside its own Linux VM and connects it using NetBird
 adapters have local automated coverage. Published packages, deployed networking,
 and real worker acceptance are tracked in [the delivery log](docs/implementation-log.md).
 
+## Install
+
+On macOS or Ubuntu:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/gu1p/nodeharbor/main/get-nodeharbor.sh | bash
+```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/gu1p/nodeharbor/main/get-nodeharbor.ps1 | iex
+```
+
+The installer selects the native package and verifies its checksum. You can also
+download packages from [Releases](https://github.com/gu1p/nodeharbor/releases).
+macOS installs into `~/Applications`; Ubuntu adds an application menu entry;
+Windows uses the native installer. Run the same command to update. Updates pause
+sharing and preserve enrollment and your resource rules.
+
+Install [Multipass](https://canonical.com/multipass/install) before preparing a
+worker. Open NodeHarbor, enroll using the code supplied by your fleet
+administrator, choose resource limits and sharing rules, and prepare the worker.
+Installing NodeHarbor alone does not contribute resources. Pilot packages are
+unsigned by Apple or Microsoft; NodeHarbor does not disable OS security checks.
+
 ## Architecture
 
 ```mermaid
