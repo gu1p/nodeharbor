@@ -369,9 +369,10 @@ async fn enroll(
             "Choose a device name between 1 and 120 characters",
         ));
     }
-    if !["macos", "linux", "windows"].contains(&input.platform.as_str())
+    if !["macos", "linux", "windows", "android"].contains(&input.platform.as_str())
         || !["amd64", "arm64"].contains(&input.architecture.as_str())
         || (input.platform == "windows" && input.architecture != "amd64")
+        || (input.platform == "android" && input.architecture != "arm64")
     {
         return Err(ApiError::bad(
             "This operating system and worker architecture are not supported",

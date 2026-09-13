@@ -34,6 +34,71 @@ async fn request(
 async fn app() -> Router {
     router(State::open("sqlite::memory:", "test-admin").await.unwrap())
 }
+
+#[tokio::test]
+async fn android_arm64_uses_the_same_single_use_enrollment_and_device_authentication() {
+    let app = app().await;
+    let (_, code) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/enrollment-codes",
+        Some("test-admin"),
+        json!({}),
+    )
+    .await;
+    let input = json!({"code":code["code"],"name":"Owner’s phone","platform":"android","architecture":"arm64"});
+    let (status, device) =
+        request(app.clone(), "POST", "/api/v1/enroll", None, input.clone()).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        request(app.clone(), "POST", "/api/v1/enroll", None, input)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        request(app.clone(), "GET", "/api/v1/device/fleet", None, json!({}))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, fleet) = request(
+        app,
+        "GET",
+        "/api/v1/device/fleet",
+        device["token"].as_str(),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fleet[0]["platform"], "android");
+    assert!(!fleet[0]["eligibleCi"].as_bool().unwrap());
+}
+
+#[tokio::test]
+async fn unsupported_android_architecture_does_not_consume_the_enrollment_code() {
+    let app = app().await;
+    let (_, code) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/enrollment-codes",
+        Some("test-admin"),
+        json!({}),
+    )
+    .await;
+    let mut input = json!({"code":code["code"],"name":"Owner’s phone","platform":"android","architecture":"amd64"});
+    assert_eq!(
+        request(app.clone(), "POST", "/api/v1/enroll", None, input.clone())
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    input["architecture"] = json!("arm64");
+    assert_eq!(
+        request(app, "POST", "/api/v1/enroll", None, input).await.0,
+        StatusCode::CREATED
+    );
+}
 #[tokio::test]
 async fn strangers_cannot_list_devices_or_create_enrollment_codes() {
     let app = app().await;

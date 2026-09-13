@@ -15,3 +15,9 @@ __pycache__/
 /desktop/binaries/
 /ui/test-results/
 /ui/playwright-report/
+/android/.gradle/
+/android/.kotlin/
+/android/**/.cxx/
+/android/**/build/
+/android/local.properties
+/android/app/src/main/jniLibs/

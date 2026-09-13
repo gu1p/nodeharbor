@@ -1,5 +1,50 @@
 //! Shared contribution rules. Local owner preferences always bound admission.
 use serde::{Deserialize, Serialize};
+mod android;
+pub use android::android_request;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkerInput {
+    pub permitted: bool,
+    pub running: bool,
+    pub draining_since: Option<u64>,
+    pub now: u64,
+    pub drain_seconds: u32,
+    pub workloads: usize,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkerAction {
+    Start,
+    Drain,
+    Wait,
+    Stop,
+    Keep,
+}
+
+pub fn worker_transition(input: &WorkerInput) -> WorkerAction {
+    if input.permitted {
+        return if input.running {
+            WorkerAction::Keep
+        } else {
+            WorkerAction::Start
+        };
+    }
+    if !input.running {
+        return WorkerAction::Keep;
+    }
+    match input.draining_since {
+        None => WorkerAction::Drain,
+        Some(since)
+            if input.workloads == 0
+                || input.now.saturating_sub(since) >= u64::from(input.drain_seconds) =>
+        {
+            WorkerAction::Stop
+        }
+        Some(_) => WorkerAction::Wait,
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]

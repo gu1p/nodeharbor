@@ -2,6 +2,8 @@
 name = "nodeharbor-core"
 version.workspace = true
 edition.workspace = true
+[lib]
+crate-type = ["rlib", "staticlib"]
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

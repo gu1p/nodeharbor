@@ -1,0 +1,43 @@
+{
+  "formatVersion": 1,
+  "abi": "arm64-v8a",
+  "minSdk": 33,
+  "ndk": "28.2.13676358",
+  "meson": "1.9.1",
+  "qemu": {
+    "version": "11.1.1",
+    "url": "https://download.qemu.org/qemu-11.1.1.tar.xz",
+    "sha256": "079ffbff8a7111bbc89022107cbabf3bbfd614d5fc9d7cc675991196aca12482"
+  },
+  "glib": {
+    "version": "2.88.3",
+    "url": "https://download.gnome.org/sources/glib/2.88/glib-2.88.3.tar.xz",
+    "sha256": "ab24d24e698dfa1e408b7bcdb508f4aafc906185a8b8ce72fdf79bbbdc9b383b"
+  },
+  "slirp": {
+    "version": "4.9.4",
+    "url": "https://gitlab.freedesktop.org/slirp/libslirp.git",
+    "commit": "d09dc9a70360ee7838acccbd234ab83f3b9b37a5"
+  },
+  "guest": {
+    "version": "ubuntu-24.04-20260911",
+    "disk": {
+      "url": "https://cloud-images.ubuntu.com/noble/20260911/noble-server-cloudimg-arm64.tar.gz",
+      "sha256": "82d61182744e8a4f3d388a1965208abb351daa47a689c49165bfb0c41471af35",
+      "maximumBytes": 629145600,
+      "entry": "noble-server-cloudimg-arm64.img",
+      "imageBytes": 2080374784,
+      "imageSha256": "9d53efe099d11829031957a49ce99a4db326c1a5ef59a2f3c547de3c0f58048c"
+    },
+    "kernel": {
+      "url": "https://cloud-images.ubuntu.com/noble/20260911/unpacked/noble-server-cloudimg-arm64-vmlinuz-generic",
+      "sha256": "b4567593bda98a0723d9234603ec51d6ec7ee0553e1f36793a9da3956a68183e",
+      "maximumBytes": 67108864
+    },
+    "initrd": {
+      "url": "https://cloud-images.ubuntu.com/noble/20260911/unpacked/noble-server-cloudimg-arm64-initrd-generic",
+      "sha256": "e72c33759e7c1988950407fec9c6c1f03869a6a09873fdc223217274b53a63b2",
+      "maximumBytes": 67108864
+    }
+  }
+}

@@ -1,0 +1,156 @@
+--- a/meson.build
++++ b/meson.build
+@@ -1,6 +1,6 @@
+ project('qemu', ['c'], meson_version: '>=1.5.0',
+         default_options: ['warning_level=1', 'c_std=gnu11', 'cpp_std=gnu++23', 'b_colorout=auto',
+-                          'b_staticpic=false', 'stdsplit=false', 'optimization=2', 'b_pie=true'] +
++                          'b_staticpic=true', 'stdsplit=false', 'optimization=2', 'b_pie=true'] +
+ 
+                           # build.rust_std breaks with older meson, but Rust does not
+                           # support old meson anyway
+@@ -1372,7 +1372,7 @@
+ if host_os != 'windows'
+   have_shm_open = cc.has_function('shm_open')
+   if not have_shm_open
+-    rt = cc.find_library('rt', required: true)
++    rt = cc.find_library('rt', required: not cc.has_header('android/api-level.h'))
+   endif
+ endif
+ 
+@@ -4447,14 +4447,13 @@
+       exe_name += '-unsigned'
+     endif
+ 
+-    emulator = executable(exe_name, exe['sources'],
++    emulator = shared_library(exe_name, exe['sources'],
+                install: true,
+-               c_args: c_args,
++               c_args: c_args + ['-Dmain=nodeharbor_qemu_main'],
+                dependencies: arch_deps + exe['dependencies'],
+                objects: lib.extract_all_objects(recursive: true),
+                link_depends: [block_syms, qemu_syms],
+-               link_args: link_args,
+-               win_subsystem: exe['win_subsystem'])
++               link_args: link_args)
+ 
+     if host_os == 'darwin'
+       icon = 'pc-bios/qemu.rsrc'
+--- a/system/main.c
++++ b/system/main.c
+@@ -24,6 +24,11 @@
+ 
+ #include "qemu/osdep.h"
+ #include "qemu-main.h"
++#include "qemu-version.h"
++
++const char *nodeharbor_qemu_version(void);
++const char *nodeharbor_qemu_version(void) { return QEMU_VERSION; }
++int nodeharbor_qemu_main(int argc, char **argv);
+ #include "qemu/main-loop.h"
+ #include "system/replay.h"
+ #include "system/system.h"
+--- a/util/oslib-posix.c
++++ b/util/oslib-posix.c
+@@ -984,6 +984,10 @@
+ 
+ int qemu_shm_alloc(size_t size, Error **errp)
+ {
++#ifdef __ANDROID__
++    error_setg(errp, "POSIX shared memory is unavailable on Android");
++    return -1;
++#else
+     g_autoptr(GString) shm_name = g_string_new(NULL);
+     int fd, oflag, cur_sequence;
+     static int sequence;
+@@ -1032,4 +1036,5 @@
+     }
+ 
+     return fd;
+-}
++#endif
++}
+--- a/hw/core/loader.c
++++ b/hw/core/loader.c
+@@ -75,6 +75,55 @@
+ 
+ static int roms_loaded;
+ 
++/* Binder-provided files have no pathname in Android's isolated process. */
++static gboolean fdset_get_contents(const char *filename, gchar **contents,
++                                  gsize *length, GError **error)
++{
++    int fd;
++    struct stat info;
++    gchar *data = NULL;
++    size_t offset = 0;
++
++    if (!g_str_has_prefix(filename, "/dev/fdset/")) {
++        return g_file_get_contents(filename, contents, length, error);
++    }
++    fd = qemu_open(filename, O_RDONLY | O_BINARY, NULL);
++    if (fd < 0) {
++        goto fail;
++    }
++    if (fstat(fd, &info) || info.st_size < 0 || info.st_size > 512 * MiB) {
++        goto fail;
++    }
++    data = g_try_malloc(info.st_size + 1);
++    if (!data) {
++        goto fail;
++    }
++    while (offset < info.st_size) {
++        ssize_t count = pread(fd, data + offset, info.st_size - offset, offset);
++        if (count < 0 && errno == EINTR) {
++            continue;
++        }
++        if (count <= 0) {
++            goto fail;
++        }
++        offset += count;
++    }
++    close(fd);
++    data[offset] = 0;
++    *contents = data;
++    *length = offset;
++    return TRUE;
++fail:
++    if (fd >= 0) {
++        close(fd);
++    }
++    g_free(data);
++    g_set_error_literal(error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
++                        "Unable to read the bounded inherited image descriptor");
++    return FALSE;
++}
++
++
+ /* return the size or -1 if error */
+ int64_t get_image_size(const char *filename, Error **errp)
+ {
+@@ -822,7 +871,7 @@
+     ssize_t bytes;
+     int ret = -1;
+ 
+-    if (!g_file_get_contents(filename, (char **) &compressed_data, &len,
++    if (!fdset_get_contents(filename, (char **) &compressed_data, &len,
+                              NULL)) {
+         goto out;
+     }
+@@ -1104,7 +1153,7 @@
+         rom->path = g_strdup(file);
+     }
+ 
+-    if (!g_file_get_contents(rom->path, (gchar **) &rom->data,
++    if (!fdset_get_contents(rom->path, (gchar **) &rom->data,
+                              &size, &gerr)) {
+         fprintf(stderr, "rom: file %-20s: error %s\n",
+                 rom->name, gerr->message);
+@@ -1930,7 +1979,7 @@
+     gchar *hex_blob;
+     ssize_t total_size = 0;
+ 
+-    if (!g_file_get_contents(filename, &hex_blob, &hex_blob_size, NULL)) {
++    if (!fdset_get_contents(filename, &hex_blob, &hex_blob_size, NULL)) {
+         return -1;
+     }
+ 

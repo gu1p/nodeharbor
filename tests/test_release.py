@@ -16,7 +16,7 @@ spec.loader.exec_module(release)
 class ReleaseContract(unittest.TestCase):
     def remote_installers(self, folder):
         return [{'name':path.name,'digest':'sha256:'+release.checksum(path),'state':'uploaded'}
-                for path in sorted(folder.iterdir()) if path.suffix in ['.exe','.dmg','.deb','.AppImage']]
+                for path in sorted(folder.iterdir()) if path.name.endswith(('.exe','.dmg','.deb','.AppImage','.apk','-runtime-source.tar.gz'))]
 
     def test_download_assets_contain_only_installers_and_build_evidence_stays_internal(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -27,11 +27,13 @@ class ReleaseContract(unittest.TestCase):
                 release.publish(folder,'0.1.12','a'*40,'owner/project',folder/'key')
             upload=next(command for command in commands if command[:3]==['gh','release','upload'])
             self.assertEqual({Path(path).name for path in upload[7:]},{asset['name'] for asset in draft['assets']})
-            self.assertEqual(len(draft['assets']),7)
+            self.assertEqual(len(draft['assets']),9)
             self.assertTrue((folder/'release-manifest.json').is_file())
             self.assertTrue((folder/'SHA256SUMS').is_file())
             notes=(folder/'release-notes.md').read_text()
             self.assertIn('Windows x64',notes)
+            self.assertIn('Android ARM64',notes)
+            self.assertIn('runtime-source.tar.gz',notes)
             self.assertNotIn('`SHA256SUMS`',notes)
 
     def test_publication_can_be_retried_after_removing_auxiliary_downloads(self):
@@ -95,12 +97,17 @@ class ReleaseContract(unittest.TestCase):
                 name=f'nodeharbor-v0.1.12-{target}{extension}'
                 (folder/name).write_bytes(b'native-package-fixture')
                 assets.append({'name':name,'sha256':release.checksum(folder/name)})
-            (folder/f'nodeharbor-v0.1.12-{target}.json').write_text(json.dumps({'version':'0.1.12','commit':'a'*40,'target':target,'os':os_name,'arch':arch,'assets':assets}))
+            manifest = {'version':'0.1.12','commit':'a'*40,'target':target,'os':os_name,'arch':arch,'assets':assets}
+            if os_name == 'android':
+                manifest['qualification'] = dict(version='0.1.12', commit='a'*40, apkSha256=assets[0]['sha256'],
+                    certificateSha256='c'*64, signedRelease=True, physical=True, apiLevels=[33,36,37],
+                    ownerControlsPassed=True, vpnPreserved=True, ciQualified=True, arm64JobSucceeded=True)
+            (folder/f'nodeharbor-v0.1.12-{target}.json').write_text(json.dumps(manifest))
 
     def test_complete_packages_are_accepted_but_tampering_and_wrong_architecture_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             folder=Path(directory); self.fixture(folder)
-            self.assertEqual(len(release.validate_assets(folder,'0.1.12','a'*40)),5)
+            self.assertEqual(len(release.validate_assets(folder,'0.1.12','a'*40)),6)
             path=folder/'nodeharbor-v0.1.12-aarch64-apple-darwin.json'
             data=json.loads(path.read_text());data['arch']='amd64';path.write_text(json.dumps(data))
             with self.assertRaises(ValueError):release.validate_assets(folder,'0.1.12','a'*40)
@@ -156,10 +163,11 @@ class ReleaseContract(unittest.TestCase):
             folder = Path(directory)
             with self.assertRaises(ValueError): release.validate_assets(folder, "0.1.12", "a" * 40)
 
-    def test_all_five_native_targets_have_unique_installable_assets(self):
+    def test_all_five_desktop_targets_and_android_have_unique_installable_assets(self):
         targets = release.TARGETS
-        self.assertEqual(len(targets), 5)
-        self.assertEqual(len(set(targets)), 5)
+        self.assertEqual(len(targets), 6)
+        self.assertEqual(len(set(targets)), 6)
+        self.assertEqual(targets['aarch64-linux-android'], ('android', 'arm64', ['.apk', '-runtime-source.tar.gz']))
         self.assertIn("x86_64-pc-windows-msvc", targets)
         self.assertIn("aarch64-apple-darwin", targets)
         self.assertIn("aarch64-unknown-linux-gnu", targets)
@@ -178,6 +186,6 @@ class ReleaseContract(unittest.TestCase):
 
     def test_image_publication_waits_for_all_platforms_and_is_required_before_a_release(self):
         workflow=(ROOT/'.github/workflows/release.yml').read_text()
-        self.assertIn('container-check:\n    needs: [identity, native]',workflow)
+        self.assertIn('container-check:\n    needs: [identity, native, android]',workflow)
         self.assertIn('needs: [identity, native, container-check]',workflow)
-        self.assertIn('needs: [identity, native, container-publish]',workflow)
+        self.assertIn('needs: [identity, native, container-publish, android-qualification]',workflow)

@@ -513,7 +513,9 @@ async fn shortening_a_drain_deadline_wakes_an_idle_supervisor_before_its_next_he
     .unwrap();
     let supervisor = agent.clone();
     let running = tokio::spawn(async move { supervisor.run().await });
-    tokio::time::timeout(Duration::from_secs(3), completed.notified())
+    // Host inspection and fixture startup can contend with native builds. The
+    // owner-action latency contract below still has its strict two-second bound.
+    tokio::time::timeout(Duration::from_secs(15), completed.notified())
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;

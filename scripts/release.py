@@ -19,16 +19,38 @@ TARGETS = {
     "x86_64-apple-darwin": ("macos", "amd64", [".dmg", ".app.tar.gz"]),
     "aarch64-apple-darwin": ("macos", "arm64", [".dmg", ".app.tar.gz"]),
     "x86_64-pc-windows-msvc": ("windows", "amd64", [".exe"]),
+    "aarch64-linux-android": ("android", "arm64", [".apk", "-runtime-source.tar.gz"]),
 }
-INSTALLABLE_EXTENSIONS = ('.exe', '.dmg', '.deb', '.AppImage')
+INSTALLABLE_EXTENSIONS = ('.exe', '.dmg', '.deb', '.AppImage', '.apk')
+PUBLIC_EXTENSIONS = INSTALLABLE_EXTENSIONS + ('-runtime-source.tar.gz',)
+
+def android_version_code(version: str) -> int:
+    if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', version):
+        raise ValueError('Android releases require a numeric version')
+    major, minor, patch = map(int, version.split('.'))
+    code = major * 100_000_000 + minor * 1_000_000 + patch
+    if minor >= 100 or patch >= 1_000_000 or not 1 <= code <= 2_100_000_000:
+        raise ValueError('Android version exceeds its supported version-code range')
+    return code
+
+def validate_android_qualification(evidence: dict, version: str, commit: str, apk_sha256: str):
+    if (evidence.get('version'), evidence.get('commit'), evidence.get('apkSha256')) != (version, commit, apk_sha256):
+        raise ValueError('Android qualification does not identify this exact APK and source')
+    required = ['signedRelease', 'physical', 'ownerControlsPassed', 'vpnPreserved', 'ciQualified', 'arm64JobSucceeded']
+    if any(evidence.get(field) is not True for field in required):
+        raise ValueError('Android requires signed physical-device, owner-control, VPN and real ARM64 CI qualification')
+    if not {33, 36, 37}.issubset(set(evidence.get('apiLevels', []))):
+        raise ValueError('Android release testing must cover API 33, 36 and 37')
+    if not re.fullmatch('[0-9a-f]{64}', evidence.get('certificateSha256', '')):
+        raise ValueError('Android qualification must identify its signing certificate')
 
 def installable_assets(manifest: dict) -> list[dict]:
     return [asset for target in manifest['targets'] for asset in target['assets']
-            if asset['name'].endswith(INSTALLABLE_EXTENSIONS)]
+            if asset['name'].endswith(PUBLIC_EXTENSIONS)]
 
 def verify_published_installers(existing: dict, manifest: dict):
     expected = {asset['name']: 'sha256:' + asset['sha256'] for asset in installable_assets(manifest)}
-    uploaded = [asset for asset in existing['assets'] if asset['name'].endswith(INSTALLABLE_EXTENSIONS)]
+    uploaded = [asset for asset in existing['assets'] if asset['name'].endswith(PUBLIC_EXTENSIONS)]
     actual = {asset['name']: asset.get('digest') for asset in uploaded}
     if len(uploaded) != len(actual) or actual != expected or any(asset.get('state') != 'uploaded' for asset in uploaded):
         raise ValueError('Published release installers are incomplete or differ from the tested build')
@@ -36,15 +58,15 @@ def verify_published_installers(existing: dict, manifest: dict):
 def release_notes(version: str, commit: str, repo: str) -> str:
     tag = f'v{version}'
     rows = []
-    platforms = {'macos': 'macOS', 'linux': 'Ubuntu', 'windows': 'Windows'}
+    platforms = {'macos': 'macOS', 'linux': 'Ubuntu', 'windows': 'Windows', 'android': 'Android'}
     for target, (os_name, arch, extensions) in TARGETS.items():
         cpu = 'Apple Silicon' if os_name == 'macos' and arch == 'arm64' else ('ARM64' if arch == 'arm64' else 'x64')
         links = [f'[{extension[1:]}](https://github.com/{repo}/releases/download/{tag}/nodeharbor-{tag}-{target}{extension})'
-                 for extension in extensions if extension in INSTALLABLE_EXTENSIONS]
+                 for extension in extensions if extension in PUBLIC_EXTENSIONS]
         rows.append(f'| {platforms[os_name]} {cpu} | {" · ".join(links)} |')
     return (f'NodeHarbor {tag}, built from `{commit}`.\n\n'
             '| System | Download |\n| --- | --- |\n' + '\n'.join(rows) + '\n\n'
-            'All five targets passed the required checks before publication. The one-line installers verify downloads using GitHub release asset digests. Build manifests and signed verification records are retained in GitHub Actions.\n\n'
+            'All five desktop targets and Android passed the required release checks. Android includes its corresponding runtime sources. The one-line desktop installers verify downloads using GitHub release asset digests. Build manifests and signed verification records are retained in GitHub Actions.\n\n'
             'Installing the app does not enable sharing. See the repository README for prerequisites and fleet setup. Pilot desktop packages do not yet carry Apple Developer ID or Windows distribution certificates.\n')
 
 def version_for(base: str, history_position: int) -> str:
@@ -130,6 +152,9 @@ def github_release(repo: str, tag: str) -> dict | None:
 
 def publish(folder: Path, version: str, commit: str, repo: str, key: Path):
     manifests=validate_assets(folder,version,commit)
+    android = next(target for target in manifests if target['target'] == 'aarch64-linux-android')
+    apk = next(asset for asset in android['assets'] if asset['name'].endswith('.apk'))
+    validate_android_qualification(android.get('qualification', {}), version, commit, apk['sha256'])
     manifest={'version':version,'commit':commit,'targets':manifests}
     manifest_file=folder/'release-manifest.json'
     manifest_file.write_text(json.dumps(manifest,indent=2)+'\n')

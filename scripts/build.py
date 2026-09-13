@@ -17,7 +17,7 @@ def run(command,cwd=ROOT,env=None):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('target',choices=TARGETS);parser.add_argument('version');parser.add_argument('commit')
+    parser.add_argument('target',choices=[target for target in TARGETS if target != 'aarch64-linux-android']);parser.add_argument('version');parser.add_argument('commit')
     parser.add_argument('--debug',action='store_true',help='Build a local application bundle for inspection without publishing')
     args=parser.parse_args()
     env={**os.environ,'NODEHARBOR_VERSION':args.version,'NODEHARBOR_COMMIT':args.commit}

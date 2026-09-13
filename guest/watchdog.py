@@ -18,15 +18,20 @@ def lease_expired(renewed,now,timeout=120):
 def uptime():
     return float(Path('/proc/uptime').read_text().split()[0])
 
+def renew_lease():
+    now=uptime()
+    LEASE.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
+    temporary=LEASE.with_suffix('.new')
+    temporary.write_text(str(now))
+    temporary.chmod(0o600)
+    temporary.replace(LEASE)
+
 def main():
     if sys.platform!='linux' or os.geteuid()!=0 or not Path('/etc/nodeharbor/device-id').is_file():
         raise SystemExit('This command only runs inside a managed NodeHarbor Linux guest')
     now=uptime()
     if len(sys.argv)==2 and sys.argv[1]=='renew':
-        LEASE.parent.mkdir(mode=0o700,parents=True,exist_ok=True)
-        temporary=LEASE.with_suffix('.new')
-        temporary.write_text(str(now))
-        temporary.replace(LEASE)
+        renew_lease()
         return
     try: renewed=float(LEASE.read_text())
     except (OSError,ValueError):renewed=None

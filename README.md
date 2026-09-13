@@ -27,6 +27,9 @@ the GitHub Releases API. You can also download installers directly from
 [Releases](https://github.com/gu1p/nodeharbor/releases): `.exe` for Windows, `.dmg`
 for macOS, and `.deb` or `.AppImage` for Ubuntu. Build archives, manifests, and
 signed verification records stay in GitHub Actions instead of the download list.
+The native Android ARM64 implementation adds an `.apk` and its corresponding
+runtime sources to qualified releases. Its build, continuous-running controls,
+and remaining release prerequisites are documented in [Android](docs/android.md).
 macOS installs into `~/Applications`; Ubuntu adds an application menu entry;
 Windows uses the native installer. Run the same command to update. Updates pause
 sharing and preserve enrollment and your resource rules.
@@ -72,6 +75,10 @@ same contribution lifecycle. NetBird supplies
 private connectivity; it does not create Kubernetes workers. NodeHarbor owns worker
 enrollment, local sharing policy, VM lifecycle, and fleet eligibility.
 
+Android uses Kotlin and native Jetpack Compose components, a foreground owner
+service, shared Rust policy, and an isolated QEMU ARM64 runtime. Its network broker
+uses Android's existing connection and VPN policy.
+
 ## Development
 
 Install Rust, Node.js, Python 3.11 or newer, and the
@@ -101,7 +108,8 @@ credentials, cluster credentials, or private deployment settings.
 | macOS 14+ | Apple Silicon, Intel | DMG |
 | Ubuntu 24.04 | ARM64, x64 | Debian package and AppImage |
 | Windows | x64 | NSIS installer |
+| Android 13+ | ARM64 | APK; release qualification pending |
 
 Pilot desktop packages do not yet use Apple Developer ID distribution signing
 or a Windows distribution certificate. The release pipeline must verify all five
-targets before publishing a release.
+desktop targets and the Android device/fleet qualification before publishing a release.
