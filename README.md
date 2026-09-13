@@ -48,6 +48,12 @@ The release signing key stays in GitHub Actions secrets; applications contain on
 public verification key. All native checks and release publication must succeed before
 a version becomes available for automatic updates.
 
+On macOS, verified bundles are staged beside the installed application and replaced
+using Apple's native file-replacement API. Updates work when the system temporary
+directory is on a different disk, without changing `TMPDIR`. The application directory
+must be writable by its owner; the normal installer uses `~/Applications`. Older
+installations need the current installer once to obtain the corrected updater.
+
 During preparation, **Your machine → Worker activity** shows the current step,
 elapsed time, live command output, and errors. It updates every second. Turn off
 **Follow latest output** to read earlier entries, or use **Copy logs** to share

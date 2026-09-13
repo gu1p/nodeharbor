@@ -76,7 +76,9 @@ impl Updates {
                     self.wake.notify_one();
                 } else {
                     self.generation.fetch_add(1, Ordering::SeqCst);
-                    if ["downloading", "waiting"].contains(&self.status().phase.as_str()) {
+                    if ["downloading", "preparing", "waiting"]
+                        .contains(&self.status().phase.as_str())
+                    {
                         self.report("cancelling", "Cancelling the update…");
                     }
                 }
@@ -86,8 +88,14 @@ impl Updates {
                 self.report("cancelling", "Cancelling the update…");
             }
             "check" | "install" => {
-                if ["checking", "downloading", "waiting", "cancelling"]
-                    .contains(&self.status().phase.as_str())
+                if [
+                    "checking",
+                    "downloading",
+                    "preparing",
+                    "waiting",
+                    "cancelling",
+                ]
+                .contains(&self.status().phase.as_str())
                 {
                     return Err("An update operation is already running".into());
                 }
@@ -204,15 +212,20 @@ impl update_flow::UpdateRuntime for Runtime {
     }
     async fn prepare(&self) -> Result<(), String> {
         self.updates.report(
-            "waiting",
-            "Waiting for running jobs to finish. New assignments are paused.",
+            "preparing",
+            "Waiting for the current worker operation to finish before updating.",
         );
         self.app
             .state::<Desktop>()
             .agent
             .begin_application_update()
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        self.updates.report(
+            "waiting",
+            "Waiting for running jobs to finish before restarting.",
+        );
+        Ok(())
     }
     async fn ready(&self) -> Result<bool, String> {
         self.app

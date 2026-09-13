@@ -23,7 +23,7 @@ describe('Keeping NodeHarbor up to date',()=>{
   expect(api.action).not.toHaveBeenCalled();expect(api.savePolicy).not.toHaveBeenCalled();
  });
  it('explains why installation waits for a job and allows cancellation',async()=>{
-  const api=fixture('waiting','Waiting for running jobs to finish. New assignments are paused.');
+  const api=fixture('waiting','Waiting for running jobs to finish before restarting.');
   const user=userEvent.setup();render(<App backend={api as Backend}/>);
   await user.click(await screen.findByRole('button',{name:'App updates'}));
   expect(await screen.findByText(/Waiting for running jobs to finish/)).toBeVisible();
@@ -57,4 +57,15 @@ it('keeps update controls disabled while cancellation releases worker maintenanc
  expect(await screen.findByText('Cancelling the update…')).toBeVisible();
  expect(screen.getByRole('button',{name:'Check for updates'})).toBeDisabled();
  expect(screen.queryByRole('button',{name:'Install update'})).not.toBeInTheDocument();
+});
+
+it('lets the owner cancel while an existing worker operation finishes before maintenance',async()=>{
+ const api=fixture('preparing','Waiting for the current worker operation to finish before updating.');
+ const user=userEvent.setup();render(<App backend={api as Backend}/>);
+ await user.click(await screen.findByRole('button',{name:'App updates'}));
+ expect(await screen.findByRole('status')).toHaveTextContent('Waiting for the current worker operation');
+ expect(screen.getByRole('button',{name:'Check for updates'})).toBeDisabled();
+ await user.click(screen.getByRole('button',{name:'Cancel update'}));
+ expect(api.updateAction).toHaveBeenCalledWith('cancel');
+ expect(api.action).not.toHaveBeenCalled();
 });

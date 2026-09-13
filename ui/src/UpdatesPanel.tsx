@@ -7,7 +7,7 @@ export function UpdatesPanel({backend}:{backend:Backend}) {
  const load=useCallback(async()=>{try{setStatus(await backend.updates!());setError('');}catch(error){setError(String(error instanceof Error?error.message:error));}},[backend]);
  useEffect(()=>{void load();const timer=setInterval(()=>void load(),1000);return()=>clearInterval(timer);},[load]);
  async function action(action:UpdateAction){setBusy(true);try{setStatus(await backend.updateAction!(action));setError('');}catch(error){setError(String(error instanceof Error?error.message:error));}finally{setBusy(false);}}
- const working=!!status&&['checking','downloading','waiting','cancelling','installing'].includes(status.phase);
+ const working=!!status&&['checking','downloading','preparing','waiting','cancelling','installing'].includes(status.phase);
  return <section className="panel updates-panel" aria-labelledby="updates-title">
   <div className="section-heading"><div><div className="eyebrow">APPLICATION</div><h1 id="updates-title">App updates</h1><p>Keep this computer on the latest NodeHarbor version.</p></div></div>
   {error&&<div className="alert" role="alert"><span>{error}</span><button onClick={()=>void load()}>Retry update status</button></div>}
@@ -20,7 +20,7 @@ export function UpdatesPanel({backend}:{backend:Backend}) {
    <p className="muted">Installed: {status.currentVersion}{status.availableVersion&&<> · Available: {status.availableVersion}</>}</p>
    <div className="actions"><button disabled={busy||working} onClick={()=>void action('check')}>Check for updates</button>
     {status.phase==='available'&&<button className="primary" disabled={busy} onClick={()=>void action('install')}>Install update</button>}
-    {['downloading','waiting'].includes(status.phase)&&<button disabled={busy} onClick={()=>void action('cancel')}>Cancel update</button>}
+    {['downloading','preparing','waiting'].includes(status.phase)&&<button disabled={busy} onClick={()=>void action('cancel')}>Cancel update</button>}
    </div>
   </>}
  </section>;
