@@ -153,10 +153,12 @@ with a TCP-only worker policy. Reapplying the declaration required no API writes
 This is control-plane routing configuration; end-to-end worker connectivity still
 requires a real enrolled VM; the fixed-node CNI transition has passed its live checks.
 
-The local Multipass VM boots Ubuntu but has not obtained a DHCP lease. Guest and
-host packet captures confirm requests without replies. A test involving the host's
-existing VPN settings awaits the owner's specific approval; those settings have
-not been changed by NodeHarbor.
+The local Multipass VM boots Ubuntu but has not obtained a DHCP lease. Packet
+captures on the host's VM bridge show requests without replies. The cause has not
+been established. The owner requires the host's VPN configuration and connection
+to remain untouched; changing those settings is not a proposed remedy. The
+[worker networking plan](worker-networking-plan.md) tracks an alternative and its
+acceptance gates.
 
 Native cancellation was tested separately through the actual agent and Multipass,
 with an isolated lifecycle test server. The first test exposed a late hypervisor
