@@ -143,6 +143,9 @@ def main():
     environment=dict(os.environ)
     if config.get('netbirdSetupKey'):environment['NB_SETUP_KEY']=config['netbirdSetupKey']
     progress('Connecting to the private network')
+    # `up` ignores all flags when the daemon has already auto-connected. Apply
+    # settings through a normal reconnect of this owned guest's peer.
+    run('/usr/local/bin/netbird','down')
     # Flannel runs over NetBird. Its interfaces cannot carry NetBird's own ICE
     # transport: selecting them creates a recursive tunnel after Kubernetes starts.
     run('/usr/local/bin/netbird','up','--management-url',config['netbirdManagementUrl'],'--hostname',config['nodeName'],'--mtu','1280',

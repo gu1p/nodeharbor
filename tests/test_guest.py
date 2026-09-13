@@ -97,7 +97,7 @@ class RuntimeInstallation(unittest.TestCase):
             for name in ['netbird','k3s']:self.assertEqual((binary/name).read_bytes(),b'old '+name.encode())
 
 class GuestNetworkConfiguration(unittest.TestCase):
-    def prepare(self, resolver_text, install=None, fail_command=None):
+    def prepare(self, resolver_text, install=None, fail_command=None, command_handler=None):
         config=GuestContract().config()
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);(root/'device-id').write_text(config['deviceId'])
@@ -106,6 +106,7 @@ class GuestNetworkConfiguration(unittest.TestCase):
             def run(*args, **kwargs):
                 commands.append(args)
                 if args==fail_command:raise RuntimeError('Guest service restart failed')
+                if command_handler is not None:command_handler(args)
                 return json.dumps({'netbirdIp':'100.75.1.2/16'}) if 'status' in args else ''
             with patch.object(configure,'ROOT',root), patch.object(configure,'RESOLV_CONF',resolver,create=True), patch.object(configure.sys,'platform','linux'), patch.object(configure.os,'geteuid',return_value=0,create=True), patch.object(configure.sys,'stdin',io.StringIO(json.dumps(config))), patch.object(configure,'install_runtime',new=install if install is not None else Mock()), patch.object(configure,'run',side_effect=run), patch.object(configure,'write',side_effect=lambda path,content,mode=0o600:writes.update({str(path):content})):
                 configure.main()
@@ -167,6 +168,21 @@ class GuestNetworkConfiguration(unittest.TestCase):
             self.assertTrue(any(interface.startswith(prefix) for prefix in excluded))
         for interface in ['eth0','enp7s0']:
             self.assertFalse(any(interface.startswith(prefix) for prefix in excluded))
+
+    def test_retry_applies_settings_when_netbird_has_already_reconnected_at_boot(self):
+        # NetBird 0.78.1's daemon-mode `up` returns "Already connected" before
+        # applying any flags. A restarted daemon can auto-connect immediately.
+        state={'connected':True,'excluded':[]}
+        def netbird(args):
+            if args==('systemctl','restart','netbird'):state['connected']=True
+            if args==('/usr/local/bin/netbird','down'):state['connected']=False
+            if args[:2]==('/usr/local/bin/netbird','up') and not state['connected']:
+                state['excluded']=args[args.index('--extra-iface-blacklist')+1].split(',')
+                state['connected']=True
+        self.prepare('nameserver 192.168.64.1\n',command_handler=netbird)
+        self.assertTrue(state['connected'])
+        self.assertEqual(state['excluded'],['flannel','cni','kube-ipvs'],
+            'A successful retry must actually apply the transport exclusions')
 
     def test_unusable_guest_dns_is_reported_without_installing_or_starting_a_worker(self):
         install=Mock()
