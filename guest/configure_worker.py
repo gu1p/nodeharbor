@@ -129,7 +129,10 @@ def main():
     validate_resolver(RESOLV_CONF)
     install_runtime(config)
     if not Path('/etc/systemd/system/netbird.service').exists():run('/usr/local/bin/netbird','service','install')
-    run('systemctl','enable','--now','netbird')
+    # Preparation runs before workload admission. A guest may have started its
+    # old services at boot; restart so the verified executable is actually used.
+    run('systemctl','enable','netbird')
+    run('systemctl','restart','netbird')
     environment=dict(os.environ)
     if config.get('netbirdSetupKey'):environment['NB_SETUP_KEY']=config['netbirdSetupKey']
     run('/usr/local/bin/netbird','up','--management-url',config['netbirdManagementUrl'],'--hostname',config['nodeName'],'--mtu','1280',
@@ -171,7 +174,8 @@ WantedBy=multi-user.target
     write('/etc/systemd/system/k3s-agent.service',unit,0o644)
     run('systemctl','daemon-reload')
     run('systemctl','enable','--now','nodeharbor-watchdog.timer')
-    run('systemctl','enable','--now','k3s-agent')
+    run('systemctl','enable','k3s-agent')
+    run('systemctl','restart','k3s-agent')
     print('Worker connected; waiting for controller qualification',flush=True)
 
 if __name__=='__main__': main()

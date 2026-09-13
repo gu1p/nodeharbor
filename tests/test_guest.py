@@ -97,7 +97,7 @@ class RuntimeInstallation(unittest.TestCase):
             for name in ['netbird','k3s']:self.assertEqual((binary/name).read_bytes(),b'old '+name.encode())
 
 class GuestNetworkConfiguration(unittest.TestCase):
-    def prepare(self, resolver_text, install=None):
+    def prepare(self, resolver_text, install=None, fail_command=None):
         config=GuestContract().config()
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);(root/'device-id').write_text(config['deviceId'])
@@ -105,11 +105,28 @@ class GuestNetworkConfiguration(unittest.TestCase):
             writes={};commands=[]
             def run(*args, **kwargs):
                 commands.append(args)
+                if args==fail_command:raise RuntimeError('Guest service restart failed')
                 return json.dumps({'netbirdIp':'100.75.1.2/16'}) if 'status' in args else ''
             with patch.object(configure,'ROOT',root), patch.object(configure,'RESOLV_CONF',resolver,create=True), patch.object(configure.sys,'platform','linux'), patch.object(configure.os,'geteuid',return_value=0,create=True), patch.object(configure.sys,'stdin',io.StringIO(json.dumps(config))), patch.object(configure,'install_runtime',new=install if install is not None else Mock()), patch.object(configure,'run',side_effect=run), patch.object(configure,'write',side_effect=lambda path,content,mode=0o600:writes.update({str(path):content})):
                 configure.main()
             self.assertEqual(resolver.read_text(),resolver_text)
             return commands,writes,str(resolver)
+
+    def test_preparation_restarts_services_to_apply_new_binaries_and_worker_configuration(self):
+        commands,writes,_=self.prepare('nameserver 192.168.64.1\n')
+        for service in ['netbird','k3s-agent']:
+            self.assertIn(('systemctl','restart',service),commands,
+                'Enabling an already-running service does not load its new executable or configuration')
+            self.assertLess(commands.index(('systemctl','enable',service)),commands.index(('systemctl','restart',service)))
+        up=next(args for args in commands if args[:2]==('/usr/local/bin/netbird','up'))
+        self.assertLess(commands.index(('systemctl','restart','netbird')),commands.index(up))
+        self.assertLess(commands.index(('systemctl','daemon-reload')),commands.index(('systemctl','restart','k3s-agent')))
+        self.assertIn('/etc/rancher/k3s/config.yaml',writes)
+
+    def test_failed_service_restart_cannot_report_successful_worker_preparation(self):
+        for service in ['netbird','k3s-agent']:
+            with self.subTest(service=service),self.assertRaisesRegex(RuntimeError,'restart failed'):
+                self.prepare('nameserver 192.168.64.1\n',fail_command=('systemctl','restart',service))
 
     def test_preparation_preserves_guest_dns_and_uses_its_upstream_resolver_for_pods(self):
         commands,writes,resolver=self.prepare('nameserver 192.168.64.1\nsearch local.example\n')
