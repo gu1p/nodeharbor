@@ -49,3 +49,12 @@ describe('Keeping NodeHarbor up to date',()=>{
   expect(api.updateAction).toHaveBeenCalledWith('install');
  });
 });
+
+it('keeps update controls disabled while cancellation releases worker maintenance',async()=>{
+ const api=fixture('cancelling','Cancelling the update…');const user=userEvent.setup();
+ render(<App backend={api as Backend}/>);
+ await user.click(await screen.findByRole('button',{name:'App updates'}));
+ expect(await screen.findByText('Cancelling the update…')).toBeVisible();
+ expect(screen.getByRole('button',{name:'Check for updates'})).toBeDisabled();
+ expect(screen.queryByRole('button',{name:'Install update'})).not.toBeInTheDocument();
+});

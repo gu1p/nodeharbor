@@ -12,12 +12,20 @@ pub trait UpdateRuntime: Sync {
 /// A successful install keeps maintenance held until the new app starts.
 /// Every cancellation or failure after maintenance begins releases that hold.
 pub async fn apply(runtime: &impl UpdateRuntime) -> Result<bool, String> {
-    runtime.download().await?;
+    tokio::select! {
+        biased;
+        _ = cancellation(runtime) => return Ok(false),
+        result = runtime.download() => result?,
+    }
     if runtime.cancelled() {
         return Ok(false);
     }
     let result = async {
-        runtime.prepare().await?;
+        tokio::select! {
+            biased;
+            _ = cancellation(runtime) => return Ok(false),
+            result = runtime.prepare() => result?,
+        }
         loop {
             if runtime.cancelled() {
                 return Ok(false);
@@ -47,4 +55,10 @@ pub async fn apply(runtime: &impl UpdateRuntime) -> Result<bool, String> {
         })?;
     }
     result
+}
+
+async fn cancellation(runtime: &impl UpdateRuntime) {
+    while !runtime.cancelled() {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
 }

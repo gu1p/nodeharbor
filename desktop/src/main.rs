@@ -198,7 +198,6 @@ fn main() {
         return;
     }
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_single_instance::init(|app, args, _| {
             if args.iter().any(|arg| arg == "--quit") {
                 request_close(app, true);
@@ -206,6 +205,7 @@ fn main() {
                 show(app);
             }
         }))
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_autostart::Builder::new()
                 .app_name("NodeHarbor")

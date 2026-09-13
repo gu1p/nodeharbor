@@ -76,13 +76,19 @@ impl Updates {
                     self.wake.notify_one();
                 } else {
                     self.generation.fetch_add(1, Ordering::SeqCst);
+                    if ["downloading", "waiting"].contains(&self.status().phase.as_str()) {
+                        self.report("cancelling", "Cancelling the update…");
+                    }
                 }
             }
             "cancel" => {
                 self.generation.fetch_add(1, Ordering::SeqCst);
+                self.report("cancelling", "Cancelling the update…");
             }
             "check" | "install" => {
-                if ["checking", "downloading", "waiting"].contains(&self.status().phase.as_str()) {
+                if ["checking", "downloading", "waiting", "cancelling"]
+                    .contains(&self.status().phase.as_str())
+                {
                     return Err("An update operation is already running".into());
                 }
                 self.request

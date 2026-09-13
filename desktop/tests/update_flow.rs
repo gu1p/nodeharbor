@@ -96,3 +96,69 @@ async fn cancel_and_failed_install_restore_sharing_without_installing_on_a_busy_
         }
     }
 }
+
+struct Blocked {
+    phase: &'static str,
+    cancel: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    released: std::sync::atomic::AtomicBool,
+}
+#[async_trait::async_trait]
+impl UpdateRuntime for Blocked {
+    async fn download(&self) -> Result<(), String> {
+        if self.phase == "download" {
+            self.entered.notify_one();
+            std::future::pending().await
+        } else {
+            Ok(())
+        }
+    }
+    async fn prepare(&self) -> Result<(), String> {
+        self.entered.notify_one();
+        std::future::pending().await
+    }
+    async fn ready(&self) -> Result<bool, String> {
+        panic!("Cancellation must stop preparation")
+    }
+    async fn wait(&self) {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    fn cancelled(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    async fn install(&self) -> Result<(), String> {
+        panic!("A cancelled update cannot install")
+    }
+    async fn release(&self) -> Result<(), String> {
+        self.released
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn cancellation_interrupts_a_stalled_download_or_a_busy_worker_operation() {
+    for phase in ["download", "prepare"] {
+        let runtime = std::sync::Arc::new(Blocked {
+            phase,
+            cancel: false.into(),
+            entered: tokio::sync::Notify::new(),
+            released: false.into(),
+        });
+        let task_runtime = runtime.clone();
+        let task = tokio::spawn(async move { apply(task_runtime.as_ref()).await });
+        runtime.entered.notified().await;
+        runtime
+            .cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), task).await;
+        assert!(
+            result.is_ok(),
+            "Cancellation must not wait for the stalled {phase}"
+        );
+        assert_eq!(result.unwrap().unwrap(), Ok(false));
+        assert_eq!(
+            runtime.released.load(std::sync::atomic::Ordering::SeqCst),
+            phase == "prepare"
+        );
+    }
+}

@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
-from test_release import ReleaseContract, release
+import test_release as release_tests
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts'))
 spec=importlib.util.spec_from_file_location('updates',ROOT/'scripts/updates.py')
@@ -16,7 +16,7 @@ updates=importlib.util.module_from_spec(spec);spec.loader.exec_module(updates)
 class UpdateChannel(unittest.TestCase):
  def test_every_installer_format_gets_a_signed_target_without_public_release_clutter(self):
   with tempfile.TemporaryDirectory() as directory:
-   folder=Path(directory)/'dist';folder.mkdir();ReleaseContract().fixture(folder)
+   folder=Path(directory)/'dist';folder.mkdir();release_tests.ReleaseContract().fixture(folder)
    def signing(path,key):return base64.b64encode(('signed '+path.name).encode()).decode()
    output=Path(directory)/'site'
    with patch.object(updates,'sign',side_effect=signing):
@@ -35,7 +35,7 @@ class UpdateChannel(unittest.TestCase):
    self.assertFalse(list(output.rglob('*.minisig')))
  def test_incomplete_or_tampered_packages_never_enter_the_update_channel(self):
   with tempfile.TemporaryDirectory() as directory:
-   folder=Path(directory)/'dist';folder.mkdir();ReleaseContract().fixture(folder)
+   folder=Path(directory)/'dist';folder.mkdir();release_tests.ReleaseContract().fixture(folder)
    next(folder.glob('*.exe')).write_bytes(b'tampered')
    with patch.object(updates,'sign') as sign:
     with self.assertRaises(ValueError):updates.build(folder,Path(directory)/'site','0.1.12','a'*40,Path(directory)/'key')
@@ -71,6 +71,6 @@ class UpdaterWiring(unittest.TestCase):
   self.assertNotIn('gh release upload',channel)
  def test_trusted_key_and_https_endpoint_are_embedded_in_the_desktop(self):
   config=json.loads((ROOT/'desktop/tauri.conf.json').read_text())['plugins']['updater']
-  self.assertEqual(base64.b64decode(config['pubkey']),(ROOT/'nodeharbor.minisign.pub').read_bytes())
+  self.assertEqual(base64.b64decode(config['pubkey']).decode().splitlines(),(ROOT/'nodeharbor.minisign.pub').read_text().splitlines())
   self.assertEqual(config['endpoints'],['https://gu1p.github.io/nodeharbor/updates/latest.json'])
   self.assertFalse(any(value for key,value in config.items() if key.startswith('dangerous')))
