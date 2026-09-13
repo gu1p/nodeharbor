@@ -6,6 +6,7 @@ edition.workspace = true
 name = "nodeharbor"
 path = "src/main.rs"
 [dependencies]
+async-trait.workspace = true
 nodeharbor-agent = { path = "../crates/agent" }
 nodeharbor-core = { path = "../crates/core" }
 serde.workspace = true
@@ -14,5 +15,6 @@ tokio.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "=2.11.0"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

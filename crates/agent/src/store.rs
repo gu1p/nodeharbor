@@ -22,6 +22,10 @@ pub struct WorkerRecreation {
 #[serde(rename_all = "camelCase")]
 pub struct Configuration {
     pub format_version: u32,
+    #[serde(default = "updates_enabled")]
+    pub automatic_updates: bool,
+    #[serde(default)]
+    pub application_update_pending: bool,
     #[serde(default)]
     pub vm_provider: crate::VmProvider,
     pub device_id: String,
@@ -48,6 +52,8 @@ impl Default for Configuration {
     fn default() -> Self {
         Self {
             format_version: 1,
+            automatic_updates: true,
+            application_update_pending: false,
             vm_provider: crate::VmProvider::Multipass,
             device_id: Uuid::new_v4().to_string(),
             name: sysinfo::System::host_name().unwrap_or_else(|| "My computer".into()),
@@ -63,6 +69,9 @@ impl Default for Configuration {
             recreation: None,
         }
     }
+}
+fn updates_enabled() -> bool {
+    true
 }
 #[derive(Clone)]
 pub struct Store {

@@ -28,8 +28,25 @@ the GitHub Releases API. You can also download installers directly from
 for macOS, and `.deb` or `.AppImage` for Ubuntu. Build archives, manifests, and
 signed verification records stay in GitHub Actions instead of the download list.
 macOS installs into `~/Applications`; Ubuntu adds an application menu entry;
-Windows uses the native installer. Run the same command to update. Updates pause
-sharing and preserve enrollment and your resource rules.
+Windows uses the native installer. The same commands remain available for manual
+installation and upgrading older versions that do not include self-update.
+
+**App updates** controls automatic updates, which are enabled by default. NodeHarbor
+checks 30 seconds after startup and every six hours while the app is running. It
+downloads the matching native package, verifies its signature, pauses new assignments,
+and waits for existing jobs to finish before stopping the worker and restarting the
+app. Automatic updates never evict jobs or force a drain deadline. Sharing resumes
+according to your current rules; a pause made during an update remains a pause.
+You can check, install, cancel, or disable updates in the same panel. Ubuntu Debian
+packages can require normal OS authorization to install. An unavailable controller,
+unknown workload inventory, or failed signature postpones installation.
+
+The HTTPS update channel is hosted on GitHub Pages. Windows and Ubuntu update payloads
+use the existing release installers; macOS application bundles and the signed update
+metadata are served separately, keeping the release download list limited to installers.
+The release signing key stays in GitHub Actions secrets; applications contain only its
+public verification key. All native checks and release publication must succeed before
+a version becomes available for automatic updates.
 
 During preparation, **Your machine → Worker activity** shows the current step,
 elapsed time, live command output, and errors. It updates every second. Turn off

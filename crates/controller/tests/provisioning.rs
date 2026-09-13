@@ -104,6 +104,16 @@ async fn preparing_a_worker_uses_separate_credentials_and_short_lived_device_bou
         .as_str()
         .unwrap()
         .starts_with(&format!("K10{}::", "a".repeat(64))));
+    let maintenance = cluster.maintenance(&device).await.unwrap();
+    assert_eq!(
+        maintenance["workloads"], 2,
+        "Even a system DaemonSet needs verified ownership before being excluded"
+    );
+    assert!(!records
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|r| r.1.ends_with("/eviction")));
     cluster.drain(&device).await.unwrap();
     cluster.resume(&device).await.unwrap();
     cluster.revoke(&device).await.unwrap();

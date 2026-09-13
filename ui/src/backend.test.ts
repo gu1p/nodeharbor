@@ -29,3 +29,10 @@ it('passes explicitly confirmed replacement through the native worker command',a
  await (backend as typeof backend & {recreateWorker:(policy:ReturnType<typeof defaultPolicy>)=>Promise<unknown>}).recreateWorker(defaultPolicy());
  expect(commands).toEqual([{cmd:'recreate_worker',payload:{policy:defaultPolicy()}}]);
 });
+
+it('exposes update status and owner controls only through the native updater',async()=>{
+ const commands:{cmd:string;payload:unknown}[]=[];
+ mockIPC((cmd,payload)=>{commands.push({cmd,payload});return {};});
+ const {backend}=await import('./backend');await backend.updates!();await backend.updateAction!('disable');
+ expect(commands).toEqual([{cmd:'update_status',payload:{}},{cmd:'update_action',payload:{action:'disable'}}]);
+});

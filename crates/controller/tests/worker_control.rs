@@ -22,6 +22,13 @@ impl Cluster for ClusterRecorder {
             json!({"deviceId":device.id,"nodeName":device.node_name(),"k3sToken":"one-use-test-credential"}),
         )
     }
+    async fn maintenance(&self, device: &DeviceIdentity) -> anyhow::Result<Value> {
+        self.0
+            .lock()
+            .unwrap()
+            .push(format!("maintenance:{}", device.id));
+        Ok(json!({"workloads":1,"systemPodUids":[]}))
+    }
     async fn drain(&self, device: &DeviceIdentity) -> anyhow::Result<()> {
         self.0.lock().unwrap().push(format!("drain:{}", device.id));
         Ok(())
@@ -128,4 +135,50 @@ async fn worker_controls_use_the_authenticated_identity_and_revocation_removes_c
             format!("revoke:{id}")
         ]
     );
+}
+
+#[tokio::test]
+async fn updating_cordons_only_the_authenticated_device_and_never_evicts_its_jobs() {
+    let recorder = Arc::new(ClusterRecorder::default());
+    let state = State::open("sqlite::memory:", "admin")
+        .await
+        .unwrap()
+        .with_cluster(recorder.clone());
+    let app = router(state.clone());
+    let (_, code) = call(&app, "/api/v1/enrollment-codes", Some("admin"), json!({})).await;
+    let (_, device) = call(
+        &app,
+        "/api/v1/enroll",
+        None,
+        json!({"code":code["code"],"name":"Worker","platform":"linux","architecture":"amd64"}),
+    )
+    .await;
+    assert_eq!(
+        call(&app, "/api/v1/device/maintenance", None, json!({}))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, value) = call(
+        &app,
+        "/api/v1/device/maintenance",
+        device["token"].as_str(),
+        json!({"deviceId":"someone-else"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value["workloads"], 1);
+    assert_eq!(
+        *recorder.0.lock().unwrap(),
+        [format!(
+            "maintenance:{}",
+            device["deviceId"].as_str().unwrap()
+        )]
+    );
+    let state_value: String = sqlx::query_scalar("SELECT state FROM devices WHERE id=?")
+        .bind(device["deviceId"].as_str().unwrap())
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(state_value, "draining");
 }

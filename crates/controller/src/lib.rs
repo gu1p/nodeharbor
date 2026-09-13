@@ -46,6 +46,9 @@ impl DeviceIdentity {
 #[async_trait::async_trait]
 pub trait Cluster: Send + Sync {
     async fn bootstrap(&self, device: &DeviceIdentity) -> anyhow::Result<Value>;
+    async fn maintenance(&self, _device: &DeviceIdentity) -> anyhow::Result<Value> {
+        anyhow::bail!("This controller does not support application update maintenance")
+    }
     async fn drain(&self, device: &DeviceIdentity) -> anyhow::Result<()>;
     async fn resume(&self, device: &DeviceIdentity) -> anyhow::Result<()>;
     async fn revoke(&self, device: &DeviceIdentity) -> anyhow::Result<()>;
@@ -547,6 +550,18 @@ async fn device_control(
                 ));
             }
             cluster.bootstrap(&device).await.map_err(cluster_error)?
+        }
+        "maintenance" => {
+            // Serialized with health reconciliation so qualification cannot
+            // undo the cordon while the update is waiting for existing jobs.
+            sqlx::query(
+                "UPDATE devices SET state='draining',eligible_ci=0,eligible_services=0 WHERE id=?",
+            )
+            .bind(&id)
+            .execute(&state.db)
+            .await
+            .map_err(ApiError::internal)?;
+            cluster.maintenance(&device).await.map_err(cluster_error)?
         }
         "drain" => {
             cluster.drain(&device).await.map_err(cluster_error)?;

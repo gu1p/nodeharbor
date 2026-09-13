@@ -21,6 +21,8 @@ struct Runtime {
     remote_paused: bool,
     starting: Option<Starting>,
     stopping_now: bool,
+    application_update_ready: bool,
+    update_idle_observed: bool,
 }
 #[derive(Clone)]
 pub struct Agent {
@@ -52,6 +54,48 @@ pub struct Snapshot {
     pub workloads: Vec<Value>,
 }
 impl Agent {
+    /// Request maintenance without rewriting any owner sharing preferences.
+    pub async fn begin_application_update(&self) -> Result<()> {
+        let _operation = self.operation.lock().await;
+        self.store.update(|config| {
+            anyhow::ensure!(
+                config.recreation.is_none() && !config.prepare_requested && !config.stop_requested,
+                "Waiting for the current worker operation before updating"
+            );
+            config.application_update_pending = true;
+            Ok(())
+        })?;
+        let mut runtime = self.runtime.lock().await;
+        runtime.application_update_ready = false;
+        runtime.update_idle_observed = false;
+        Ok(())
+    }
+    pub async fn application_update_ready(&self) -> Result<bool> {
+        let pending = self.store.load()?.application_update_pending;
+        let runtime = self.runtime.lock().await;
+        anyhow::ensure!(
+            runtime.state.as_deref() != Some("error"),
+            "{}",
+            runtime
+                .reason
+                .as_deref()
+                .unwrap_or("Worker maintenance failed")
+        );
+        Ok(pending && runtime.application_update_ready)
+    }
+    /// Also used on startup after an interrupted installation. The current
+    /// owner policy, including any pause made during the update, remains intact.
+    pub async fn cancel_application_update(&self) -> Result<()> {
+        let _operation = self.operation.lock().await;
+        self.store.update(|config| {
+            config.application_update_pending = false;
+            Ok(())
+        })?;
+        let mut runtime = self.runtime.lock().await;
+        runtime.application_update_ready = false;
+        runtime.update_idle_observed = false;
+        Ok(())
+    }
     pub fn open(directory: &Path) -> Result<Self> {
         let new_settings = !directory.join("config.json").exists();
         let agent = Self::open_inner(directory, None)?;
@@ -169,6 +213,10 @@ impl Agent {
         validate_policy(&policy, &host).map_err(anyhow::Error::msg)?;
         self.store.update(|config| {
             anyhow::ensure!(
+                !config.application_update_pending,
+                "Cancel the application update before replacing the worker"
+            );
+            anyhow::ensure!(
                 config.recreation.is_none(),
                 "Worker replacement is already pending"
             );
@@ -200,6 +248,10 @@ impl Agent {
             "Unknown worker action"
         );
         self.store.update(|config| {
+            anyhow::ensure!(
+                action != "prepare" || !config.application_update_pending,
+                "Cancel the application update before preparing the worker"
+            );
             if action == "prepare" || action == "resume" {
                 anyhow::ensure!(
                     config.recreation.is_none(),
@@ -459,7 +511,14 @@ impl Agent {
     }
     async fn tick_inner(&self) -> Result<()> {
         let config = self.store.load()?;
+        self.runtime.lock().await.application_update_ready = false;
         if config.device_token.is_none() {
+            anyhow::ensure!(
+                !config.application_update_pending
+                    || (!config.vm_created && !self.vm(&config)?.has_receipt()?),
+                "Reconnect this worker to its fleet before updating NodeHarbor"
+            );
+            self.runtime.lock().await.application_update_ready = config.application_update_pending;
             self.set_status(
                 "paused",
                 "Connect this computer to a fleet to prepare its worker",
@@ -562,6 +621,12 @@ impl Agent {
             VmInfo::default()
         };
         self.runtime.lock().await.worker = info.clone();
+        if config.application_update_pending && !info.running {
+            self.runtime.lock().await.application_update_ready = true;
+            self.set_status("paused", "Worker stopped for an application update")
+                .await;
+            return Ok(());
+        }
         if info.running && !config.vm_configured && !config.prepare_requested {
             // A partial worker can be Starting or Unknown and cannot perform a
             // guest shutdown. Reconcile the owner's pause through the hypervisor.
@@ -612,6 +677,13 @@ impl Agent {
         } else if !info.running {
             self.clear_drain()?;
         }
+        if config.application_update_pending {
+            self.set_status(
+                "draining",
+                "Waiting for running jobs before updating NodeHarbor",
+            )
+            .await;
+        }
         let heartbeat_error = self.heartbeat(&self.store.load()?).await.err();
         // Owner actions can arrive from another process during the request.
         let config = self.store.load()?;
@@ -630,6 +702,49 @@ impl Agent {
             && !resize_pending
             && heartbeat_error.is_none()
             && !self.runtime.lock().await.remote_paused;
+        if config.application_update_pending
+            && decision.allowed
+            && !resize_pending
+            && !self.runtime.lock().await.remote_paused
+        {
+            // Automatic updates never use owner drain deadlines or evictions.
+            // Unknown connectivity or inventory cannot be interpreted as idle.
+            if info.reachable {
+                vm.renew_lease().await?;
+            }
+            if let Some(error) = heartbeat_error {
+                return Err(error);
+            }
+            let maintenance = self
+                .request(&config, "/device/maintenance", Some(json!({})))
+                .await?;
+            self.remember_system_pods(&maintenance).await?;
+            let bound = maintenance["workloads"]
+                .as_u64()
+                .context("Missing maintenance workload inventory")?;
+            anyhow::ensure!(info.reachable, "Cannot inspect the worker before updating");
+            let inventory = vm
+                .workload_inventory(&system_pod_uids(&maintenance)?)
+                .await?;
+            let idle = bound == 0 && inventory.workloads.is_empty();
+            let previously_idle = {
+                let mut runtime = self.runtime.lock().await;
+                runtime.workloads = inventory.into_visible();
+                let previous = runtime.update_idle_observed;
+                runtime.update_idle_observed = idle;
+                previous
+            };
+            // Recheck after a supervisor interval to include assignments already
+            // in flight when Kubernetes accepted the cordon.
+            if idle && previously_idle {
+                vm.stop().await?;
+                let mut runtime = self.runtime.lock().await;
+                runtime.worker.running = false;
+                runtime.workloads.clear();
+                runtime.application_update_ready = true;
+            }
+            return Ok(());
+        }
         if info.running && !allowed {
             let current = self.begin_drain()?;
             if deadline_expired(&current) {
@@ -882,7 +997,8 @@ impl Agent {
                 .map(|r| r.disk_gib)
                 .unwrap_or(0),
         );
-        let permitted = evaluate(&config.policy, &observation).allowed;
+        let permitted =
+            evaluate(&config.policy, &observation).allowed && !config.application_update_pending;
         let value=self.request(config,"/heartbeat",Some(json!({"state":runtime.state.unwrap_or_else(||"paused".into()),"reason":runtime.reason.unwrap_or_default(),"resources":config.policy.resources,
             "allowCi":config.policy.allow_ci,"allowServices":config.policy.allow_services,"permitted":permitted}))).await?;
         self.runtime.lock().await.remote_paused = value["remotePaused"].as_bool().unwrap_or(false);
