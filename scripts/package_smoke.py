@@ -7,6 +7,8 @@ import subprocess
 import tarfile
 import tempfile
 import importlib.util
+import plistlib
+from contextlib import contextmanager
 
 
 def check_vm_runtime(application):
@@ -26,6 +28,20 @@ def run(args, **kwargs):
     return subprocess.run(args, check=True, timeout=180, **kwargs)
 
 
+@contextmanager
+def mounted_image(path):
+    output=subprocess.check_output(['hdiutil','attach',str(path),'-nobrowse','-readonly','-plist'],timeout=180)
+    entities=plistlib.loads(output).get('system-entities',[])
+    device=next((entry.get('dev-entry') for entry in entities if isinstance(entry.get('dev-entry'),str) and entry['dev-entry'].startswith('/dev/disk')),None)
+    if device is None:raise ValueError('macOS returned no disk-image device identifier')
+    try:
+        mounts=[entry['mount-point'] for entry in entities if isinstance(entry.get('mount-point'),str) and entry['mount-point']]
+        if len(mounts)!=1:raise ValueError('The installer must mount exactly one volume')
+        yield Path(mounts[0])
+    finally:
+        run(['hdiutil','detach',device],stdout=subprocess.DEVNULL)
+
+
 def smoke_packages(folder, target, version, commit):
     folder = Path(folder).resolve()
     prefix = f'nodeharbor-v{version}-{target}'
@@ -38,15 +54,10 @@ def smoke_packages(folder, target, version, commit):
             for binary in ['nodeharbor', 'nodeharbor-agent']:
                 check_executable(app / binary, version, commit)
             check_vm_runtime(root/'NodeHarbor.app')
-            mount = root / 'dmg'
-            mount.mkdir()
-            run(['hdiutil', 'attach', str(folder / (prefix + '.dmg')), '-nobrowse', '-readonly', '-mountpoint', str(mount)], stdout=subprocess.DEVNULL)
-            try:
+            with mounted_image(folder / (prefix + '.dmg')) as mount:
                 for binary in ['nodeharbor', 'nodeharbor-agent']:
                     check_executable(mount / 'NodeHarbor.app/Contents/MacOS' / binary, version, commit)
                 check_vm_runtime(mount/'NodeHarbor.app')
-            finally:
-                run(['hdiutil', 'detach', str(mount)], stdout=subprocess.DEVNULL)
         elif 'linux' in target:
             deb = root / 'deb'
             run(['dpkg-deb', '--extract', str(folder / (prefix + '.deb')), str(deb)])
