@@ -83,26 +83,52 @@ New-Item -ItemType Directory -Path $downloadRoot | Out-Null
 try {
     $script:downloadCalls = @()
     $script:badChecksum = $false
+    $script:metadataFault = ''
     $fixture = Join-Path $downloadRoot 'fixture'
     [IO.File]::WriteAllText($fixture, 'verified installer fixture')
     $script:fixtureHash = (Get-FileHash -LiteralPath $fixture -Algorithm SHA256).Hash.ToLowerInvariant()
+    function Invoke-RestMethod {
+        param([string]$Uri, [hashtable]$Headers)
+        $script:downloadCalls += $Uri
+        if ($Uri -ne 'https://api.github.com/repos/gu1p/nodeharbor/releases/tags/v0.1.3') { throw 'Unexpected release metadata request' }
+        $hash = if ($script:badChecksum) { '0' * 64 } else { $script:fixtureHash }
+        $asset = @{ name = 'nodeharbor-v0.1.3-x86_64-pc-windows-msvc.exe'; digest = ('sha256:' + $hash); state = 'uploaded'; browser_download_url = 'https://github.com/gu1p/nodeharbor/releases/download/v0.1.3/nodeharbor-v0.1.3-x86_64-pc-windows-msvc.exe' }
+        $release = @{ tag_name = 'v0.1.3'; draft = $false; assets = @($asset) }
+        switch ($script:metadataFault) {
+            'duplicate' { $release.assets = @($asset, $asset) }
+            'missing' { $release.assets = @() }
+            'digest' { $asset.digest = $null }
+            'draft' { $release.draft = $true }
+            'version' { $release.tag_name = 'v0.1.4' }
+            'url' { $asset.browser_download_url = 'https://example.com/installer.exe' }
+            'state' { $asset.state = 'starter' }
+        }
+        return $release
+    }
     function Invoke-WebRequest {
         param([switch]$UseBasicParsing, [string]$Uri, [string]$OutFile)
         $script:downloadCalls += $Uri
-        if ($Uri.EndsWith('/SHA256SUMS')) {
-            $hash = if ($script:badChecksum) { '0' * 64 } else { $script:fixtureHash }
-            [IO.File]::WriteAllText($OutFile, ($hash + "  nodeharbor-v0.1.3-x86_64-pc-windows-msvc.exe`n"))
-        } else { [IO.File]::WriteAllText($OutFile, 'verified installer fixture') }
+        if ($Uri -ne 'https://github.com/gu1p/nodeharbor/releases/download/v0.1.3/nodeharbor-v0.1.3-x86_64-pc-windows-msvc.exe') { throw 'The installer requested an auxiliary release file' }
+        [IO.File]::WriteAllText($OutFile, 'verified installer fixture')
     }
     $downloaded = Get-NodeHarborReleasePackage -Version '0.1.3' -Target 'x86_64-pc-windows-msvc' -Directory $downloadRoot
     if (-not (Test-Path -LiteralPath $downloaded)) { throw 'Verified native recovery package is unavailable' }
-    if ($script:downloadCalls.Count -ne 2 -or ($script:downloadCalls | Where-Object { -not $_.StartsWith('https://github.com/gu1p/nodeharbor/releases/download/v0.1.3/') })) { throw 'Recovery package was not fetched from the exact published release' }
+    if ($script:downloadCalls.Count -ne 2) { throw 'Recovery package must use only release API metadata and the native installer' }
     $script:badChecksum = $true
     $rejected = $false
     try { Get-NodeHarborReleasePackage -Version '0.1.3' -Target 'x86_64-pc-windows-msvc' -Directory $downloadRoot | Out-Null } catch { $rejected = $true }
     if (-not $rejected) { throw 'Unverified recovery package was accepted' }
+    $script:badChecksum = $false
+    foreach ($fault in @('duplicate','missing','digest','draft','version','url','state')) {
+        $script:metadataFault = $fault
+        $script:downloadCalls = @()
+        $rejected = $false
+        try { Get-NodeHarborReleasePackage -Version '0.1.3' -Target 'x86_64-pc-windows-msvc' -Directory $downloadRoot | Out-Null } catch { $rejected = $true }
+        if (-not $rejected -or $script:downloadCalls.Count -ne 1) { throw "Invalid metadata was accepted or downloaded a package: $fault" }
+    }
 } finally {
     Remove-Item Function:Invoke-WebRequest -ErrorAction SilentlyContinue
+    Remove-Item Function:Invoke-RestMethod -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $downloadRoot -Recurse -Force
 }
 Write-Host 'Windows verified recovery-download contracts passed'

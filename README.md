@@ -22,8 +22,11 @@ On Windows, in PowerShell:
 irm https://raw.githubusercontent.com/gu1p/nodeharbor/main/get-nodeharbor.ps1 | iex
 ```
 
-The installer selects the native package and verifies its checksum. You can also
-download packages from [Releases](https://github.com/gu1p/nodeharbor/releases).
+The installer selects the native package and verifies its SHA-256 digest through
+the GitHub Releases API. You can also download installers directly from
+[Releases](https://github.com/gu1p/nodeharbor/releases): `.exe` for Windows, `.dmg`
+for macOS, and `.deb` or `.AppImage` for Ubuntu. Build archives, manifests, and
+signed verification records stay in GitHub Actions instead of the download list.
 macOS installs into `~/Applications`; Ubuntu adds an application menu entry;
 Windows uses the native installer. Run the same command to update. Updates pause
 sharing and preserve enrollment and your resource rules.
@@ -81,7 +84,7 @@ credentials, cluster credentials, or private deployment settings.
 
 | System | CPU | Packages |
 | --- | --- | --- |
-| macOS 14+ | Apple Silicon, Intel | DMG and app archive |
+| macOS 14+ | Apple Silicon, Intel | DMG |
 | Ubuntu 24.04 | ARM64, x64 | Debian package and AppImage |
 | Windows | x64 | NSIS installer |
 

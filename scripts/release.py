@@ -20,6 +20,32 @@ TARGETS = {
     "aarch64-apple-darwin": ("macos", "arm64", [".dmg", ".app.tar.gz"]),
     "x86_64-pc-windows-msvc": ("windows", "amd64", [".exe"]),
 }
+INSTALLABLE_EXTENSIONS = ('.exe', '.dmg', '.deb', '.AppImage')
+
+def installable_assets(manifest: dict) -> list[dict]:
+    return [asset for target in manifest['targets'] for asset in target['assets']
+            if asset['name'].endswith(INSTALLABLE_EXTENSIONS)]
+
+def verify_published_installers(existing: dict, manifest: dict):
+    expected = {asset['name']: 'sha256:' + asset['sha256'] for asset in installable_assets(manifest)}
+    uploaded = [asset for asset in existing['assets'] if asset['name'].endswith(INSTALLABLE_EXTENSIONS)]
+    actual = {asset['name']: asset.get('digest') for asset in uploaded}
+    if len(uploaded) != len(actual) or actual != expected or any(asset.get('state') != 'uploaded' for asset in uploaded):
+        raise ValueError('Published release installers are incomplete or differ from the tested build')
+
+def release_notes(version: str, commit: str, repo: str) -> str:
+    tag = f'v{version}'
+    rows = []
+    platforms = {'macos': 'macOS', 'linux': 'Ubuntu', 'windows': 'Windows'}
+    for target, (os_name, arch, extensions) in TARGETS.items():
+        cpu = 'Apple Silicon' if os_name == 'macos' and arch == 'arm64' else ('ARM64' if arch == 'arm64' else 'x64')
+        links = [f'[{extension[1:]}](https://github.com/{repo}/releases/download/{tag}/nodeharbor-{tag}-{target}{extension})'
+                 for extension in extensions if extension in INSTALLABLE_EXTENSIONS]
+        rows.append(f'| {platforms[os_name]} {cpu} | {" · ".join(links)} |')
+    return (f'NodeHarbor {tag}, built from `{commit}`.\n\n'
+            '| System | Download |\n| --- | --- |\n' + '\n'.join(rows) + '\n\n'
+            'All five targets passed the required checks before publication. The one-line installers verify downloads using GitHub release asset digests. Build manifests and signed verification records are retained in GitHub Actions.\n\n'
+            'Installing the app does not enable sharing. See the repository README for prerequisites and fleet setup. Pilot desktop packages do not yet carry Apple Developer ID or Windows distribution certificates.\n')
 
 def version_for(base: str, history_position: int) -> str:
     match = re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", base)
@@ -85,8 +111,7 @@ def publication_action(existing: dict | None, manifest: dict) -> str:
     if existing.get('target_commitish') != manifest['commit']:
         raise ValueError('This release tag belongs to a different source commit')
     if existing.get('draft'):return 'resume'
-    if existing.get('manifest') != manifest:
-        raise ValueError('Published release assets are immutable')
+    verify_published_installers(existing, manifest)
     return 'skip'
 
 def github_release(repo: str, tag: str) -> dict | None:
@@ -110,10 +135,6 @@ def publish(folder: Path, version: str, commit: str, repo: str, key: Path):
     manifest_file.write_text(json.dumps(manifest,indent=2)+'\n')
     tag=f'v{version}'
     existing=github_release(repo,tag)
-    if existing and not existing['draft']:
-        asset=next((a for a in existing['assets'] if a['name']=='release-manifest.json'),None)
-        if not asset:raise ValueError('The published release has no immutable manifest')
-        with urllib.request.urlopen(asset['browser_download_url'],timeout=30) as response:existing['manifest']=json.load(response)
     action=publication_action(existing,manifest)
     if action=='skip':
         print(f'{tag} already contains these immutable assets')
@@ -127,16 +148,17 @@ def publish(folder: Path, version: str, commit: str, repo: str, key: Path):
         subprocess.run(['minisign','-S','-s',str(key),'-m',str(path),'-t',f'NodeHarbor {tag} source {commit}'],check=True)
         subprocess.run(['minisign','-V','-p','nodeharbor.minisign.pub','-m',str(path)],check=True)
     notes=folder/'release-notes.md'
-    notes.write_text(f'NodeHarbor {tag}, built from `{commit}`.\n\nNative packages for macOS (Apple Silicon and Intel), Ubuntu (ARM64 and x64), and Windows x64. All five targets passed the required checks before publication.\n\nVerify downloads using `SHA256SUMS`. The checksum list and release manifest include Minisign signatures verified with the public key in this repository. Pilot desktop packages do not yet carry Apple Developer ID or Windows distribution certificates.\n\nInstalling the app does not enable sharing. See the repository README for prerequisites and fleet setup.\n')
+    notes.write_text(release_notes(version,commit,repo))
     if action=='create':
         subprocess.run(['gh','release','create',tag,'--repo',repo,'--draft','--target',commit,'--title',f'NodeHarbor {tag}','--notes-file',str(notes)],check=True)
-    uploads=assets+[sums,folder/'SHA256SUMS.minisig',folder/'release-manifest.json.minisig',Path('nodeharbor.minisign.pub')]
+    uploads=[folder/asset['name'] for asset in installable_assets(manifest)]
     subprocess.run(['gh','release','upload',tag,'--repo',repo,'--clobber',*[str(path) for path in uploads]],check=True)
     # Re-read immediately before the transition to avoid editing a published
     # release. Builds for different commits never share a tag.
     current=github_release(repo,tag)
     if not current or not current['draft'] or current['target_commitish']!=commit:
         raise ValueError('Release publication state changed unexpectedly')
+    verify_published_installers(current,manifest)
     subprocess.run(['gh','release','edit',tag,'--repo',repo,'--draft=false','--latest=false'],check=True)
 
 def collect(root: Path, target_dir: Path, output: Path, target: str, version: str, commit: str):

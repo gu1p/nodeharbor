@@ -74,12 +74,14 @@ function Get-NodeHarborReleasePackage {
     $name = "nodeharbor-v$Version-$Target.exe"
     $base = "https://github.com/gu1p/nodeharbor/releases/download/v$Version"
     $package = Join-Path $Directory $name
-    $sums = Join-Path $Directory "SHA256SUMS-v$Version"
-    Invoke-WebRequest -UseBasicParsing -Uri "$base/SHA256SUMS" -OutFile $sums
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/gu1p/nodeharbor/releases/tags/v$Version" -Headers @{ Accept = 'application/vnd.github+json' }
+    if ($release.tag_name -cne "v$Version" -or $release.draft -isnot [bool] -or $release.draft) { throw 'The requested release is not published.' }
+    $matching = @($release.assets | Where-Object { $_.name -ceq $name })
+    if ($matching.Count -ne 1 -or $matching[0].state -cne 'uploaded' -or $matching[0].browser_download_url -cne "$base/$name" -or $matching[0].digest -cnotmatch '^sha256:[0-9a-f]{64}$') {
+        throw 'Release package checksum metadata is missing or invalid; the existing application has been preserved.'
+    }
     Invoke-WebRequest -UseBasicParsing -Uri "$base/$name" -OutFile $package
-    $matching = @(Get-Content -LiteralPath $sums | Where-Object { $_ -cmatch ('^[0-9a-f]{64}  ' + [regex]::Escape($name) + '$') })
-    if ($matching.Count -ne 1) { throw 'Release checksum is missing or ambiguous; the existing application has been preserved.' }
-    Test-NodeHarborChecksum -Path $package -Expected $matching[0].Substring(0,64)
+    Test-NodeHarborChecksum -Path $package -Expected $matching[0].digest.Substring(7)
     return $package
 }
 

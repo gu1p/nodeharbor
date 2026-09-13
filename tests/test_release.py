@@ -14,6 +14,47 @@ release = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(release)
 
 class ReleaseContract(unittest.TestCase):
+    def remote_installers(self, folder):
+        return [{'name':path.name,'digest':'sha256:'+release.checksum(path),'state':'uploaded'}
+                for path in sorted(folder.iterdir()) if path.suffix in ['.exe','.dmg','.deb','.AppImage']]
+
+    def test_download_assets_contain_only_installers_and_build_evidence_stays_internal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder=Path(directory);self.fixture(folder)
+            draft={'draft':True,'target_commitish':'a'*40,'assets':self.remote_installers(folder)}
+            commands=[]
+            with patch.object(release,'github_release',side_effect=[None,draft]), patch.object(release.subprocess,'run',side_effect=lambda args,**kwargs:commands.append(args)):
+                release.publish(folder,'0.1.12','a'*40,'owner/project',folder/'key')
+            upload=next(command for command in commands if command[:3]==['gh','release','upload'])
+            self.assertEqual({Path(path).name for path in upload[7:]},{asset['name'] for asset in draft['assets']})
+            self.assertEqual(len(draft['assets']),7)
+            self.assertTrue((folder/'release-manifest.json').is_file())
+            self.assertTrue((folder/'SHA256SUMS').is_file())
+            notes=(folder/'release-notes.md').read_text()
+            self.assertIn('Windows x64',notes)
+            self.assertNotIn('`SHA256SUMS`',notes)
+
+    def test_publication_can_be_retried_after_removing_auxiliary_downloads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder=Path(directory);self.fixture(folder)
+            published={'draft':False,'target_commitish':'a'*40,'assets':self.remote_installers(folder)}
+            with patch.object(release,'github_release',return_value=published), patch.object(release.subprocess,'run') as command:
+                release.publish(folder,'0.1.12','a'*40,'owner/project',folder/'key')
+            command.assert_not_called()
+
+    def test_a_draft_with_an_incomplete_or_changed_uploaded_installer_cannot_be_published(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder=Path(directory);self.fixture(folder)
+            for change in ['missing','digest','state']:
+                assets=self.remote_installers(folder)
+                if change=='missing':assets.pop()
+                elif change=='digest':assets[0]['digest']='sha256:'+'0'*64
+                else:assets[0]['state']='starter'
+                draft={'draft':True,'target_commitish':'a'*40,'assets':assets}
+                with self.subTest(change=change), patch.object(release,'github_release',side_effect=[None,draft]), patch.object(release.subprocess,'run') as command:
+                    with self.assertRaises(ValueError):release.publish(folder,'0.1.12','a'*40,'owner/project',folder/'key')
+                    self.assertFalse(any(call.args[0][:3]==['gh','release','edit'] for call in command.call_args_list))
+
     def test_complete_draft_can_be_found_and_published_before_its_git_tag_exists(self):
         draft={'id':12,'tag_name':'v0.1.12','draft':True,'target_commitish':'a'*40,'assets':[]}
         requests=[];commands=[]
@@ -24,6 +65,7 @@ class ReleaseContract(unittest.TestCase):
             return io.BytesIO(json.dumps([draft]).encode())
         with tempfile.TemporaryDirectory() as directory:
             folder=Path(directory);self.fixture(folder)
+            draft['assets']=self.remote_installers(folder)
             with patch.dict(release.os.environ,{'GH_TOKEN':'test-token'}), patch.object(release.urllib.request,'urlopen',side_effect=response), patch.object(release.subprocess,'run',side_effect=lambda args,**kwargs:commands.append(args)):
                 release.publish(folder,'0.1.12','a'*40,'owner/project',folder/'key')
         self.assertFalse(any(command[:3]==['gh','release','create'] for command in commands))
@@ -94,12 +136,15 @@ class ReleaseContract(unittest.TestCase):
         self.assertEqual(release.latest_release(list(reversed(releases)),['pending','new','old']),'v0.1.9')
 
     def test_a_published_release_is_immutable_and_rerunning_the_same_release_is_safe(self):
-        manifest={'version':'0.1.12','commit':'a'*40,'targets':[]}
+        asset={'name':'nodeharbor-v0.1.12-x86_64-pc-windows-msvc.exe','sha256':'c'*64}
+        manifest={'version':'0.1.12','commit':'a'*40,'targets':[{'assets':[asset]}]}
+        remote={'name':asset['name'],'digest':'sha256:'+asset['sha256'],'state':'uploaded'}
         self.assertEqual(release.publication_action(None,manifest),'create')
         self.assertEqual(release.publication_action({'draft':True,'target_commitish':'a'*40},manifest),'resume')
-        self.assertEqual(release.publication_action({'draft':False,'target_commitish':'a'*40,'manifest':manifest},manifest),'skip')
-        with self.assertRaises(ValueError):release.publication_action({'draft':False,'target_commitish':'b'*40,'manifest':manifest},manifest)
-        with self.assertRaises(ValueError):release.publication_action({'draft':False,'target_commitish':'a'*40,'manifest':{'version':'0.1.12','commit':'a'*40,'targets':['different']}},manifest)
+        self.assertEqual(release.publication_action({'draft':False,'target_commitish':'a'*40,'assets':[remote]},manifest),'skip')
+        with self.assertRaises(ValueError):release.publication_action({'draft':False,'target_commitish':'b'*40,'assets':[remote]},manifest)
+        for assets in [[],[dict(remote,digest='sha256:'+'d'*64)],[remote,remote]]:
+            with self.assertRaises(ValueError):release.publication_action({'draft':False,'target_commitish':'a'*40,'assets':assets},manifest)
     def test_versions_are_stable_and_ordered_by_main_history(self):
         self.assertEqual(release.version_for("0.1.0", 12), "0.1.12")
         self.assertEqual(release.version_for("0.1.0", 12), release.version_for("0.1.0", 12))

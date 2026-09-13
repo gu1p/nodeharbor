@@ -33,11 +33,63 @@ nodeharbor_hash() {
 
 nodeharbor_download() { curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 "$1" -o "$2"; }
 
+# Use the platform's JSON parser. macOS includes plutil; Ubuntu includes Python 3.
+nodeharbor_json_value() {
+  if [[ -x /usr/bin/plutil ]]; then
+    /usr/bin/plutil -extract "$2" raw -expect "$3" -o - "$1"
+  else
+    command -v python3 >/dev/null || { nodeharbor_error 'Python 3 is required to read release metadata on Linux'; return 1; }
+    python3 -c '
+import json, sys
+with open(sys.argv[1]) as file: value = json.load(file)
+for key in sys.argv[2].split("."):
+    value = value[int(key)] if isinstance(value, list) else value[key]
+kind = sys.argv[3]
+if type(value) is not {"string": str, "bool": bool, "array": list}[kind]:
+    raise ValueError("Invalid release metadata type")
+print(len(value) if kind == "array" else (str(value).lower() if kind == "bool" else value))
+' "$1" "$2" "$3"
+  fi
+}
+
+nodeharbor_release_digest() {
+  local metadata=$1 version=$2 name=$3 count index candidate digest='' matches=0
+  [[ $(nodeharbor_json_value "$metadata" tag_name string) == "v$version" && $(nodeharbor_json_value "$metadata" draft bool) == false ]] || { nodeharbor_error 'The requested release is not published'; return 1; }
+  count=$(nodeharbor_json_value "$metadata" assets array) || return 1
+  [[ "$count" =~ ^[0-9]+$ && "$count" -le 1000 ]] || { nodeharbor_error 'Invalid release asset count'; return 1; }
+  for ((index=0; index<count; index++)); do
+    candidate=$(nodeharbor_json_value "$metadata" "assets.$index.name" string) || return 1
+    if [[ "$candidate" == "$name" ]]; then
+      matches=$((matches+1))
+      [[ $(nodeharbor_json_value "$metadata" "assets.$index.state" string) == uploaded && $(nodeharbor_json_value "$metadata" "assets.$index.browser_download_url" string) == "https://github.com/gu1p/nodeharbor/releases/download/v$version/$name" ]] || { nodeharbor_error 'Invalid release package metadata'; return 1; }
+      digest=$(nodeharbor_json_value "$metadata" "assets.$index.digest" string) || return 1
+    fi
+  done
+  [[ "$matches" == 1 && "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { nodeharbor_error 'Release package checksum metadata is missing or invalid'; return 1; }
+  printf '%s\n' "${digest#sha256:}"
+}
+
+nodeharbor_dmg_mountpoint() {
+  local metadata=$1 count index candidate mount='' matches=0
+  count=$(nodeharbor_json_value "$metadata" system-entities array) || return 1
+  for ((index=0; index<count; index++)); do
+    candidate=$(nodeharbor_json_value "$metadata" "system-entities.$index.mount-point" string 2>/dev/null) || continue
+    matches=$((matches+1))
+    mount=$candidate
+  done
+  [[ "$matches" == 1 && -d "$mount/NodeHarbor.app" ]] || { nodeharbor_error 'The disk image must contain one mounted NodeHarbor application'; return 1; }
+  printf '%s\n' "$mount"
+}
+
 NODEHARBOR_TEMP_WORK=''
 NODEHARBOR_BACKUP=''
 NODEHARBOR_DESTINATION=''
 NODEHARBOR_STAGE=''
+NODEHARBOR_MOUNT=''
 nodeharbor_cleanup() {
+  if [[ -n "$NODEHARBOR_MOUNT" ]]; then
+    hdiutil detach "$NODEHARBOR_MOUNT" >/dev/null || { nodeharbor_error "Could not detach the installer disk image at $NODEHARBOR_MOUNT; temporary files have been retained"; return 1; }
+  fi
   if [[ -n "$NODEHARBOR_BACKUP" && -e "$NODEHARBOR_BACKUP" && ! -e "$NODEHARBOR_DESTINATION" ]]; then
     mv "$NODEHARBOR_BACKUP" "$NODEHARBOR_DESTINATION"
   fi
@@ -107,7 +159,7 @@ nodeharbor_activate_linux() (
 )
 
 nodeharbor_main() {
-  local target version name base expected actual install_dir stage binary agent
+  local target version name base expected actual install_dir stage binary agent mount
   target=$(nodeharbor_target)
   version=${NODEHARBOR_VERSION:-}
   if [[ -z "$version" ]]; then
@@ -118,16 +170,16 @@ nodeharbor_main() {
   [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || nodeharbor_error 'No published release was found, or NODEHARBOR_VERSION is invalid'
   name="nodeharbor-v${version}-${target}"
   case "$target" in
-    *apple-darwin) name="$name.app.tar.gz" ;;
+    *apple-darwin) name="$name.dmg" ;;
     *) name="$name.AppImage" ;;
   esac
   base="https://github.com/gu1p/nodeharbor/releases/download/v${version}"
   NODEHARBOR_TEMP_WORK=$(mktemp -d "${TMPDIR:-/tmp}/nodeharbor-install.XXXXXX")
   trap nodeharbor_cleanup EXIT
   printf 'Downloading NodeHarbor %s for %s…\n' "$version" "$target"
-  nodeharbor_download "$base/SHA256SUMS" "$NODEHARBOR_TEMP_WORK/SHA256SUMS"
+  nodeharbor_download "https://api.github.com/repos/gu1p/nodeharbor/releases/tags/v$version" "$NODEHARBOR_TEMP_WORK/release.json"
+  expected=$(nodeharbor_release_digest "$NODEHARBOR_TEMP_WORK/release.json" "$version" "$name")
   nodeharbor_download "$base/$name" "$NODEHARBOR_TEMP_WORK/$name"
-  expected=$(awk -v name="$name" '$2 == name { count++; hash=$1 } END { if(count==1) print hash }' "$NODEHARBOR_TEMP_WORK/SHA256SUMS")
   actual=$(nodeharbor_hash "$NODEHARBOR_TEMP_WORK/$name")
   [[ "$expected" =~ ^[0-9a-f]{64}$ && "$actual" == "$expected" ]] || nodeharbor_error 'Package checksum verification failed; the previous installation has been preserved'
   case "$target" in
@@ -136,8 +188,12 @@ nodeharbor_main() {
       mkdir -p "$install_dir"
       stage=$(mktemp -d "$install_dir/.nodeharbor-stage.XXXXXX")
       NODEHARBOR_STAGE="$stage"
-      # The verified release contains one application bundle.
-      tar -xzf "$NODEHARBOR_TEMP_WORK/$name" -C "$stage"
+      hdiutil attach "$NODEHARBOR_TEMP_WORK/$name" -nobrowse -readonly -plist > "$NODEHARBOR_TEMP_WORK/mount.plist"
+      NODEHARBOR_MOUNT=$(nodeharbor_json_value "$NODEHARBOR_TEMP_WORK/mount.plist" system-entities.0.dev-entry string)
+      mount=$(nodeharbor_dmg_mountpoint "$NODEHARBOR_TEMP_WORK/mount.plist")
+      ditto "$mount/NodeHarbor.app" "$stage/NodeHarbor.app"
+      hdiutil detach "$NODEHARBOR_MOUNT" >/dev/null
+      NODEHARBOR_MOUNT=''
       binary="$stage/NodeHarbor.app/Contents/MacOS/nodeharbor"
       [[ -x "$binary" ]] || nodeharbor_error 'The package has no runnable application'
       "$binary" --version | grep -F "NodeHarbor $version " >/dev/null || nodeharbor_error 'The downloaded application has the wrong version'

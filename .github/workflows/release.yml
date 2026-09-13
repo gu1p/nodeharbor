@@ -185,3 +185,14 @@ jobs:
           chmod 600 "$key"
           printf '%s\n' "$SIGNING_KEY" > "$key"
           python scripts/release.py publish dist "$NODEHARBOR_VERSION" "$NODEHARBOR_COMMIT" --key "$key"
+      - name: Retain release verification records in CI
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-verification-${{ needs.identity.outputs.version }}
+          path: |
+            dist/*.json
+            dist/SHA256SUMS*
+            dist/*.minisig
+            nodeharbor.minisign.pub
+          if-no-files-found: error
+          retention-days: 90
