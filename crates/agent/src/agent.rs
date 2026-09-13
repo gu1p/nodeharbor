@@ -28,7 +28,7 @@ pub struct Agent {
     runtime: Arc<Mutex<Runtime>>,
     operation: Arc<Mutex<()>>,
     client: reqwest::Client,
-    runner: Arc<dyn crate::Runner>,
+    runner: Option<Arc<dyn crate::Runner>>,
     activity: crate::activity::ActivityLog,
 }
 #[derive(Serialize)]
@@ -44,6 +44,7 @@ pub struct Snapshot {
     pub resources: Resources,
     pub allocated_resources: Option<Resources>,
     pub recreation_pending: bool,
+    pub worker_replacement_available: bool,
     pub worker: VmInfo,
     pub enrolled: bool,
     pub controller_url: String,
@@ -52,15 +53,24 @@ pub struct Snapshot {
 }
 impl Agent {
     pub fn open(directory: &Path) -> Result<Self> {
-        Self::open_with_runner(directory, Arc::new(crate::vm::MultipassRunner))
+        let new_settings = !directory.join("config.json").exists();
+        let agent = Self::open_inner(directory, None)?;
+        if new_settings && crate::VmProvider::native() == crate::VmProvider::Lima {
+            agent.store.update(|config| {
+                config.vm_provider = crate::VmProvider::Lima;
+                config.format_version = 2;
+                Ok(())
+            })?;
+        }
+        Ok(agent)
     }
     pub fn open_with_runner(directory: &Path, runner: Arc<dyn crate::Runner>) -> Result<Self> {
+        Self::open_inner(directory, Some(runner))
+    }
+    fn open_inner(directory: &Path, runner: Option<Arc<dyn crate::Runner>>) -> Result<Self> {
         let activity = crate::activity::ActivityLog::default();
         Ok(Self {
-            runner: Arc::new(crate::activity::ActivityRunner {
-                inner: runner,
-                log: activity.clone(),
-            }),
+            runner,
             activity,
             store: Store::open(directory)?,
             runtime: Arc::new(Mutex::new(Runtime::default())),
@@ -71,11 +81,30 @@ impl Agent {
                 .build()?,
         })
     }
+    fn vm(&self, config: &Configuration) -> Result<Vm> {
+        let runner = match &self.runner {
+            Some(runner) => runner.clone(),
+            None => Vm::native_runner(config.vm_provider, &self.store.directory)?,
+        };
+        Vm::managed(
+            &config.device_id,
+            &self.store.directory,
+            Arc::new(crate::activity::ActivityRunner {
+                inner: runner,
+                log: self.activity.clone(),
+            }),
+        )
+    }
+    pub fn local_vm(&self) -> Result<Vm> {
+        self.vm(&self.store.load()?)
+    }
     pub fn activity(&self) -> crate::activity::ActivitySnapshot {
         self.activity.snapshot()
     }
     pub async fn snapshot(&self) -> Result<Snapshot> {
         let config = self.store.load()?;
+        let worker_replacement_available = config.device_token.is_some()
+            && (config.vm_created || self.vm(&config)?.has_receipt()?);
         let allocated = config
             .allocated_resources
             .as_ref()
@@ -96,6 +125,7 @@ impl Agent {
             resources: observation.resources,
             allocated_resources: config.allocated_resources,
             recreation_pending: config.recreation.is_some(),
+            worker_replacement_available,
             worker: runtime.worker,
             enrolled: config.device_token.is_some(),
             controller_url: config.controller_url.unwrap_or_default(),
@@ -146,11 +176,7 @@ impl Agent {
                 config.device_token.is_some(),
                 "Connect this computer to a fleet first"
             );
-            let vm = Vm::managed(
-                &config.device_id,
-                &self.store.directory,
-                self.runner.clone(),
-            )?;
+            let vm = self.vm(config)?;
             anyhow::ensure!(
                 vm.has_receipt()?,
                 "The worker has no ownership receipt; it has been left untouched"
@@ -160,7 +186,9 @@ impl Agent {
             config.recreation = Some(crate::store::WorkerRecreation {
                 request_id: uuid::Uuid::new_v4(),
                 access_removed: false,
+                target_provider: Some(crate::VmProvider::native()),
             });
+            config.format_version = 2;
             config.draining_since.get_or_insert_with(now_seconds);
             Ok(())
         })?;
@@ -384,11 +412,7 @@ impl Agent {
                 current.stop_requested = true;
                 Ok(())
             })?;
-            let vm = Vm::managed(
-                &config.device_id,
-                &self.store.directory,
-                self.runner.clone(),
-            )?;
+            let vm = self.vm(&config)?;
             if config.vm_created || vm.has_receipt()? {
                 let info = vm.info().await?;
                 self.runtime.lock().await.worker = info.clone();
@@ -443,11 +467,7 @@ impl Agent {
             .await;
             return Ok(());
         }
-        let vm = Vm::managed(
-            &config.device_id,
-            &self.store.directory,
-            self.runner.clone(),
-        )?;
+        let vm = self.vm(&config)?;
         let owned = config.vm_created || vm.has_receipt()?;
         if config.stop_requested {
             return self.finish_immediate_stop().await;
@@ -792,6 +812,10 @@ impl Agent {
         }
         vm.remove().await?;
         self.store.update(|current| {
+            current.vm_provider = request.target_provider.unwrap_or(config.vm_provider);
+            if current.vm_provider == crate::VmProvider::Lima {
+                current.format_version = 2;
+            }
             current.vm_created = false;
             current.vm_configured = false;
             current.allocated_resources = None;

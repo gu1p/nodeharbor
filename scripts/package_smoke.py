@@ -6,6 +6,13 @@ import re
 import subprocess
 import tarfile
 import tempfile
+import importlib.util
+
+
+def check_vm_runtime(application):
+    spec=importlib.util.spec_from_file_location('vm_runtime',Path(__file__).with_name('vm_runtime.py'))
+    runtime=importlib.util.module_from_spec(spec);spec.loader.exec_module(runtime)
+    runtime.check_vm_runtime(application)
 
 
 def check_executable(binary, version, commit):
@@ -30,12 +37,14 @@ def smoke_packages(folder, target, version, commit):
             app = root / 'NodeHarbor.app/Contents/MacOS'
             for binary in ['nodeharbor', 'nodeharbor-agent']:
                 check_executable(app / binary, version, commit)
+            check_vm_runtime(root/'NodeHarbor.app')
             mount = root / 'dmg'
             mount.mkdir()
             run(['hdiutil', 'attach', str(folder / (prefix + '.dmg')), '-nobrowse', '-readonly', '-mountpoint', str(mount)], stdout=subprocess.DEVNULL)
             try:
                 for binary in ['nodeharbor', 'nodeharbor-agent']:
                     check_executable(mount / 'NodeHarbor.app/Contents/MacOS' / binary, version, commit)
+                check_vm_runtime(mount/'NodeHarbor.app')
             finally:
                 run(['hdiutil', 'detach', str(mount)], stdout=subprocess.DEVNULL)
         elif 'linux' in target:

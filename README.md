@@ -37,9 +37,15 @@ elapsed time, live command output, and errors. It updates every second. Turn off
 diagnostics. The latest 500 entries are kept for the current app session;
 credentials and command input are excluded from the log.
 
-Install [Multipass](https://canonical.com/multipass/install) before preparing a
-worker. Open NodeHarbor, enroll using the code supplied by your fleet
-administrator, choose resource limits and sharing rules, and prepare the worker.
+The macOS app includes its Lima VM runtime and uses application-managed networking
+without changing your VPN configuration. On Windows and Ubuntu, install
+[Multipass](https://canonical.com/multipass/install) before preparing a worker.
+Open NodeHarbor, enroll using the code supplied by your fleet administrator,
+choose resource limits and sharing rules, and prepare the worker.
+For an existing macOS worker, use **Your machine → Replace worker** to move to the
+bundled runtime. Replacement drains work, removes the previous worker's access,
+and deletes its owned disk after confirmation. Enrollment and sharing rules remain;
+sharing stays off until you prepare the replacement and enable it again.
 Installing NodeHarbor alone does not contribute resources. Pilot packages are
 unsigned by Apple or Microsoft; NodeHarbor does not disable OS security checks.
 
@@ -60,7 +66,9 @@ flowchart LR
 ```
 
 The desktop uses Tauri, React, TypeScript, and Rust. The controller uses Axum and
-SQLite through SQLx. Multipass manages each computer's Ubuntu VM. NetBird supplies
+SQLite through SQLx. The macOS app bundles Lima with its `user-v2` network; Windows
+and Ubuntu use Multipass. Each VM remains subject to ownership receipts and the
+same contribution lifecycle. NetBird supplies
 private connectivity; it does not create Kubernetes workers. NodeHarbor owns worker
 enrollment, local sharing policy, VM lifecycle, and fleet eligibility.
 
@@ -78,9 +86,9 @@ cd desktop
 ```
 
 On Windows use `python scripts/check.py` in place of `make check`. Local tests
-do not require access to a fleet or launch a VM. Real sharing additionally needs
-[Multipass](https://canonical.com/multipass) and an enrollment code from your
-fleet administrator.
+do not require access to a fleet or launch a VM. Real sharing needs an enrollment
+code from your fleet administrator and a packaged app (or Multipass on Windows
+and Ubuntu).
 
 Environment-specific configuration and credentials belong in your private
 infrastructure repository. This public repository must never contain device

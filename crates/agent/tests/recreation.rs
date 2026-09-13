@@ -158,6 +158,16 @@ async fn owner_confirmation_persists_every_rule_and_stops_sharing_without_deleti
     assert!(!snapshot.policy.enabled);
     assert!(snapshot.policy.idle_only);
     assert_eq!(snapshot.allocated_resources.unwrap().disk_gib, 30);
+    let migration = agent.store.load().unwrap();
+    assert_eq!(migration.format_version, 2);
+    assert_eq!(
+        migration.vm_provider,
+        nodeharbor_agent::VmProvider::Multipass
+    );
+    assert_eq!(
+        migration.recreation.unwrap().target_provider,
+        Some(nodeharbor_agent::VmProvider::native())
+    );
     assert!(host.events.lock().unwrap().is_empty());
     let reopened = Agent::open_with_runner(dir.path(), host).unwrap();
     assert!(reopened.snapshot().await.unwrap().recreation_pending);
@@ -216,6 +226,7 @@ async fn running_work_drains_before_old_access_and_disk_are_removed_and_enrollme
     assert!(!saved.vm_configured);
     assert!(!saved.prepare_requested);
     assert!(!saved.policy.enabled);
+    assert_eq!(saved.vm_provider, nodeharbor_agent::VmProvider::native());
     assert!(saved.allocated_resources.is_none());
     assert_eq!(saved.device_id, ID);
     assert_eq!(saved.device_token.as_deref(), Some("owner-device-token"));
@@ -240,6 +251,11 @@ async fn controller_and_hypervisor_failures_resume_the_same_durable_request_afte
     let agent = Agent::open_with_runner(dir.path(), host.clone()).unwrap();
     assert!(agent.tick().await.is_err());
     assert!(dir.path().join(format!("{NAME}.receipt.json")).exists());
+    assert_eq!(
+        agent.store.load().unwrap().vm_provider,
+        nodeharbor_agent::VmProvider::Multipass,
+        "A failed cleanup must keep targeting the old runtime after restart"
+    );
     let requests = state.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0], requests[1]);

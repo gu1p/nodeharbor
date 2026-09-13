@@ -8,6 +8,7 @@ import shutil
 import subprocess
 from release import TARGETS, collect
 from package_smoke import smoke_packages
+from vm_runtime import bundle_lima
 
 ROOT=Path(__file__).resolve().parents[1]
 def run(command,cwd=ROOT,env=None):
@@ -30,7 +31,11 @@ def main():
     sidecars=ROOT/'desktop/binaries';sidecars.mkdir(parents=True,exist_ok=True)
     shutil.copy2(target_dir/args.target/profile/f'nodeharbor-agent{extension}',sidecars/f'nodeharbor-agent-{args.target}{extension}')
     config=ROOT/'.local/build-config.json';config.parent.mkdir(parents=True,exist_ok=True)
-    config.write_text(json.dumps({'bundle':{'externalBin':['binaries/nodeharbor-agent']}}))
+    bundle={'externalBin':['binaries/nodeharbor-agent']}
+    if 'apple-darwin' in args.target:
+        runtime=bundle_lima(args.target)
+        bundle['resources']={str(runtime):'lima/'}
+    config.write_text(json.dumps({'bundle':bundle}))
     bundles='app' if args.debug and 'darwin' in args.target else ('app,dmg' if 'darwin' in args.target else ('nsis' if extension else 'deb,appimage'))
     tauri=ROOT/'ui/node_modules/.bin'/('tauri.cmd' if os.name=='nt' else 'tauri')
     command=[tauri,'build','--target',args.target,'--bundles',bundles,'--config',config]

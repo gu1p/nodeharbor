@@ -9,6 +9,40 @@ impl Drop for TestProcess {
 }
 
 #[test]
+fn command_line_supervision_streams_activity_before_the_process_finishes() {
+    use std::io::{BufRead, BufReader};
+    let directory = tempfile::tempdir().unwrap();
+    let mut process = TestProcess(
+        Command::new(env!("CARGO_BIN_EXE_nodeharbor-agent"))
+            .arg("--config-dir")
+            .arg(directory.path())
+            .arg("run")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let stderr = process.0.stderr.take().unwrap();
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let result = BufReader::new(stderr).read_line(&mut line);
+        let _ = send.send((result, line));
+    });
+    let (result, line) = receive
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("The supervisor must publish live activity");
+    result.unwrap();
+    let entry: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(entry["source"], "agent");
+    assert!(entry["message"]
+        .as_str()
+        .unwrap()
+        .contains("Connect this computer"));
+    assert!(process.0.try_wait().unwrap().is_none());
+}
+
+#[test]
 fn an_installer_waits_for_the_exact_previous_application_without_killing_it() {
     let directory = tempfile::tempdir().unwrap();
     let binary = env!("CARGO_BIN_EXE_nodeharbor-agent");

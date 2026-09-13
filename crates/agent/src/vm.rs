@@ -15,6 +15,9 @@ pub struct CommandOutput {
 }
 #[async_trait]
 pub trait Runner: Send + Sync {
+    fn provider(&self) -> crate::VmProvider {
+        crate::VmProvider::Multipass
+    }
     async fn run(
         &self,
         args: &[String],
@@ -124,8 +127,14 @@ pub struct Vm {
 }
 impl Vm {
     pub fn new(device_id: &str, runner: Arc<dyn Runner>) -> Result<Self> {
+        let identity_name = crate::managed_vm_name(device_id)?;
+        let name = if runner.provider() == crate::VmProvider::Lima {
+            "worker".into()
+        } else {
+            identity_name
+        };
         Ok(Self {
-            name: crate::managed_vm_name(device_id)?,
+            name,
             device_id: device_id.into(),
             runner,
             receipt: None,
@@ -142,6 +151,18 @@ impl Vm {
     pub fn local_in(device_id: &str, directory: &Path) -> Result<Self> {
         Self::managed(device_id, directory, Arc::new(MultipassRunner))
     }
+    pub(crate) fn native_runner(
+        provider: crate::VmProvider,
+        directory: &Path,
+    ) -> Result<Arc<dyn Runner>> {
+        Ok(match provider {
+            crate::VmProvider::Multipass => Arc::new(MultipassRunner),
+            crate::VmProvider::Lima => Arc::new(crate::LimaRunner::bundled(directory)?),
+        })
+    }
+    fn is_lima(&self) -> bool {
+        self.runner.provider() == crate::VmProvider::Lima
+    }
     pub fn has_receipt(&self) -> Result<bool> {
         let Some(path) = &self.receipt else {
             return Ok(false);
@@ -154,8 +175,11 @@ impl Vm {
         let receipt: Value =
             serde_json::from_reader(file).context("The VM creation receipt is damaged")?;
         anyhow::ensure!(
-            receipt["version"] == 1
-                && receipt["deviceId"] == self.device_id
+            (if self.is_lima() {
+                receipt["version"] == 2 && receipt["provider"] == "lima"
+            } else {
+                receipt["version"] == 1
+            }) && receipt["deviceId"] == self.device_id
                 && receipt["name"] == self.name,
             "The VM creation receipt does not match this device"
         );
@@ -170,7 +194,11 @@ impl Vm {
             tempfile::NamedTempFile::new_in(path.parent().context("Invalid receipt directory")?)?;
         serde_json::to_writer(
             &mut file,
-            &json!({"version":1,"deviceId":self.device_id,"name":self.name}),
+            &if self.is_lima() {
+                json!({"version":2,"provider":"lima","deviceId":self.device_id,"name":self.name})
+            } else {
+                json!({"version":1,"deviceId":self.device_id,"name":self.name})
+            },
         )?;
         file.as_file().sync_all()?;
         file.persist(path)
@@ -186,12 +214,27 @@ impl Vm {
         let output = self.runner.run(&args, stdin, timeout).await?;
         anyhow::ensure!(
             output.success,
-            "Multipass: {}",
+            "{}: {}",
+            self.runner.provider().name(),
             output.stderr.chars().take(1200).collect::<String>().trim()
         );
         Ok(output.stdout)
     }
     pub async fn info(&self) -> Result<VmInfo> {
+        if self.is_lima() {
+            let output = self
+                .command(
+                    vec![
+                        "list".into(),
+                        "--format=json".into(),
+                        "--filter=.name == \"worker\"".into(),
+                    ],
+                    None,
+                    15,
+                )
+                .await?;
+            return crate::lima::info(&output);
+        }
         let output = self
             .command(
                 vec!["list".into(), "--format".into(), "json".into()],
@@ -232,7 +275,11 @@ impl Vm {
         stdin: Option<Vec<u8>>,
         timeout: u64,
     ) -> Result<String> {
-        let mut args = vec!["exec".into(), self.name.clone(), "--".into()];
+        let mut args = if self.is_lima() {
+            vec!["shell".into(), "--workdir=/".into(), self.name.clone()]
+        } else {
+            vec!["exec".into(), self.name.clone(), "--".into()]
+        };
         args.extend(command.iter().map(|s| (*s).to_owned()));
         self.command(args, stdin, timeout).await
     }
@@ -264,7 +311,7 @@ impl Vm {
         self.command(args, None, 60).await?;
         anyhow::ensure!(
             !self.info().await?.running,
-            "Multipass has not confirmed that the worker stopped"
+            "The VM runtime has not confirmed that the worker stopped"
         );
         Ok(())
     }
@@ -273,8 +320,12 @@ impl Vm {
             self.has_receipt()?,
             "This application has no creation receipt for the VM; it has been left untouched"
         );
-        self.command(vec!["start".into(), self.name.clone()], None, 180)
-            .await?;
+        let args = if self.is_lima() {
+            vec!["start".into(), "--timeout=3m".into(), self.name.clone()]
+        } else {
+            vec!["start".into(), self.name.clone()]
+        };
+        self.command(args, None, 180).await?;
         self.verify_owner().await?;
         Ok(())
     }
@@ -288,6 +339,21 @@ impl Vm {
             info.installed && !info.running,
             "Stop the worker before changing its resources"
         );
+        if self.is_lima() {
+            self.command(
+                vec![
+                    "edit".into(),
+                    self.name.clone(),
+                    format!("--cpus={}", resources.cpus),
+                    format!("--memory={}", resources.memory_mib as f64 / 1024.0),
+                    format!("--disk={}", resources.disk_gib),
+                ],
+                None,
+                60,
+            )
+            .await?;
+            return Ok(());
+        }
         for (key, value) in [
             ("cpus", resources.cpus.to_string()),
             ("memory", format!("{}M", resources.memory_mib)),
@@ -314,17 +380,21 @@ impl Vm {
             );
             anyhow::ensure!(
                 info.stopped,
-                "Multipass must confirm the worker is stopped before deleting its disk"
+                "The VM runtime must confirm the worker is stopped before deleting its disk"
             );
             self.command(
-                vec!["delete".into(), "--purge".into(), self.name.clone()],
+                if self.is_lima() {
+                    vec!["delete".into(), self.name.clone()]
+                } else {
+                    vec!["delete".into(), "--purge".into(), self.name.clone()]
+                },
                 None,
                 60,
             )
             .await?;
             anyhow::ensure!(
                 !self.info().await?.installed,
-                "Multipass has not confirmed that the worker disk was removed"
+                "The VM runtime has not confirmed that the worker disk was removed"
             );
         }
         if owned {
@@ -342,6 +412,27 @@ impl Vm {
             !self.info().await?.installed,
             "The worker VM already exists; refusing to replace it"
         );
+        if self.is_lima() {
+            let config = crate::lima::configuration(&self.device_id, resources, &files)?;
+            let mut file = tempfile::Builder::new()
+                .suffix(".yaml")
+                .tempfile_in(directory)?;
+            serde_json::to_writer(file.as_file_mut(), &config)?;
+            file.as_file().sync_all()?;
+            self.record_creation()?;
+            self.command(
+                vec![
+                    "start".into(),
+                    format!("--name={}", self.name),
+                    "--timeout=15m".into(),
+                    file.path().to_string_lossy().into(),
+                ],
+                None,
+                1200,
+            )
+            .await?;
+            return self.verify_owner().await;
+        }
         let mut writes = vec![
             json!({"path":"/etc/nodeharbor/device-id","owner":"root:root","permissions":"0600","content":self.device_id}),
         ];

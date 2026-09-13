@@ -14,12 +14,16 @@ use uuid::Uuid;
 pub struct WorkerRecreation {
     pub request_id: Uuid,
     pub access_removed: bool,
+    #[serde(default)]
+    pub target_provider: Option<crate::VmProvider>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Configuration {
     pub format_version: u32,
+    #[serde(default)]
+    pub vm_provider: crate::VmProvider,
     pub device_id: String,
     pub name: String,
     pub policy: Policy,
@@ -44,6 +48,7 @@ impl Default for Configuration {
     fn default() -> Self {
         Self {
             format_version: 1,
+            vm_provider: crate::VmProvider::Multipass,
             device_id: Uuid::new_v4().to_string(),
             name: sysinfo::System::host_name().unwrap_or_else(|| "My computer".into()),
             policy: Policy::default(),
@@ -104,8 +109,12 @@ impl Store {
         let config: Configuration = serde_json::from_reader(file)
             .context("NodeHarbor settings are damaged; the original file has been preserved")?;
         anyhow::ensure!(
-            config.format_version == 1,
+            matches!(config.format_version, 1 | 2),
             "These settings require a newer NodeHarbor application"
+        );
+        anyhow::ensure!(
+            config.vm_provider != crate::VmProvider::Lima || config.format_version == 2,
+            "The worker runtime requires versioned settings; the original file has been preserved"
         );
         Uuid::parse_str(&config.device_id).context("Invalid saved device identity")?;
         Ok(config)

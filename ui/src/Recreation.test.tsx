@@ -64,3 +64,22 @@ it('prevents duplicate destructive requests while the desktop command is pending
  expect(api.recreateWorker).toHaveBeenCalledTimes(1);
  await act(async()=>finish(await api.snapshot()));
 });
+it('lets an owner replace a failed worker without changing resource limits and preserves cancellation',async()=>{
+ const {state,api}=fixture();
+ Object.assign(state,{workerReplacementAvailable:true,worker:{installed:false,running:false},allocatedResources:null});
+ const user=userEvent.setup();render(<App backend={api}/>);
+ const replace=await screen.findByRole('button',{name:'Replace worker'});
+ await user.click(replace);
+ const dialog=screen.getByRole('alertdialog',{name:'Replace the worker disk?'});
+ expect(dialog).toHaveTextContent(/permanently delete/);
+ expect(dialog).toHaveTextContent(/fleet enrollment/);
+ expect(dialog).not.toHaveTextContent('undefined');
+ await user.click(screen.getByRole('button',{name:'Keep current worker'}));
+ expect(api.recreateWorker).not.toHaveBeenCalled();
+ expect(replace).toHaveFocus();
+ await user.click(replace);
+ await user.click(screen.getByRole('button',{name:'Delete disk and replace worker'}));
+ await waitFor(()=>expect(api.recreateWorker).toHaveBeenCalledExactlyOnceWith(state.policy));
+ expect(await screen.findByText(/Worker replacement is pending/)).toBeVisible();
+ expect(screen.queryByRole('button',{name:'Prepare worker'})).not.toBeInTheDocument();
+});

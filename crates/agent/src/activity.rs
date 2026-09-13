@@ -170,15 +170,15 @@ fn command_step(args: &[String]) -> Option<&'static str> {
         "start" => Some("Starting Ubuntu VM"),
         "stop" => Some("Stopping Ubuntu VM"),
         "delete" => Some("Removing the stopped worker VM"),
-        "set" => Some("Applying worker resource limits"),
-        "exec"
+        "set" | "edit" => Some("Applying worker resource limits"),
+        "exec" | "shell"
             if args
                 .iter()
                 .any(|arg| arg == "/usr/local/lib/nodeharbor/configure_worker.py") =>
         {
             Some("Configuring the private network and Kubernetes")
         }
-        "exec" if args.iter().any(|arg| arg == "cloud-init") => {
+        "exec" | "shell" if args.iter().any(|arg| arg == "cloud-init") => {
             Some("Waiting for Ubuntu initialization")
         }
         _ => None,
@@ -209,6 +209,9 @@ fn input_secrets(input: Option<&[u8]>) -> Vec<String> {
 }
 #[async_trait]
 impl Runner for ActivityRunner {
+    fn provider(&self) -> crate::VmProvider {
+        self.inner.provider()
+    }
     async fn run(
         &self,
         args: &[String],
@@ -222,10 +225,10 @@ impl Runner for ActivityRunner {
         let secrets = input_secrets(stdin.as_deref());
         let log = self.log.clone();
         let redactions = secrets.clone();
-        let source = if args[0] == "exec" {
+        let source = if matches!(args[0].as_str(), "exec" | "shell") {
             "worker"
         } else {
-            "multipass"
+            self.inner.provider().name()
         };
         let progress: ProgressSink = Arc::new(move |stream, line| {
             let message = redact(line, &redactions);

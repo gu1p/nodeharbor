@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use nodeharbor_agent::{Agent, Store, Vm};
+use nodeharbor_agent::{Agent, Store};
 use std::{
     path::PathBuf,
     time::{Duration, Instant},
@@ -22,6 +22,11 @@ enum Command {
     Resume,
     Prepare,
     Stop,
+    /// Replace the owned worker through the normal drain and access-reset flow.
+    ReplaceWorker {
+        #[arg(long)]
+        confirm_delete_disk: bool,
+    },
     /// Wait for the previous application process before installing an update.
     WaitForAppExit {
         #[arg(long)]
@@ -87,7 +92,7 @@ async fn wait_for_app_exit(executable: &std::path::Path, timeout: u64) -> Result
 
 async fn wait_for_stop(agent: &Agent, timeout: u64) -> Result<()> {
     let config = agent.store.load()?;
-    let vm = Vm::local_in(&config.device_id, &agent.store.directory)?;
+    let vm = agent.local_vm()?;
     if !config.vm_created && !config.prepare_requested && !vm.has_receipt()? {
         return Ok(());
     }
@@ -105,6 +110,29 @@ async fn wait_for_stop(agent: &Agent, timeout: u64) -> Result<()> {
         }
         anyhow::ensure!(Instant::now() < deadline, "The worker did not finish draining in time; the existing application must be preserved");
         tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+async fn supervise_with_logs(agent: &Agent) -> Result<()> {
+    use std::io::Write;
+    let supervision = agent.run();
+    tokio::pin!(supervision);
+    let mut refresh = tokio::time::interval(Duration::from_secs(1));
+    let mut last_id = 0;
+    loop {
+        tokio::select! {
+            result=&mut supervision=>return result,
+            _=refresh.tick()=>{
+                for entry in agent.activity().entries {
+                    if entry.id>last_id {
+                        // These are the same bounded, redacted entries shown in
+                        // the desktop. A closed log sink must not stop supervision.
+                        let _=writeln!(std::io::stderr().lock(),"{}",serde_json::to_string(&entry)?);
+                        last_id=entry.id;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -128,9 +156,7 @@ async fn main() -> Result<()> {
         Command::Status => {
             let mut snapshot = agent.snapshot().await?;
             if agent.store.load()?.vm_created {
-                snapshot.worker = Vm::local_in(&snapshot.device_id, &agent.store.directory)?
-                    .info()
-                    .await?;
+                snapshot.worker = agent.local_vm()?.info().await?;
                 if snapshot.worker.running {
                     snapshot.state = "running".into();
                     snapshot.reason = "The local worker is running; the fleet dashboard reports its qualification".into();
@@ -140,7 +166,7 @@ async fn main() -> Result<()> {
         }
         Command::Run => {
             tokio::select! {
-                result = agent.run() => result?,
+                result = supervise_with_logs(&agent) => result?,
                 _ = tokio::signal::ctrl_c() => {
                     agent.action("pause").await?;
                     wait_for_stop(&agent,2100).await?;
@@ -170,6 +196,13 @@ async fn main() -> Result<()> {
         }
         Command::Prepare => {
             agent.action("prepare").await?;
+        }
+        Command::ReplaceWorker {
+            confirm_delete_disk,
+        } => {
+            anyhow::ensure!(confirm_delete_disk,"Replacement permanently deletes the owned worker disk. Supply --confirm-delete-disk to request it");
+            agent.recreate_worker(agent.store.load()?.policy).await?;
+            println!("Worker replacement requested. Enrollment and sharing rules are preserved; sharing remains off.");
         }
         Command::Enroll { url, code_file } => {
             let code = std::fs::read_to_string(code_file)

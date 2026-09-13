@@ -50,6 +50,8 @@ pub use store::{Configuration, Store};
 
 mod vm;
 pub use vm::{CommandOutput, Runner, Vm, VmInfo};
+mod lima;
+pub use lima::{LimaRunner, VmProvider};
 pub mod activity;
 pub mod process;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
