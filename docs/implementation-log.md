@@ -21,6 +21,10 @@ Implemented and covered:
   evictions deferred by disruption budgets, and draining before resource changes.
 - VM CPU/RAM changes and disk growth after stopping the worker. Disk shrinking
   remains rejected until the explicit recreation flow is implemented.
+- Preparation retries apply changed resource limits before starting an existing
+  partial worker; preparing a configured worker retains its normal drain behavior.
+- Verified runtime downloads are cached by checksum and installed atomically,
+  preserving executables used by running processes and surviving failed downloads.
 - SQLite controller state, one-use enrollment codes, hashed device credentials,
   trusted gateway authentication, fleet pause/resume, and revocation with retries.
 - Independent Kubernetes/NetBird identity and resource verification, a DNS and pod
@@ -46,6 +50,10 @@ All five native targets passed checks and packaging in these GitHub runs:
 - [Run 34728317373](https://github.com/gu1p/nodeharbor/actions/runs/34728317373):
   all five targets, the container smoke test, and publication of both Linux
   controller images passed after the builder fix.
+- [Run 34730191238](https://github.com/gu1p/nodeharbor/actions/runs/34730191238):
+  all five native package smoke checks and container publication passed, including
+  real Windows NSIS installation and removal. Later application changes still
+  require their own successful builds before release.
 
 The native macOS ARM application was launched and inspected with actual IPC and
 host resource information. Its installer and worker acceptance are separate checks.
@@ -59,8 +67,13 @@ The private infrastructure repository contains the NetBird bootstrap deployment,
 restricted initialization workflow, and deployment diagnostics. The network server
 is running on an existing cluster node. Private initialization succeeded through
 the existing GitLab Kubernetes agent; its temporary CI credential was removed.
-Public TLS routes and cloud peer connectivity are being deployed. Credentials remain outside this public
-repository. No additional cloud servers have been created.
+Public TLS and STUN checks passed. Both existing fixed hosts are connected through
+the official NetBird client, with explicit peer access policies. Full-MTU packets
+passed in both directions, with no loss in the 30-packet checks and approximately
+1.2 ms average round-trip time after connection establishment. Kubernetes still
+uses its existing private interface; the CNI transition remains separate work.
+Credentials remain outside this public repository. No additional cloud servers
+have been created.
 
 The local Multipass VM boots Ubuntu but has not obtained a DHCP lease. Guest and
 host packet captures confirm requests without replies. A test involving the host's
@@ -69,8 +82,8 @@ not been changed by NodeHarbor.
 
 ## Remaining acceptance work
 
-- Complete public TLS activation, cloud peer connectivity, routing/ACLs, and MTU
-  configuration while preserving the existing cluster's node addresses and workloads.
+- Complete Kubernetes connectivity and the supported CNI/MTU rollout while
+  preserving the existing cluster's node addresses and workloads.
 - Deploy the controller, gateway routes, admission policies, probe, telemetry,
   contributed runner pools, and the stateless acceptance workload.
 - Complete the explicit disk recreation flow and interrupted-operation handling;
