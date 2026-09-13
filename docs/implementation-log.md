@@ -23,6 +23,10 @@ Implemented and covered:
   remains rejected until the explicit recreation flow is implemented.
 - Preparation retries apply changed resource limits before starting an existing
   partial worker; preparing a configured worker retains its normal drain behavior.
+- Owner Stop now and installer pause requests interrupt long preparation operations,
+  including requests from another process. Immediate shutdown uses Multipass's
+  supported force option, retains ownership checks, and reconciles uncertain
+  partial-worker states. Normal pauses of running workloads retain their drain.
 - Verified runtime downloads are cached by checksum and installed atomically,
   preserving executables used by running processes and surviving failed downloads.
 - SQLite controller state, one-use enrollment codes, hashed device credentials,
@@ -54,6 +58,9 @@ All five native targets passed checks and packaging in these GitHub runs:
   all five native package smoke checks and container publication passed, including
   real Windows NSIS installation and removal. Later application changes still
   require their own successful builds before release.
+- [Run 34731775785](https://github.com/gu1p/nodeharbor/actions/runs/34731775785):
+  all five native targets, packaged-app checks, and controller image publication
+  passed. The later owner-cancellation change still needs its own native builds.
 
 The native macOS ARM application was launched and inspected with actual IPC and
 host resource information. Its installer and worker acceptance are separate checks.
@@ -75,18 +82,38 @@ uses its existing private interface; the CNI transition remains separate work.
 Credentials remain outside this public repository. No additional cloud servers
 have been created.
 
+The controller now runs on the existing primary with persistent SQLite storage,
+restricted credentials, Kubernetes admission policies, and the contributed-node
+probe definition. Live admission tests rejected fixed-node changes and broader
+bootstrap credentials. The fleet HTTPS route uses the existing Google login;
+only enrollment and device endpoints have direct routes to their own authenticated
+APIs. Public tests rejected forged identity headers and unauthenticated device
+requests. The existing infrastructure portals remained available.
+
+The single private Kubernetes API address is declared through NetBird Networks,
+with a TCP-only worker policy. Reapplying the declaration required no API writes.
+This is control-plane routing configuration; end-to-end worker connectivity still
+requires the remaining CNI transition and a real enrolled VM.
+
 The local Multipass VM boots Ubuntu but has not obtained a DHCP lease. Guest and
 host packet captures confirm requests without replies. A test involving the host's
 existing VPN settings awaits the owner's specific approval; those settings have
 not been changed by NodeHarbor.
 
+Native cancellation was tested separately through the actual agent and Multipass,
+with an isolated lifecycle test server. The first test exposed a late hypervisor
+change from Stopped to Unknown. The corrected supervisor reconciles that partial
+worker through the supported immediate shutdown command. The subsequent native
+test passed, including ten further supervisor observations. Its temporary VMs
+were removed after verifying they were stopped and had no host directory mounts.
+This verifies local cancellation, not fleet enrollment or workload qualification.
+
 ## Remaining acceptance work
 
 - Complete Kubernetes connectivity and the supported CNI/MTU rollout while
   preserving the existing cluster's node addresses and workloads.
-- Deploy the controller, gateway routes, admission policies, probe, telemetry,
-  contributed runner pools, and the stateless acceptance workload.
-- Complete the explicit disk recreation flow and interrupted-operation handling;
+- Deploy telemetry, contributed runner pools, and the stateless acceptance workload.
+- Complete the explicit disk recreation flow and remaining lifecycle recovery;
   verify runtime binary updates and native installer recovery end to end.
 - Publish the first complete release from `main`, verify the one-line installers,
   and confirm each package on its native operating system.
