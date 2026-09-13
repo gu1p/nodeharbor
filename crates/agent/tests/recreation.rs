@@ -132,6 +132,10 @@ async fn controller(host: Arc<Host>) -> (String, Controller, tokio::task::JoinHa
         requests: Arc::new(Mutex::new(vec![])),
     };
     let router = Router::new()
+        .route(
+            "/api/v1/heartbeat",
+            post(|| async { Json(json!({"remotePaused":false})) }),
+        )
         .route("/api/v1/device/reset", post(reset))
         .route(
             "/api/v1/device/drain",
@@ -232,6 +236,85 @@ async fn running_work_drains_before_old_access_and_disk_are_removed_and_enrollme
     assert_eq!(saved.device_token.as_deref(), Some("owner-device-token"));
     assert!(!dir.path().join(format!("{NAME}.receipt.json")).exists());
     assert!(!agent.snapshot().await.unwrap().recreation_pending);
+    server.abort();
+}
+
+#[tokio::test]
+async fn the_screen_keeps_system_components_visible_while_only_real_work_delays_a_drain() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(Host::default());
+    *host.state.lock().unwrap() = Some("Running".into());
+    host.work.store(true, Ordering::SeqCst);
+    host.probe.store(true, Ordering::SeqCst);
+    let (url, _, server) = controller(host.clone()).await;
+    let agent = fixture(dir.path(), host.clone(), &url);
+    agent.recreate_worker(policy()).await.unwrap();
+    agent.tick().await.unwrap();
+    let snapshot = agent.snapshot().await.unwrap();
+    assert_eq!(
+        snapshot
+            .workloads
+            .iter()
+            .map(|item| item["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["build", "health-probe"]
+    );
+    assert!(snapshot.worker.running);
+    assert_eq!(*host.events.lock().unwrap(), ["drain"]);
+
+    host.work.store(false, Ordering::SeqCst);
+    agent.tick().await.unwrap();
+    let snapshot = agent.snapshot().await.unwrap();
+    assert!(!snapshot.worker.running);
+    assert!(snapshot.workloads.is_empty());
+    assert!(host
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event| event == "stop"));
+    server.abort();
+}
+
+#[tokio::test]
+async fn pausing_and_resuming_keeps_the_health_check_in_the_screen_inventory() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(Host::default());
+    *host.state.lock().unwrap() = Some("Running".into());
+    host.work.store(true, Ordering::SeqCst);
+    host.probe.store(true, Ordering::SeqCst);
+    let (url, _, server) = controller(host.clone()).await;
+    let agent = fixture(dir.path(), host.clone(), &url);
+    agent
+        .store
+        .update(|config| {
+            config.policy.allow_battery = true;
+            Ok(())
+        })
+        .unwrap();
+    agent.action("pause").await.unwrap();
+    agent.tick().await.unwrap();
+    agent.tick().await.unwrap();
+    for action in [None, Some("resume")] {
+        if let Some(action) = action {
+            agent.action(action).await.unwrap();
+            agent.tick().await.unwrap();
+        }
+        let snapshot = agent.snapshot().await.unwrap();
+        assert_eq!(snapshot.workloads.len(), 2);
+        assert!(snapshot
+            .workloads
+            .iter()
+            .any(|item| item["name"] == "health-probe"));
+        assert!(snapshot.worker.running);
+    }
+    assert_eq!(agent.snapshot().await.unwrap().state, "sharing");
+    host.work.store(false, Ordering::SeqCst);
+    agent.action("pause").await.unwrap();
+    agent.tick().await.unwrap();
+    agent.tick().await.unwrap();
+    assert!(!agent.snapshot().await.unwrap().worker.running);
+    assert!(agent.snapshot().await.unwrap().workloads.is_empty());
     server.abort();
 }
 #[tokio::test]

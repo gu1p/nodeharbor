@@ -64,3 +64,25 @@ async fn missing_or_malformed_inventory_is_an_error_not_an_empty_worker() {
         assert!(vm.workloads(&[]).await.is_err());
     }
 }
+
+#[tokio::test]
+async fn presentation_retains_verified_helpers_without_counting_them_as_drainable_work() {
+    let vm = Vm::new(
+        ID,
+        Arc::new(Inventory(json!({"items":[
+            pod(PROBE,"probe-123","nodeharbor-system"),
+            pod("unknown","other-helper","nodeharbor-system"),
+            pod("job","build","nodeharbor-ci"),
+            pod("dns","coredns","kube-system")
+        ]}))),
+    )
+    .unwrap();
+    let inventory = vm.workload_inventory(&[PROBE.into()]).await.unwrap();
+    assert_eq!(inventory.workloads.len(), 2);
+    assert_eq!(inventory.system_components.len(), 2);
+    let visible = inventory.into_visible();
+    assert_eq!(visible.len(), 4);
+    for name in ["probe-123", "other-helper", "build", "coredns"] {
+        assert!(visible.iter().any(|item| item["name"] == name));
+    }
+}

@@ -638,13 +638,13 @@ impl Agent {
         }
         // An unreachable guest has an unknown workload count, not an empty one.
         // Keep the grace period, but never let a failed inspection cancel its deadline.
-        let workloads = if info.running && info.reachable {
+        let inventory = if info.running && info.reachable {
             let system_pods = self.runtime.lock().await.system_pod_uids.clone();
-            vm.workloads(&system_pods).await.ok()
+            vm.workload_inventory(&system_pods).await.ok()
         } else if info.running {
             None
         } else {
-            Some(Vec::new())
+            Some(crate::WorkloadInventory::default())
         };
         let now = now_seconds();
         let draining_since = self.store.load()?.draining_since;
@@ -655,7 +655,9 @@ impl Agent {
             draining_since: if was_draining { draining_since } else { None },
             now,
             drain_seconds: config.policy.drain_seconds,
-            workloads: workloads.as_ref().map_or(usize::MAX, Vec::len),
+            workloads: inventory
+                .as_ref()
+                .map_or(usize::MAX, |items| items.workloads.len()),
         });
         match transition {
             WorkerAction::Start => {
@@ -743,7 +745,16 @@ impl Agent {
                 .await
             }
         }
-        self.runtime.lock().await.workloads = workloads.unwrap_or_default();
+        {
+            let mut runtime = self.runtime.lock().await;
+            runtime.workloads = if runtime.worker.running {
+                inventory
+                    .map(crate::WorkloadInventory::into_visible)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+        }
         if let Some(error) = heartbeat_error {
             return Err(error);
         }
@@ -776,13 +787,15 @@ impl Agent {
                     .map(system_pod_uids)
                     .transpose()?
                     .unwrap_or_default();
-                let workloads = vm.workloads(&exclusions).await?;
-                let empty = workloads.is_empty();
-                self.runtime.lock().await.workloads = workloads;
+                let inventory = vm.workload_inventory(&exclusions).await?;
+                let empty = inventory.workloads.is_empty();
+                self.runtime.lock().await.workloads = inventory.into_visible();
                 if empty && drain.is_ok() {
                     vm.stop().await?;
                     self.clear_drain()?;
-                    self.runtime.lock().await.worker.running = false;
+                    let mut runtime = self.runtime.lock().await;
+                    runtime.worker.running = false;
+                    runtime.workloads.clear();
                 }
             }
             drain?;

@@ -49,7 +49,7 @@ mod store;
 pub use store::{Configuration, Store};
 
 mod vm;
-pub use vm::{CommandOutput, Runner, Vm, VmInfo};
+pub use vm::{CommandOutput, Runner, Vm, VmInfo, WorkloadInventory};
 mod lima;
 pub use lima::{LimaRunner, VmProvider};
 pub mod activity;

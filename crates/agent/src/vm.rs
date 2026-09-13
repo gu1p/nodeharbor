@@ -13,6 +13,18 @@ pub struct CommandOutput {
     pub stdout: String,
     pub stderr: String,
 }
+
+#[derive(Default)]
+pub struct WorkloadInventory {
+    pub workloads: Vec<Value>,
+    pub system_components: Vec<Value>,
+}
+impl WorkloadInventory {
+    pub fn into_visible(mut self) -> Vec<Value> {
+        self.workloads.extend(self.system_components);
+        self.workloads
+    }
+}
 #[async_trait]
 pub trait Runner: Send + Sync {
     fn provider(&self) -> crate::VmProvider {
@@ -552,6 +564,12 @@ impl Vm {
         Ok(())
     }
     pub async fn workloads(&self, system_pod_uids: &[String]) -> Result<Vec<Value>> {
+        Ok(self.workload_inventory(system_pod_uids).await?.workloads)
+    }
+    pub async fn workload_inventory(
+        &self,
+        system_pod_uids: &[String],
+    ) -> Result<WorkloadInventory> {
         self.verify_owner().await?;
         let output = self
             .guest(
@@ -564,7 +582,7 @@ impl Vm {
         let items = value["items"]
             .as_array()
             .context("The worker returned no workload inventory")?;
-        let mut workloads = Vec::new();
+        let mut inventory = WorkloadInventory::default();
         for pod in items {
             let state = pod["state"].as_str().context("A workload has no state")?;
             anyhow::ensure!(
@@ -585,10 +603,13 @@ impl Vm {
             let system = pod["metadata"]["uid"]
                 .as_str()
                 .is_some_and(|uid| system_pod_uids.iter().any(|known| known == uid));
-            if namespace != "kube-system" && !system {
-                workloads.push(json!({"name":name,"namespace":namespace,"state":"running"}));
-            }
+            let target = if namespace == "kube-system" || system {
+                &mut inventory.system_components
+            } else {
+                &mut inventory.workloads
+            };
+            target.push(json!({"name":name,"namespace":namespace,"state":"running"}));
         }
-        Ok(workloads)
+        Ok(inventory)
     }
 }
