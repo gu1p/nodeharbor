@@ -8,6 +8,14 @@ function backend(overrides: Partial<Backend> = {}): Backend {
   return {snapshot:vi.fn().mockResolvedValue(snapshot()),savePolicy:vi.fn().mockImplementation(async policy => ({...snapshot(),policy})),action:vi.fn().mockResolvedValue(snapshot()),enroll:vi.fn().mockResolvedValue(snapshot()),fleet:vi.fn().mockResolvedValue([]),...overrides};
 }
 describe('A person contributes a machine', () => {
+ it('lets a person stop an unreachable worker that never finished preparation',async()=>{
+  const api=backend({snapshot:vi.fn().mockResolvedValue({...snapshot(),enrolled:true,state:'error',reason:'The worker is powered on but unreachable. Use Stop now before preparing it again.',worker:{installed:false,running:true}})});
+  const user=userEvent.setup();render(<App backend={api}/>);
+  await user.click(await screen.findByRole('button',{name:'Stop now'}));
+  expect(screen.getByRole('dialog',{name:'Stop running work?'})).toBeVisible();
+  await user.click(screen.getByRole('button',{name:'Stop and interrupt work'}));
+  await waitFor(()=>expect(api.action).toHaveBeenCalledWith('stop'));
+ });
  it('shows live worker activity directly on the preparing machine page',async()=>{
   const activity=vi.fn().mockResolvedValue({entries:[{id:1,timestamp:'2026-09-13T12:00:00Z',level:'info',source:'multipass',message:'Waiting for the VM to receive an IP address'}],dropped:0,step:null});
   render(<App backend={backend({snapshot:vi.fn().mockResolvedValue({...snapshot(),enrolled:true,state:'preparing',reason:'Preparing the Linux worker'}),activity} as Partial<Backend>)}/>);

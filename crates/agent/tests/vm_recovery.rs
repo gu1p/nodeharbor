@@ -54,6 +54,76 @@ fn budget() -> Resources {
 }
 
 #[tokio::test]
+async fn an_unreachable_preparing_worker_exposes_stop_and_does_not_repeat_start_commands() {
+    let directory = tempfile::tempdir().unwrap();
+    let inventory = || ok(json!({"list":[{"name":NAME,"state":"Unknown","ipv4":[]}]}).to_string());
+    let runner = ScriptedRunner::new(vec![
+        ok(json!({"list":[]}).to_string()),
+        CommandOutput {
+            success: false,
+            stdout: String::new(),
+            stderr: "waiting for an IP address timed out".into(),
+        },
+        inventory(),
+        inventory(),
+        inventory(),
+        ok(String::new()),
+        ok(json!({"list":[{"name":NAME,"state":"Stopped"}]}).to_string()),
+    ]);
+    let vm = Vm::managed(ID, directory.path(), runner.clone()).unwrap();
+    assert!(vm
+        .create(&budget(), directory.path(), json!([]))
+        .await
+        .is_err());
+    let agent =
+        nodeharbor_agent::Agent::open_with_runner(directory.path(), runner.clone()).unwrap();
+    agent
+        .store
+        .update(|config| {
+            config.device_id = ID.into();
+            config.device_token = Some("test-device-token".into());
+            config.vm_created = true;
+            config.vm_configured = false;
+            config.prepare_requested = true;
+            config.policy.resources = budget();
+            config.allocated_resources = Some(budget());
+            Ok(())
+        })
+        .unwrap();
+    for _ in 0..2 {
+        agent.tick().await.unwrap();
+        let snapshot = agent.snapshot().await.unwrap();
+        assert_eq!(snapshot.state, "error");
+        assert!(snapshot.reason.contains("Stop now"));
+        assert!(
+            snapshot.worker.running,
+            "Stop now must stay visible for an unreachable partial worker"
+        );
+        assert!(!snapshot.worker.installed);
+    }
+    assert!(!runner
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|args| matches!(args[0].as_str(), "start" | "stop" | "delete" | "exec")));
+    assert_eq!(
+        agent.activity().entries.len(),
+        1,
+        "Do not repeatedly log the same failure while it remains unresolved"
+    );
+    agent.action("stop").await.unwrap();
+    agent.tick().await.unwrap();
+    assert!(!agent.snapshot().await.unwrap().worker.running);
+    assert!(runner
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|args| args == &["stop", "--force", NAME]));
+}
+
+#[tokio::test]
 async fn a_failed_launch_remains_owned_and_can_be_stopped_without_guest_networking() {
     let directory = tempfile::tempdir().unwrap();
     let runner = ScriptedRunner::new(vec![

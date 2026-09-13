@@ -465,16 +465,25 @@ impl Agent {
         }
         if config.prepare_requested && !config.vm_configured {
             self.runtime.lock().await.starting = Some(Starting::Preparation);
-            self.set_status(
-                "preparing",
-                "Preparing the Linux worker within your resource budget",
-            )
-            .await;
             let info = if owned {
                 vm.info().await?
             } else {
                 VmInfo::default()
             };
+            self.runtime.lock().await.worker = info.clone();
+            if info.running && !info.reachable {
+                self.set_status(
+                    "error",
+                    "The worker is powered on but Multipass cannot reach it. Use Stop now, then Prepare worker to retry. If this repeats, check the host's VM networking.",
+                )
+                .await;
+                return Ok(());
+            }
+            self.set_status(
+                "preparing",
+                "Preparing the Linux worker within your resource budget",
+            )
+            .await;
             let exists = info.installed;
             if !exists {
                 let observation = crate::observe::observation(&self.store.directory, 0);
