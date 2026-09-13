@@ -115,11 +115,13 @@ impl ApiClient {
                 request = request.header("traceparent", parent);
             }
         }
-        if let Some(body) = body {
-            request = request.json(&body);
-        }
+        // Set the media type before json(), which supplies application/json only
+        // when absent. header() appends; calling it afterwards sends two types.
         if method == Method::PATCH {
             request = request.header("content-type", "application/merge-patch+json");
+        }
+        if let Some(body) = body {
+            request = request.json(&body);
         }
         let mut response = request
             .send()

@@ -1,7 +1,7 @@
 use axum::{
     body::Bytes,
     extract::State as Extract,
-    http::{HeaderMap, Method, Uri},
+    http::{HeaderMap, Method, StatusCode, Uri},
     Json, Router,
 };
 use nodeharbor_controller::{
@@ -18,7 +18,18 @@ async fn upstream(
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
-) -> Json<Value> {
+) -> Result<Json<Value>, StatusCode> {
+    // Kubernetes rejects ordinary JSON or duplicate media types on merge patches.
+    // Exercise the wire contract, including drain/resume during replacement.
+    if method == Method::PATCH {
+        let types: Vec<_> = headers.get_all("content-type").iter().collect();
+        if types.len() != 1 || types[0] != "application/merge-patch+json" {
+            return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        }
+    } else if method == Method::POST {
+        assert_eq!(headers.get_all("content-type").iter().count(), 1);
+        assert_eq!(headers["content-type"], "application/json");
+    }
     let value = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
     records.lock().unwrap().push((
         method.to_string(),
@@ -26,7 +37,7 @@ async fn upstream(
         headers["authorization"].to_str().unwrap().into(),
         value.clone(),
     ));
-    Json(match (method.as_str(), uri.path()) {
+    Ok(Json(match (method.as_str(), uri.path()) {
         ("GET", "/api/groups") => json!([]),
         ("POST", "/api/groups") => json!({"id":"device-group","peers":[]}),
         ("POST", "/api/setup-keys") => json!({"id":"setup-key-id","key":"single-use-key"}),
@@ -48,7 +59,7 @@ async fn upstream(
             json!({})
         }
         _ => panic!("Unexpected upstream request: {method} {uri}"),
-    })
+    }))
 }
 
 #[tokio::test]
