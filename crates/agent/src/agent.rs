@@ -301,8 +301,12 @@ impl Agent {
                 &self.store.directory,
                 self.runner.clone(),
             )?;
-            if (config.vm_created || vm.has_receipt()?) && vm.info().await?.running {
-                vm.stop_now().await?;
+            if config.vm_created || vm.has_receipt()? {
+                let info = vm.info().await?;
+                self.runtime.lock().await.worker = info.clone();
+                if info.running {
+                    vm.stop_now().await?;
+                }
             }
             self.store.update(|current| {
                 current.stop_requested = false;

@@ -13,6 +13,7 @@ const NAME: &str = "nodeharbor-9511182e9c484d20a15b1da8bb441386";
 #[derive(Default)]
 struct Guest {
     calls: Mutex<Vec<Vec<String>>>,
+    halted: std::sync::atomic::AtomicBool,
 }
 #[async_trait]
 impl Runner for Guest {
@@ -23,8 +24,16 @@ impl Runner for Guest {
         _: u64,
     ) -> anyhow::Result<CommandOutput> {
         self.calls.lock().unwrap().push(args.to_vec());
+        if args[0] == "stop" {
+            self.halted.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         let stdout = if args[0] == "list" {
-            json!({"list":[{"name":NAME,"state":"Running"}]}).to_string()
+            let state = if self.halted.load(std::sync::atomic::Ordering::SeqCst) {
+                "Stopped"
+            } else {
+                "Running"
+            };
+            json!({"list":[{"name":NAME,"state":state}]}).to_string()
         } else if args.iter().any(|v| v == "cat") {
             ID.into()
         } else if args.iter().any(|v| v == "pods") {
@@ -122,6 +131,7 @@ struct UnreachableGuest {
     halted: std::sync::atomic::AtomicBool,
     calls: Mutex<Vec<Vec<String>>>,
     stop_delay: Duration,
+    ignore_stops: std::sync::atomic::AtomicBool,
 }
 #[async_trait]
 impl Runner for UnreachableGuest {
@@ -137,7 +147,9 @@ impl Runner for UnreachableGuest {
         // without halting the hypervisor. Only its supported forced stop does so.
         if args[0] == "stop" && args.iter().any(|arg| arg == "--force") {
             tokio::time::sleep(self.stop_delay).await;
-            self.halted.store(true, Ordering::SeqCst);
+            if !self.ignore_stops.load(Ordering::SeqCst) {
+                self.halted.store(true, Ordering::SeqCst);
+            }
         }
         let stdout = if args[0] == "list" {
             let state = if self.halted.load(Ordering::SeqCst) {
@@ -155,6 +167,45 @@ impl Runner for UnreachableGuest {
             stderr: String::new(),
         })
     }
+}
+
+#[tokio::test]
+async fn an_unconfirmed_shutdown_remains_pending_and_is_retried_after_restart() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let guest = Arc::new(UnreachableGuest {
+        ignore_stops: AtomicBool::new(true),
+        ..Default::default()
+    });
+    let agent = Agent::open_with_runner(dir.path(), guest.clone()).unwrap();
+    agent
+        .store
+        .update(|config| {
+            config.device_id = ID.into();
+            config.device_token = Some("test-token".into());
+            config.vm_created = true;
+            config.vm_configured = true;
+            Ok(())
+        })
+        .unwrap();
+    std::fs::write(
+        dir.path().join(format!("{NAME}.receipt.json")),
+        json!({"version":1,"deviceId":ID,"name":NAME}).to_string(),
+    )
+    .unwrap();
+    agent.action("stop").await.unwrap();
+    assert!(
+        agent.tick().await.is_err(),
+        "A CLI acknowledgement is not evidence that resources were released"
+    );
+    assert!(agent.store.load().unwrap().stop_requested);
+    assert!(agent.snapshot().await.unwrap().worker.running);
+    guest.ignore_stops.store(false, Ordering::SeqCst);
+    let restarted = Agent::open_with_runner(dir.path(), guest.clone()).unwrap();
+    restarted.tick().await.unwrap();
+    assert!(guest.halted.load(Ordering::SeqCst));
+    assert!(!restarted.store.load().unwrap().stop_requested);
+    assert!(!restarted.snapshot().await.unwrap().worker.running);
 }
 
 #[tokio::test]

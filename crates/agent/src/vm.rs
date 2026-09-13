@@ -242,6 +242,10 @@ impl Vm {
         }
         args.push(self.name.clone());
         self.command(args, None, 60).await?;
+        anyhow::ensure!(
+            !self.info().await?.running,
+            "Multipass has not confirmed that the worker stopped"
+        );
         Ok(())
     }
     pub async fn start(&self) -> Result<()> {

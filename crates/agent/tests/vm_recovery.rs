@@ -64,6 +64,7 @@ async fn a_failed_launch_remains_owned_and_can_be_stopped_without_guest_networki
             stderr: "waiting for an IP address timed out".into(),
         },
         ok(String::new()),
+        ok(json!({"list":[{"name":NAME,"state":"Stopped"}]}).to_string()),
     ]);
     let vm = Vm::managed(ID, directory.path(), runner.clone()).unwrap();
     assert!(vm
@@ -119,6 +120,7 @@ async fn stop_recovers_a_partial_worker_even_when_the_controller_is_unavailable(
         },
         ok(json!({"list":[{"name":NAME,"state":"Unknown"}]}).to_string()),
         ok(String::new()),
+        ok(json!({"list":[{"name":NAME,"state":"Stopped"}]}).to_string()),
     ]);
     let vm = Vm::managed(ID, directory.path(), runner.clone()).unwrap();
     assert!(vm
@@ -142,7 +144,7 @@ async fn stop_recovers_a_partial_worker_even_when_the_controller_is_unavailable(
         .unwrap()
         .unwrap();
     assert_eq!(
-        runner.calls.lock().unwrap().last().unwrap(),
+        &runner.calls.lock().unwrap()[3],
         // The explicit Stop now action uses Multipass's immediate shutdown.
         &["stop", "--force", NAME]
     );
@@ -161,6 +163,7 @@ async fn a_paused_partial_worker_with_unknown_state_is_reconciled_through_immedi
         },
         ok(json!({"list":[{"name":NAME,"state":"Unknown"}]}).to_string()),
         ok(String::new()),
+        ok(json!({"list":[{"name":NAME,"state":"Stopped"}]}).to_string()),
     ]);
     let vm = Vm::managed(ID, directory.path(), runner.clone()).unwrap();
     assert!(vm
@@ -179,8 +182,5 @@ async fn a_paused_partial_worker_with_unknown_state_is_reconciled_through_immedi
         })
         .unwrap();
     agent.tick().await.unwrap();
-    assert_eq!(
-        runner.calls.lock().unwrap().last().unwrap(),
-        &["stop", "--force", NAME]
-    );
+    assert_eq!(&runner.calls.lock().unwrap()[3], &["stop", "--force", NAME]);
 }

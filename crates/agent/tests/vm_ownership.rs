@@ -8,6 +8,28 @@ struct FakeRunner {
     outputs: Mutex<VecDeque<CommandOutput>>,
     calls: Mutex<Vec<Vec<String>>>,
 }
+#[tokio::test]
+async fn shutdown_requires_the_hypervisor_to_confirm_the_instance_is_no_longer_running() {
+    for immediate in [false, true] {
+        for state in ["Running", "Unknown", "Starting"] {
+            let runner = Arc::new(FakeRunner {
+                outputs: Mutex::new(VecDeque::from([
+                    CommandOutput { success:true, stdout:"9511182e-9c48-4d20-a15b-1da8bb441386".into(), stderr:String::new() },
+                    CommandOutput { success:true, stdout:String::new(), stderr:String::new() },
+                    CommandOutput { success:true, stdout:serde_json::json!({"list":[{"name":"nodeharbor-9511182e9c484d20a15b1da8bb441386", "state":state}]}).to_string(), stderr:String::new() },
+                ])),
+                calls: Mutex::new(vec![]),
+            });
+            let vm = Vm::new("9511182e-9c48-4d20-a15b-1da8bb441386", runner).unwrap();
+            let result = if immediate {
+                vm.stop_now().await
+            } else {
+                vm.stop().await
+            };
+            assert!(result.is_err(), "State {state} must keep shutdown pending");
+        }
+    }
+}
 #[async_trait]
 impl Runner for FakeRunner {
     async fn run(
@@ -56,6 +78,11 @@ async fn only_the_managed_device_vm_can_be_stopped() {
             CommandOutput {
                 success: true,
                 stdout: String::new(),
+                stderr: String::new(),
+            },
+            CommandOutput {
+                success: true,
+                stdout: r#"{"list":[{"name":"nodeharbor-9511182e9c484d20a15b1da8bb441386","state":"Stopped"}]}"#.into(),
                 stderr: String::new(),
             },
         ])),
@@ -115,6 +142,11 @@ async fn immediate_stop_uses_the_hypervisors_supported_force_option() {
             CommandOutput {
                 success: true,
                 stdout: String::new(),
+                stderr: String::new(),
+            },
+            CommandOutput {
+                success: true,
+                stdout: r#"{"list":[{"name":"nodeharbor-9511182e9c484d20a15b1da8bb441386","state":"Stopped"}]}"#.into(),
                 stderr: String::new(),
             },
         ])),
