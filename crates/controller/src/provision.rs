@@ -10,6 +10,16 @@ use std::path::{Path, PathBuf};
 pub const CI_LABEL: &str = "nodeharbor.node-restriction.kubernetes.io/ci";
 pub const SERVICES_LABEL: &str = "nodeharbor.node-restriction.kubernetes.io/services";
 
+fn group_peers(group: &Value) -> Result<&[Value]> {
+    if group["peers"].is_null() && group["peers_count"].as_u64() == Some(0) {
+        return Ok(&[]);
+    }
+    group["peers"]
+        .as_array()
+        .map(Vec::as_slice)
+        .context("NetBird returned no group membership")
+}
+
 #[derive(Clone)]
 pub struct ApiClient {
     base: Url,
@@ -233,14 +243,9 @@ impl Provisioner {
     }
     pub(crate) async fn group(&self, device: &DeviceIdentity) -> Result<Option<Value>> {
         uuid::Uuid::parse_str(&device.id)?;
-        let groups = self
-            .netbird
-            .call(
-                Method::GET,
-                &format!("/api/groups?name={}", device.node_name()),
-                None,
-            )
-            .await?;
+        // The name-filtered endpoint returns 404 for new workers and hides
+        // duplicate names. Inspect the inventory and verify exact ownership.
+        let groups = self.netbird.call(Method::GET, "/api/groups", None).await?;
         let groups = groups
             .as_array()
             .context("NetBird returned an invalid group inventory")?;
@@ -364,9 +369,7 @@ impl Cluster for Provisioner {
                 .as_str()
                 .context("NetBird returned no device group identity")?,
         )?;
-        let peers = group["peers"]
-            .as_array()
-            .context("NetBird returned no group membership")?;
+        let peers = group_peers(&group)?;
         anyhow::ensure!(
             peers.len() <= 1,
             "More than one network peer claims this device"
@@ -496,10 +499,7 @@ impl Cluster for Provisioner {
         uuid::Uuid::parse_str(&device.id)?;
         self.remove_keys(device).await?;
         if let Some(group) = self.group(device).await? {
-            for peer in group["peers"]
-                .as_array()
-                .context("NetBird returned no group membership")?
-            {
+            for peer in group_peers(&group)? {
                 let id = api_id(
                     peer["id"]
                         .as_str()
