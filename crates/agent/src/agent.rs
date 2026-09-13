@@ -273,13 +273,26 @@ impl Agent {
             self.set_status("paused", "Worker stopped").await;
             return Ok(());
         }
-        if config.prepare_requested {
+        if config.prepare_requested && config.vm_configured {
+            // An already prepared worker uses the normal policy and drain flow,
+            // including resource changes. Preparation cannot override that flow.
+            self.store.update(|current| {
+                current.prepare_requested = false;
+                Ok(())
+            })?;
+        }
+        if config.prepare_requested && !config.vm_configured {
             self.set_status(
                 "preparing",
                 "Preparing the Linux worker within your resource budget",
             )
             .await;
-            let exists = owned && vm.info().await?.installed;
+            let info = if owned {
+                vm.info().await?
+            } else {
+                VmInfo::default()
+            };
+            let exists = info.installed;
             if !exists {
                 let observation = crate::observe::observation(&self.store.directory, 0);
                 validate_policy(&config.policy, &observation.resources)
@@ -290,14 +303,28 @@ impl Agent {
                     crate::guest_files(),
                 )
                 .await?;
-            } else if !vm.info().await?.reachable {
-                vm.start().await?;
+            } else if config.allocated_resources.as_ref() != Some(&config.policy.resources) {
+                // A retry may follow a failed launch or changed settings. Apply
+                // the budget to the existing VM before recording it as allocated.
+                if info.running {
+                    vm.stop().await?;
+                }
+                vm.resize(&config.policy.resources).await?;
             }
             self.store.update(|c| {
                 c.vm_created = true;
                 c.allocated_resources = Some(config.policy.resources.clone());
                 Ok(())
             })?;
+            if !self.store.load()?.prepare_requested {
+                if vm.info().await?.running {
+                    vm.stop().await?;
+                }
+                return Ok(());
+            }
+            if exists && !vm.info().await?.reachable {
+                vm.start().await?;
+            }
             if !self.store.load()?.prepare_requested {
                 vm.stop().await?;
                 return Ok(());
