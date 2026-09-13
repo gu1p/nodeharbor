@@ -65,6 +65,9 @@ async fn wait_for_app_exit(executable: &std::path::Path, timeout: u64) -> Result
         );
         let running = system.processes().iter().any(|(pid, process)| {
             *pid != own_pid
+                // Linux also enumerates tasks. Only process leaders represent
+                // applications; a helper's own threads have different task IDs.
+                && process.thread_kind().is_none()
                 && process
                     .exe()
                     .and_then(|path| path.canonicalize().ok())
