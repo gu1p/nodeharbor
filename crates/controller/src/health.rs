@@ -37,11 +37,30 @@ pub fn assess_health(samples: &[HealthSample], now: i64) -> Qualification {
         .last_key_value()
         .is_some_and(|(_, sample)| sample.healthy() && now - sample.at <= 90);
     let latest = slots.last_key_value().map(|(at, _)| *at).unwrap_or(end);
+    let ci_samples: Option<Vec<_>> = (latest - 600..=latest)
+        .step_by(30)
+        .map(|at| slots.get(&at))
+        .collect();
     let ci = current
-        && (latest - 600..=latest).step_by(30).all(|at| {
-            slots.get(&at).is_some_and(|sample| {
-                sample.healthy() && sample.rtt_ms.unwrap_or(f64::INFINITY) <= 500.0
+        && ci_samples.is_some_and(|samples| {
+            if !samples.iter().all(|sample| sample.healthy()) {
+                return false;
+            }
+            let mut rtts: Vec<_> = samples.iter().filter_map(|sample| sample.rtt_ms).collect();
+            rtts.sort_by(f64::total_cmp);
+            let p95 = rtts[(rtts.len() * 95).div_ceil(100) - 1];
+            // A complete window still requires every independent check to pass.
+            // Apply the shared latency percentile, rather than a maximum that
+            // turns an isolated slow response into ten minutes of lost admission.
+            nodeharbor_core::qualify(&nodeharbor_core::HealthWindow {
+                healthy_seconds: 600,
+                availability: 1.0,
+                p95_rtt_ms: p95,
+                loss: 0.0,
+                ready: true,
+                age_seconds: now.saturating_sub(samples.last().unwrap().at) as u64,
             })
+            .ci
         });
     let expected = 2881.0; // Both endpoints of one complete 24-hour observation window.
     let good: Vec<_> = slots.values().filter(|sample| sample.healthy()).collect();

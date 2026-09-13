@@ -21,6 +21,44 @@ fn ci_requires_ten_observed_minutes_and_services_a_full_day() {
     assert!(assess_health(&samples(0, 86400), 86400).services);
 }
 #[test]
+fn ci_uses_the_shared_p95_policy_without_discarding_failed_or_missing_observations() {
+    let mut history = samples(0, 600);
+    for sample in &mut history {
+        sample.rtt_ms = Some(275.0);
+    }
+    history[19].rtt_ms = Some(507.0);
+    let policy = nodeharbor_core::HealthWindow {
+        healthy_seconds: 600,
+        availability: 1.0,
+        p95_rtt_ms: 275.0,
+        loss: 0.0,
+        ready: true,
+        age_seconds: 0,
+    };
+    assert!(nodeharbor_core::qualify(&policy).ci);
+    assert!(
+        assess_health(&history, 600).ci,
+        "One slow response must follow the shared p95 policy"
+    );
+    history[18].rtt_ms = Some(501.0);
+    assert!(
+        !assess_health(&history, 600).ci,
+        "A p95 above 500 ms must prevent admission"
+    );
+    history[18].rtt_ms = Some(500.0);
+    assert!(assess_health(&history, 600).ci);
+    history[19].ready = false;
+    assert!(
+        !assess_health(&history, 600).ci,
+        "A failed connectivity check still prevents admission"
+    );
+    history.remove(19);
+    assert!(
+        !assess_health(&history, 600).ci,
+        "Missing time cannot be supplied by a percentile"
+    );
+}
+#[test]
 fn controller_downtime_counts_as_missing_observations_and_does_not_invent_health() {
     let mut history = samples(0, 300);
     history.extend(samples(86100, 86400));
