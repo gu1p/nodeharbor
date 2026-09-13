@@ -50,6 +50,14 @@ pub use store::{Configuration, Store};
 
 mod vm;
 pub use vm::{CommandOutput, Runner, Vm, VmInfo};
+pub mod activity;
+pub mod process;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputStream {
+    Stdout,
+    Stderr,
+}
+pub type ProgressSink = std::sync::Arc<dyn Fn(OutputStream, &str) + Send + Sync>;
 
 mod agent;
 mod observe;

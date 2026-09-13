@@ -4,11 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
-    process::Stdio,
     sync::Arc,
-    time::Duration,
 };
-use tokio::{io::AsyncWriteExt, process::Command};
+use tokio::process::Command;
 
 pub struct CommandOutput {
     pub success: bool,
@@ -23,6 +21,24 @@ pub trait Runner: Send + Sync {
         stdin: Option<Vec<u8>>,
         timeout: u64,
     ) -> Result<CommandOutput>;
+    async fn run_with_progress(
+        &self,
+        args: &[String],
+        stdin: Option<Vec<u8>>,
+        timeout: u64,
+        progress: crate::ProgressSink,
+    ) -> Result<CommandOutput> {
+        let output = self.run(args, stdin, timeout).await?;
+        for (stream, text) in [
+            (crate::OutputStream::Stdout, &output.stdout),
+            (crate::OutputStream::Stderr, &output.stderr),
+        ] {
+            for line in text.split(['\r', '\n']).filter(|line| !line.is_empty()) {
+                progress(stream, line);
+            }
+        }
+        Ok(output)
+    }
 }
 pub struct MultipassRunner;
 fn multipass_program() -> PathBuf {
@@ -54,36 +70,32 @@ impl Runner for MultipassRunner {
         stdin: Option<Vec<u8>>,
         timeout: u64,
     ) -> Result<CommandOutput> {
-        let mut command = Command::new(multipass_program());
-        command
-            .args(args)
-            .stdin(if stdin.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(windows)]
-        command.creation_flags(0x08000000);
-        let mut child=command.spawn().context("Multipass is unavailable. Install it from canonical.com/multipass/install, then try again")?;
-        if let Some(bytes) = stdin {
-            child
-                .stdin
-                .take()
-                .context("Worker input is unavailable")?
-                .write_all(&bytes)
-                .await?;
-        }
-        let output = tokio::time::timeout(Duration::from_secs(timeout), child.wait_with_output())
-            .await
-            .context("The worker operation timed out")??;
-        Ok(CommandOutput {
-            success: output.status.success(),
-            stdout: String::from_utf8_lossy(&output.stdout).into(),
-            stderr: String::from_utf8_lossy(&output.stderr).into(),
-        })
+        multipass_command(args, stdin, timeout, None).await
+    }
+    async fn run_with_progress(
+        &self,
+        args: &[String],
+        stdin: Option<Vec<u8>>,
+        timeout: u64,
+        progress: crate::ProgressSink,
+    ) -> Result<CommandOutput> {
+        multipass_command(args, stdin, timeout, Some(progress)).await
+    }
+}
+async fn multipass_command(
+    args: &[String],
+    stdin: Option<Vec<u8>>,
+    timeout: u64,
+    progress: Option<crate::ProgressSink>,
+) -> Result<CommandOutput> {
+    let program = multipass_program();
+    let mut command = Command::new(&program);
+    command.args(args);
+    let result = crate::process::run_command(command, stdin, timeout, progress).await;
+    match result {
+        Err(error) if error.downcast_ref::<std::io::Error>().is_some_and(|error|error.kind()==std::io::ErrorKind::NotFound)=>
+            Err(error.context("Multipass is unavailable. Install it from canonical.com/multipass/install, then try again")),
+        other=>other,
     }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

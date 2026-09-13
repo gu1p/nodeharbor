@@ -29,6 +29,7 @@ pub struct Agent {
     operation: Arc<Mutex<()>>,
     client: reqwest::Client,
     runner: Arc<dyn crate::Runner>,
+    activity: crate::activity::ActivityLog,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,8 +55,13 @@ impl Agent {
         Self::open_with_runner(directory, Arc::new(crate::vm::MultipassRunner))
     }
     pub fn open_with_runner(directory: &Path, runner: Arc<dyn crate::Runner>) -> Result<Self> {
+        let activity = crate::activity::ActivityLog::default();
         Ok(Self {
-            runner,
+            runner: Arc::new(crate::activity::ActivityRunner {
+                inner: runner,
+                log: activity.clone(),
+            }),
+            activity,
             store: Store::open(directory)?,
             runtime: Arc::new(Mutex::new(Runtime::default())),
             operation: Arc::new(Mutex::new(())),
@@ -64,6 +70,9 @@ impl Agent {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
         })
+    }
+    pub fn activity(&self) -> crate::activity::ActivitySnapshot {
+        self.activity.snapshot()
     }
     pub async fn snapshot(&self) -> Result<Snapshot> {
         let config = self.store.load()?;
@@ -292,15 +301,24 @@ impl Agent {
         .await
     }
     async fn set_status(&self, state: &str, reason: impl Into<String>) {
+        let reason = reason.into();
         let mut runtime = self.runtime.lock().await;
+        if runtime.state.as_deref() != Some(state) || runtime.reason.as_deref() != Some(&reason) {
+            self.activity.record(
+                if state == "error" { "error" } else { "info" },
+                "agent",
+                &reason,
+            );
+        }
         runtime.state = Some(state.into());
-        runtime.reason = Some(reason.into());
+        runtime.reason = Some(reason);
     }
     pub async fn run(&self) -> Result<()> {
         let _lock = self.store.supervisor_lock()?;
         loop {
             if let Err(error) = self.tick().await {
-                self.set_status("error", error.to_string()).await;
+                self.set_status("error", self.diagnostic_message(&error.to_string()))
+                    .await;
             }
             let saved = serde_json::to_value(self.store.load()?)?;
             let next = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -319,6 +337,28 @@ impl Agent {
     }
     pub async fn tick(&self) -> Result<()> {
         let _operation = self.operation.lock().await;
+        let result = self.tick_operation().await;
+        if let Err(error) = &result {
+            self.activity.record(
+                "error",
+                "agent",
+                &self.diagnostic_message(&error.to_string()),
+            );
+        }
+        self.activity.finish_step();
+        result
+    }
+    fn diagnostic_message(&self, message: &str) -> String {
+        let secrets = self
+            .store
+            .load()
+            .ok()
+            .and_then(|config| config.device_token)
+            .into_iter()
+            .collect::<Vec<_>>();
+        crate::activity::redact(message, &secrets)
+    }
+    async fn tick_operation(&self) -> Result<()> {
         let config = self.store.load()?;
         if config.stop_requested || deadline_expired(&config) {
             // Shutdown itself must finish before another shutdown is issued.
@@ -473,6 +513,8 @@ impl Agent {
                 return Ok(());
             }
             // Bootstrap credentials must be fresh after a potentially slow first image download.
+            self.activity
+                .begin_step("Requesting access to the fleet", Some(20));
             let bootstrap = self
                 .request(&config, "/device/bootstrap", Some(json!({})))
                 .await?;
@@ -594,6 +636,8 @@ impl Agent {
                     "Starting the Linux worker and reconnecting to the private network",
                 )
                 .await;
+                self.activity
+                    .begin_step("Requesting access to the fleet", Some(20));
                 let bootstrap = self
                     .request(&config, "/device/bootstrap", Some(json!({})))
                     .await?;

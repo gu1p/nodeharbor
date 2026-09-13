@@ -8,6 +8,12 @@ function backend(overrides: Partial<Backend> = {}): Backend {
   return {snapshot:vi.fn().mockResolvedValue(snapshot()),savePolicy:vi.fn().mockImplementation(async policy => ({...snapshot(),policy})),action:vi.fn().mockResolvedValue(snapshot()),enroll:vi.fn().mockResolvedValue(snapshot()),fleet:vi.fn().mockResolvedValue([]),...overrides};
 }
 describe('A person contributes a machine', () => {
+ it('shows live worker activity directly on the preparing machine page',async()=>{
+  const activity=vi.fn().mockResolvedValue({entries:[{id:1,timestamp:'2026-09-13T12:00:00Z',level:'info',source:'multipass',message:'Waiting for the VM to receive an IP address'}],dropped:0,step:null});
+  render(<App backend={backend({snapshot:vi.fn().mockResolvedValue({...snapshot(),enrolled:true,state:'preparing',reason:'Preparing the Linux worker'}),activity} as Partial<Backend>)}/>);
+  expect(await screen.findByRole('log',{name:'Worker activity log'})).toHaveTextContent('Waiting for the VM to receive an IP address');
+  expect(screen.getByRole('button',{name:'Sharing rules'})).toBeEnabled();
+ });
  it('does not erase an unsaved-settings error during background status refresh', async () => {
   vi.useFakeTimers();
   try {

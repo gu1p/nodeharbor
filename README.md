@@ -31,6 +31,12 @@ macOS installs into `~/Applications`; Ubuntu adds an application menu entry;
 Windows uses the native installer. Run the same command to update. Updates pause
 sharing and preserve enrollment and your resource rules.
 
+During preparation, **Your machine → Worker activity** shows the current step,
+elapsed time, live command output, and errors. It updates every second. Turn off
+**Follow latest output** to read earlier entries, or use **Copy logs** to share
+diagnostics. The latest 500 entries are kept for the current app session;
+credentials and command input are excluded from the log.
+
 Install [Multipass](https://canonical.com/multipass/install) before preparing a
 worker. Open NodeHarbor, enroll using the code supplied by your fleet
 administrator, choose resource limits and sharing rules, and prepare the worker.

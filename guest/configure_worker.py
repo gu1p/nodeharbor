@@ -20,6 +20,9 @@ import uuid
 ROOT=Path('/etc/nodeharbor')
 RESOLV_CONF=Path('/run/systemd/resolve/resolv.conf')
 
+def progress(message):
+    print('NodeHarbor step: '+message,flush=True)
+
 def validate_resolver(path):
     try:lines=path.read_text().splitlines()
     except OSError as error:raise ValueError('The guest upstream resolver is unavailable') from error
@@ -100,7 +103,7 @@ def install_runtime(config,bin_dir=Path('/usr/local/bin'),cache_dir=Path('/var/c
     runtime=config['runtime'];arch={'aarch64':'arm64','x86_64':'amd64'}.get(platform.machine())
     if arch is None: raise ValueError('Unsupported Linux worker CPU architecture')
     assets={asset['name']:asset['sha256'] for asset in runtime['assets']}
-    print('Installing verified worker runtime',flush=True)
+    progress('Downloading and verifying NetBird')
     nb_name=f"netbird_{runtime['netbirdVersion']}_linux_{arch}.tar.gz"
     data=cached_download(f"https://github.com/netbirdio/netbird/releases/download/v{runtime['netbirdVersion']}/{nb_name}",assets[nb_name],cache_dir)
     with tarfile.open(fileobj=io.BytesIO(data),mode='r:gz') as archive:
@@ -109,9 +112,11 @@ def install_runtime(config,bin_dir=Path('/usr/local/bin'),cache_dir=Path('/var/c
         if members[0].size>512*1024*1024:raise ValueError('NetBird executable exceeds the supported size')
         netbird_binary=archive.extractfile(members[0]).read()
     k3s_name='k3s' if arch=='amd64' else 'k3s-arm64'
+    progress('Downloading and verifying Kubernetes')
     k3s_binary=cached_download(f"https://github.com/k3s-io/k3s/releases/download/{urllib.parse.quote(runtime['k3sVersion'],safe='')}/{k3s_name}",assets[k3s_name],cache_dir)
     # Verify both downloads before changing either installed runtime. Rename on the
     # same filesystem preserves executables already mapped by running processes.
+    progress('Installing verified worker runtimes')
     for name,binary in [('netbird',netbird_binary),('k3s',k3s_binary)]:
         path=bin_dir/name
         if path.is_file() and path.stat().st_size==len(binary) and path.read_bytes()==binary:
@@ -126,8 +131,10 @@ def main():
         raise SystemExit('Refusing to configure a VM owned by another device')
     # Use Ubuntu's DHCP-provided upstream DNS. NetBird must not replace it, and
     # invalid DNS must not silently fall back to an unrelated public resolver.
+    progress('Checking Ubuntu DNS')
     validate_resolver(RESOLV_CONF)
     install_runtime(config)
+    progress('Starting NetBird')
     if not Path('/etc/systemd/system/netbird.service').exists():run('/usr/local/bin/netbird','service','install')
     # Preparation runs before workload admission. A guest may have started its
     # old services at boot; restart so the verified executable is actually used.
@@ -135,15 +142,18 @@ def main():
     run('systemctl','restart','netbird')
     environment=dict(os.environ)
     if config.get('netbirdSetupKey'):environment['NB_SETUP_KEY']=config['netbirdSetupKey']
+    progress('Connecting to the private network')
     run('/usr/local/bin/netbird','up','--management-url',config['netbirdManagementUrl'],'--hostname',config['nodeName'],'--mtu','1280',
         '--disable-dns','--disable-server-routes','--disable-client-routes=false','--allow-server-ssh=false',env=environment)
     peer_ip=None
+    progress('Waiting for a private network address')
     for _ in range(60):
         status=json.loads(run('/usr/local/bin/netbird','status','--json'))
         value=status.get('netbirdIp','').split('/')[0]
         try:peer_ip=str(ipaddress.IPv4Address(value));break
         except ipaddress.AddressValueError:time.sleep(1)
     if not peer_ip:raise RuntimeError('The private network did not assign a worker address')
+    progress('Configuring Kubernetes networking')
     for module in ['overlay','br_netfilter','vxlan']:run('modprobe',module)
     write('/etc/modules-load.d/nodeharbor.conf','overlay\nbr_netfilter\nvxlan\n',0o644)
     write('/etc/sysctl.d/90-nodeharbor.conf','net.ipv4.ip_forward=1\nnet.bridge.bridge-nf-call-iptables=1\n',0o644)
@@ -175,7 +185,8 @@ WantedBy=multi-user.target
     run('systemctl','daemon-reload')
     run('systemctl','enable','--now','nodeharbor-watchdog.timer')
     run('systemctl','enable','k3s-agent')
+    progress('Starting the Kubernetes worker')
     run('systemctl','restart','k3s-agent')
-    print('Worker connected; waiting for controller qualification',flush=True)
+    progress('Worker configured; awaiting qualification')
 
 if __name__=='__main__': main()

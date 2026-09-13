@@ -123,6 +123,15 @@ class GuestNetworkConfiguration(unittest.TestCase):
         self.assertLess(commands.index(('systemctl','daemon-reload')),commands.index(('systemctl','restart','k3s-agent')))
         self.assertIn('/etc/rancher/k3s/config.yaml',writes)
 
+    def test_preparation_reports_network_and_kubernetes_steps_without_bootstrap_secrets(self):
+        output=io.StringIO()
+        with patch.object(configure.sys,'stdout',output):
+            self.prepare('nameserver 192.168.64.1\n')
+        messages=output.getvalue()
+        for step in ['Checking Ubuntu DNS','Starting NetBird','Connecting to the private network','Waiting for a private network address','Starting the Kubernetes worker','Worker configured; awaiting qualification']:
+            self.assertIn('NodeHarbor step: '+step,messages)
+        self.assertNotIn(GuestContract().config()['k3sToken'],messages)
+
     def test_failed_service_restart_cannot_report_successful_worker_preparation(self):
         for service in ['netbird','k3s-agent']:
             with self.subTest(service=service),self.assertRaisesRegex(RuntimeError,'restart failed'):

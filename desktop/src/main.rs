@@ -43,6 +43,11 @@ async fn snapshot(state: State<'_, Desktop>) -> Result<Snapshot, String> {
 }
 
 #[tauri::command]
+fn activity(state: State<'_, Desktop>) -> nodeharbor_agent::activity::ActivitySnapshot {
+    state.agent.activity()
+}
+
+#[tauri::command]
 async fn save_policy(
     app: AppHandle,
     state: State<'_, Desktop>,
@@ -184,6 +189,7 @@ fn main() {
         )
         .invoke_handler(tauri::generate_handler![
             snapshot,
+            activity,
             save_policy,
             recreate_worker,
             worker_action,

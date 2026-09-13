@@ -10,10 +10,12 @@ describe('The native desktop bridge', () => {
     const { backend } = await import('./backend');
     expect(backend.mode).toBe('desktop');
     await backend.snapshot();
+    await (backend as typeof backend & {activity:()=>Promise<unknown>}).activity();
     await backend.action('pause');
     await backend.enroll('https://workers.example.com', 'one-use-code');
     expect(commands).toEqual([
       { cmd: 'snapshot', payload: {} },
+      { cmd: 'activity', payload: {} },
       { cmd: 'worker_action', payload: { action: 'pause' } },
       { cmd: 'enroll', payload: { url: 'https://workers.example.com', code: 'one-use-code' } },
     ]);
