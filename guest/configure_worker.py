@@ -170,7 +170,6 @@ WantedBy=multi-user.target
 '''
     write('/etc/systemd/system/k3s-agent.service',unit,0o644)
     run('systemctl','daemon-reload')
-    run('python3','/usr/local/lib/nodeharbor/watchdog.py','renew')
     run('systemctl','enable','--now','nodeharbor-watchdog.timer')
     run('systemctl','enable','--now','k3s-agent')
     print('Worker connected; waiting for controller qualification',flush=True)

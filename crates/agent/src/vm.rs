@@ -334,8 +334,8 @@ impl Vm {
         self.verify_owner().await
     }
     pub async fn configure(&self, bootstrap: Value) -> Result<()> {
-        self.verify_owner().await?;
-        self.guest(
+        self.renew_lease().await?;
+        let configuration = self.guest(
             &[
                 "sudo",
                 "python3",
@@ -343,9 +343,19 @@ impl Vm {
             ],
             Some(serde_json::to_vec(&bootstrap)?),
             600,
-        )
-        .await?;
-        Ok(())
+        );
+        tokio::pin!(configuration);
+        let period = std::time::Duration::from_secs(30);
+        let mut renewals = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        renewals.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Keep renewal in this operation's lifetime. Cancelling supervision
+        // drops both futures; no background task can preserve an abandoned lease.
+        loop {
+            tokio::select! {
+                result = &mut configuration => return result.map(|_| ()),
+                _ = renewals.tick() => self.renew_lease().await?,
+            }
+        }
     }
     pub async fn renew_lease(&self) -> Result<()> {
         self.verify_owner().await?;

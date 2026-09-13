@@ -128,6 +128,12 @@ class GuestNetworkConfiguration(unittest.TestCase):
             self.prepare('nameserver 127.0.0.53\n',install=install)
         install.assert_not_called()
 
+    def test_guest_preparation_cannot_renew_the_owners_lease_for_itself(self):
+        commands,_,_=self.prepare('nameserver 192.168.64.1\n')
+        self.assertFalse(any('watchdog.py' in ' '.join(args) and 'renew' in args for args in commands),
+            'Only the supervising owner may keep a contributed worker alive')
+        self.assertIn(('systemctl','enable','--now','nodeharbor-watchdog.timer'),commands)
+
 class ResolverValidation(unittest.TestCase):
     def test_only_nonlocal_upstream_nameservers_are_usable_from_pods(self):
         cases=[('',False),('search example.com\n',False),('nameserver 127.0.0.53\n',False),
