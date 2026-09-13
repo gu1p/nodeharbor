@@ -82,3 +82,52 @@ async fn vm_inventory_does_not_adopt_an_unrelated_instance() {
     let vm = Vm::new("9511182e-9c48-4d20-a15b-1da8bb441386", runner).unwrap();
     assert!(!vm.info().await.unwrap().installed);
 }
+
+#[tokio::test]
+async fn immediate_stop_keeps_the_same_ownership_requirement() {
+    let runner = Arc::new(FakeRunner {
+        outputs: Mutex::new(VecDeque::from([CommandOutput {
+            success: true,
+            stdout: "another-device".into(),
+            stderr: String::new(),
+        }])),
+        calls: Mutex::new(vec![]),
+    });
+    let vm = Vm::new("9511182e-9c48-4d20-a15b-1da8bb441386", runner.clone()).unwrap();
+    assert!(vm.stop_now().await.is_err());
+    assert!(runner
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|args| args[0] != "stop"));
+}
+
+#[tokio::test]
+async fn immediate_stop_uses_the_hypervisors_supported_force_option() {
+    let runner = Arc::new(FakeRunner {
+        outputs: Mutex::new(VecDeque::from([
+            CommandOutput {
+                success: true,
+                stdout: "9511182e-9c48-4d20-a15b-1da8bb441386".into(),
+                stderr: String::new(),
+            },
+            CommandOutput {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        ])),
+        calls: Mutex::new(vec![]),
+    });
+    let vm = Vm::new("9511182e-9c48-4d20-a15b-1da8bb441386", runner.clone()).unwrap();
+    vm.stop_now().await.unwrap();
+    assert_eq!(
+        runner.calls.lock().unwrap()[1],
+        [
+            "stop",
+            "--force",
+            "nodeharbor-9511182e9c484d20a15b1da8bb441386"
+        ]
+    );
+}

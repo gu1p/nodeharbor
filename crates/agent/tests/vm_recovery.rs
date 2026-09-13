@@ -143,7 +143,44 @@ async fn stop_recovers_a_partial_worker_even_when_the_controller_is_unavailable(
         .unwrap();
     assert_eq!(
         runner.calls.lock().unwrap().last().unwrap(),
-        &["stop", NAME]
+        // The explicit Stop now action uses Multipass's immediate shutdown.
+        &["stop", "--force", NAME]
     );
     assert!(!agent.snapshot().await.unwrap().worker.running);
+}
+
+#[tokio::test]
+async fn a_paused_partial_worker_with_unknown_state_is_reconciled_through_immediate_shutdown() {
+    let directory = tempfile::tempdir().unwrap();
+    let runner = ScriptedRunner::new(vec![
+        ok(json!({"list":[]}).to_string()),
+        CommandOutput {
+            success: false,
+            stdout: String::new(),
+            stderr: "guest network unavailable".into(),
+        },
+        ok(json!({"list":[{"name":NAME,"state":"Unknown"}]}).to_string()),
+        ok(String::new()),
+    ]);
+    let vm = Vm::managed(ID, directory.path(), runner.clone()).unwrap();
+    assert!(vm
+        .create(&budget(), directory.path(), json!([]))
+        .await
+        .is_err());
+    let agent =
+        nodeharbor_agent::Agent::open_with_runner(directory.path(), runner.clone()).unwrap();
+    agent
+        .store
+        .update(|config| {
+            config.device_id = ID.into();
+            config.device_token = Some("test-token".into());
+            config.policy.enabled = false;
+            Ok(())
+        })
+        .unwrap();
+    agent.tick().await.unwrap();
+    assert_eq!(
+        runner.calls.lock().unwrap().last().unwrap(),
+        &["stop", "--force", NAME]
+    );
 }

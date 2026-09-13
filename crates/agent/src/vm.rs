@@ -227,11 +227,21 @@ impl Vm {
         Ok(())
     }
     pub async fn stop(&self) -> Result<()> {
+        self.shutdown(false).await
+    }
+    pub async fn stop_now(&self) -> Result<()> {
+        self.shutdown(true).await
+    }
+    async fn shutdown(&self, immediate: bool) -> Result<()> {
         if !self.has_receipt()? {
             self.verify_owner().await?;
         }
-        self.command(vec!["stop".into(), self.name.clone()], None, 60)
-            .await?;
+        let mut args = vec!["stop".into()];
+        if immediate {
+            args.push("--force".into());
+        }
+        args.push(self.name.clone());
+        self.command(args, None, 60).await?;
         Ok(())
     }
     pub async fn start(&self) -> Result<()> {

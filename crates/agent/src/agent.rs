@@ -6,6 +6,11 @@ use serde_json::{json, Value};
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
+#[derive(Clone, Copy)]
+enum Starting {
+    Preparation,
+    Resume,
+}
 #[derive(Clone, Default)]
 struct Runtime {
     state: Option<String>,
@@ -14,6 +19,7 @@ struct Runtime {
     draining_since: Option<u64>,
     workloads: Vec<Value>,
     remote_paused: bool,
+    starting: Option<Starting>,
 }
 #[derive(Clone)]
 pub struct Agent {
@@ -246,6 +252,67 @@ impl Agent {
     }
     pub async fn tick(&self) -> Result<()> {
         let _operation = self.operation.lock().await;
+        if self.store.load()?.stop_requested {
+            // Shutdown itself must finish before another shutdown is issued.
+            return self.tick_inner().await;
+        }
+        // The losing future is dropped before shutdown. MultipassRunner kills
+        // its CLI child on drop; the owned VM is stopped through Multipass itself.
+        let outcome = tokio::select! {
+            result = self.tick_inner() => Some(result),
+            result = self.wait_for_owner_interruption() => result.map(|()| None).unwrap_or_else(|error| Some(Err(error))),
+        };
+        self.runtime.lock().await.starting = None;
+        if let Some(result) = outcome {
+            return result;
+        }
+        let config = self.store.update(|current| {
+            // Keep retrying if the hypervisor rejects this shutdown attempt.
+            current.stop_requested = true;
+            Ok(())
+        })?;
+        let vm = Vm::managed(
+            &config.device_id,
+            &self.store.directory,
+            self.runner.clone(),
+        )?;
+        if (config.vm_created || vm.has_receipt()?) && vm.info().await?.running {
+            vm.stop_now().await?;
+        }
+        self.store.update(|current| {
+            current.stop_requested = false;
+            Ok(())
+        })?;
+        {
+            let mut runtime = self.runtime.lock().await;
+            runtime.worker.running = false;
+            runtime.draining_since = None;
+            runtime.workloads.clear();
+        }
+        self.set_status(
+            "paused",
+            "Worker stopped; preparation can be retried when you are ready",
+        )
+        .await;
+        Ok(())
+    }
+    async fn wait_for_owner_interruption(&self) -> Result<()> {
+        loop {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            // Poll the atomic store so installer actions in another process are
+            // observed too. A normal pause of running workloads still drains.
+            let config = self.store.load()?;
+            let pause = match self.runtime.lock().await.starting {
+                Some(Starting::Preparation) => !config.prepare_requested,
+                Some(Starting::Resume) => !config.policy.enabled,
+                None => false,
+            };
+            if config.stop_requested || pause {
+                return Ok(());
+            }
+        }
+    }
+    async fn tick_inner(&self) -> Result<()> {
         let config = self.store.load()?;
         if config.device_token.is_none() {
             self.set_status(
@@ -263,7 +330,7 @@ impl Agent {
         let owned = config.vm_created || vm.has_receipt()?;
         if config.stop_requested {
             if owned && vm.info().await?.running {
-                vm.stop().await?;
+                vm.stop_now().await?;
             }
             self.store.update(|c| {
                 c.stop_requested = false;
@@ -282,6 +349,7 @@ impl Agent {
             })?;
         }
         if config.prepare_requested && !config.vm_configured {
+            self.runtime.lock().await.starting = Some(Starting::Preparation);
             self.set_status(
                 "preparing",
                 "Preparing the Linux worker within your resource budget",
@@ -339,6 +407,7 @@ impl Agent {
                 c.vm_configured = true;
                 Ok(())
             })?;
+            self.runtime.lock().await.starting = None;
         }
         let config = self.store.load()?;
         let info = if config.vm_created || vm.has_receipt()? {
@@ -348,7 +417,9 @@ impl Agent {
         };
         self.runtime.lock().await.worker = info.clone();
         if info.running && !config.vm_configured && !config.prepare_requested {
-            vm.stop().await?;
+            // A partial worker can be Starting or Unknown and cannot perform a
+            // guest shutdown. Reconcile the owner's pause through the hypervisor.
+            vm.stop_now().await?;
             self.runtime.lock().await.worker.running = false;
             self.set_status(
                 "paused",
@@ -367,7 +438,7 @@ impl Agent {
             return Ok(());
         }
         if config.stop_requested && info.running {
-            vm.stop().await?;
+            vm.stop_now().await?;
             self.store.update(|c| {
                 c.stop_requested = false;
                 Ok(())
@@ -428,6 +499,7 @@ impl Agent {
         });
         match transition {
             WorkerAction::Start => {
+                self.runtime.lock().await.starting = Some(Starting::Resume);
                 self.set_status(
                     "connecting",
                     "Starting the Linux worker and reconnecting to the private network",
@@ -438,7 +510,11 @@ impl Agent {
                     .await?;
                 vm.start().await?;
                 vm.configure(bootstrap).await?;
-                self.runtime.lock().await.draining_since = None;
+                {
+                    let mut runtime = self.runtime.lock().await;
+                    runtime.starting = None;
+                    runtime.draining_since = None;
+                }
             }
             WorkerAction::Drain => {
                 self.set_status(
