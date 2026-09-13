@@ -11,6 +11,8 @@ use tauri::{
     AppHandle, Manager, State,
 };
 use tauri_plugin_autostart::ManagerExt;
+#[cfg(target_os = "macos")]
+mod macos_update;
 mod settings;
 mod update_flow;
 mod updates;

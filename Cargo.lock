@@ -2907,16 +2907,21 @@ dependencies = [
 name = "nodeharbor-desktop"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
+ "flate2",
  "nodeharbor-agent",
  "nodeharbor-core",
+ "objc2-foundation",
  "serde",
  "serde_json",
+ "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "tempfile",
  "tokio",
 ]
 

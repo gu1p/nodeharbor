@@ -245,11 +245,22 @@ impl update_flow::UpdateRuntime for Runtime {
             .unwrap()
             .take()
             .ok_or("No verified update was downloaded")?;
+        #[cfg(not(target_os = "macos"))]
         let update = self.update.clone();
-        let result = tauri::async_runtime::spawn_blocking(move || update.install(bytes))
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|r| r.map_err(|e| e.to_string()));
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            #[cfg(target_os = "macos")]
+            {
+                let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+                let app = tauri_plugin_updater::extract_path_from_executable(&executable)
+                    .map_err(|e| e.to_string())?;
+                crate::macos_update::install_verified(&app, &bytes).map_err(|e| e.to_string())
+            }
+            #[cfg(not(target_os = "macos"))]
+            update.install(bytes).map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
         if result.is_err() {
             state.quitting.store(false, Ordering::SeqCst);
         }
