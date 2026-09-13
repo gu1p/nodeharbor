@@ -84,3 +84,15 @@ class ReleaseContract(unittest.TestCase):
         self.assertIn("x86_64-pc-windows-msvc", targets)
         self.assertIn("aarch64-apple-darwin", targets)
         self.assertIn("aarch64-unknown-linux-gnu", targets)
+
+    def test_linux_tools_include_the_controller_probe_and_its_dashboard(self):
+        import tarfile
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);target='aarch64-unknown-linux-gnu';build=root/'target'/target/'release'
+            for name in ['bundle/deb/app.deb','bundle/appimage/app.AppImage','nodeharbor-agent','nodeharbor-controller','nodeharbor-probe']:
+                path=build/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'tested-build')
+            (root/'ui/dist').mkdir(parents=True);(root/'ui/dist/index.html').write_text('dashboard')
+            release.collect(root,root/'target',root/'dist',target,'0.1.12','a'*40)
+            archive=next((root/'dist').glob('*-tools.tar.gz'))
+            with tarfile.open(archive) as package:
+                self.assertTrue({'nodeharbor-agent','nodeharbor-controller','nodeharbor-probe','ui/index.html'}.issubset(package.getnames()))

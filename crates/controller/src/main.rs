@@ -3,7 +3,7 @@ use nodeharbor_controller::{configure_runtime, router, ConfiguredController, Sta
 use std::{net::SocketAddr, path::PathBuf};
 use tower_http::services::{ServeDir, ServeFile};
 #[derive(Parser)]
-#[command(version, about = "NodeHarbor fleet controller")]
+#[command(version = nodeharbor_core::build_version(), about = "NodeHarbor fleet controller")]
 struct Args {
     #[arg(long, env = "NODEHARBOR_LISTEN", default_value = "127.0.0.1:8090")]
     listen: SocketAddr,

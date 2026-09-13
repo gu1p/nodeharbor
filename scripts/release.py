@@ -152,7 +152,7 @@ def collect(root: Path, target_dir: Path, output: Path, target: str, version: st
             if len(sources)!=1:raise ValueError(f'Expected one {extension} package, found {len(sources)}')
             shutil.copyfile(sources[0],destination)
         assets.append({'name':destination.name,'sha256':checksum(destination)})
-    executables=['nodeharbor-agent']+(['nodeharbor-controller'] if os_name=='linux' else [])
+    executables=['nodeharbor-agent']+(['nodeharbor-controller','nodeharbor-probe'] if os_name=='linux' else [])
     archive_path=output/f'{prefix}-tools.tar.gz'
     with tarfile.open(archive_path,'w:gz',format=tarfile.PAX_FORMAT) as archive:
         for executable in executables:
@@ -160,6 +160,10 @@ def collect(root: Path, target_dir: Path, output: Path, target: str, version: st
             path=target_dir/target/'release'/name
             if not path.is_file():raise ValueError(f'Missing worker tool: {name}')
             archive.add(path,arcname=name)
+        if os_name=='linux':
+            ui=root/'ui/dist'
+            if not (ui/'index.html').is_file():raise ValueError('Missing fleet dashboard build')
+            archive.add(ui,arcname='ui')
     assets.append({'name':archive_path.name,'sha256':checksum(archive_path)})
     (output/f'{prefix}.json').write_text(json.dumps({'version':version,'commit':commit,'target':target,'os':os_name,'arch':arch,'assets':assets},indent=2)+'\n')
 

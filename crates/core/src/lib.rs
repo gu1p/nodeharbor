@@ -207,3 +207,15 @@ pub fn qualify(health: &HealthWindow) -> Qualification {
         .into(),
     }
 }
+
+/// Human-readable provenance shared by every shipped executable.
+pub fn build_version() -> &'static str {
+    static VERSION: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "{} ({})",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("NODEHARBOR_COMMIT").unwrap_or("development")
+        )
+    });
+    VERSION.as_str()
+}

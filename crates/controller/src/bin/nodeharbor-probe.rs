@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::net::SocketAddr;
 #[derive(Parser)]
-#[command(version, about = "NodeHarbor DNS and overlay network probe")]
+#[command(version = nodeharbor_core::build_version(), about = "NodeHarbor DNS and overlay network probe")]
 struct Args {
     #[arg(long, env = "NODE_NAME")]
     node_name: String,

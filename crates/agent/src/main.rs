@@ -7,7 +7,7 @@ use std::{
 };
 
 #[derive(Parser)]
-#[command(version, about = "NodeHarbor local worker supervisor")]
+#[command(version = nodeharbor_core::build_version(), about = "NodeHarbor local worker supervisor")]
 struct Args {
     #[arg(long, env = "NODEHARBOR_CONFIG_DIR")]
     config_dir: Option<PathBuf>,
