@@ -289,6 +289,13 @@ async fn pausing_during_a_stalled_controller_request_obeys_the_owner_deadline() 
             config.vm_configured = true;
             config.policy.enabled = true;
             config.policy.drain_seconds = 0;
+            // This test needs a running worker before Pause. Leave capacity
+            // for the smaller native builders, just as the owner policy requires.
+            config.policy.resources = nodeharbor_core::Resources {
+                cpus: 1,
+                memory_mib: 2048,
+                disk_gib: 15,
+            };
             config.allocated_resources = Some(config.policy.resources.clone());
             Ok(())
         })
@@ -300,9 +307,17 @@ async fn pausing_during_a_stalled_controller_request_obeys_the_owner_deadline() 
     .unwrap();
     let supervisor = agent.clone();
     let mut tick = tokio::spawn(async move { supervisor.tick().await });
-    tokio::time::timeout(Duration::from_secs(3), entered.notified())
+    if tokio::time::timeout(Duration::from_secs(3), entered.notified())
         .await
-        .unwrap();
+        .is_err()
+    {
+        tick.abort();
+        server.abort();
+        panic!(
+            "The fixture must enter its HTTP request before Pause: {}",
+            agent.snapshot().await.unwrap().reason
+        );
+    }
     let owner = Agent::open_with_runner(dir.path(), guest.clone()).unwrap();
     owner.action("pause").await.unwrap();
     let result = tokio::time::timeout(Duration::from_secs(2), &mut tick).await;
