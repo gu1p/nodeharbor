@@ -91,10 +91,33 @@ All five native targets passed checks and packaging in these GitHub runs:
   controller connection attempt. Publication remained blocked by that failed check.
 
 The native macOS ARM application was launched and inspected with actual IPC and
-host resource information. Its installer and worker acceptance are separate checks.
+host resource information. Worker acceptance is a separate check.
 New release checks also exercise the packaged applications themselves: app archives
 and disk images on macOS, extracted Debian packages and AppImages on Linux, and
 silent NSIS installation on Windows. Those checks must pass on their native builders.
+
+## Published installation and update checks
+
+Versions [0.1.43](https://github.com/gu1p/nodeharbor/releases/tag/v0.1.43) and
+[0.1.44](https://github.com/gu1p/nodeharbor/releases/tag/v0.1.44) are published.
+Their pipelines passed all five native targets, container checks and publication.
+The draft lookup failure described below was repaired using the tested release
+tool and the original verified artifacts. Retrying each publication job then
+recognized its existing immutable manifest and passed.
+
+On 2026-09-13, the public one-line command installed 0.1.43 on an Apple Silicon
+Mac. Its application and agent reported the expected version and source commit.
+The installed application was opened normally and its real workspace inspected:
+local resource information was present, sharing was off, and no worker was running.
+Downloaded release metadata and Minisign signatures were verified against the
+repository key; published asset digests matched the signed checksum list.
+
+Running the public command again with 0.1.44 as the latest release updated the
+open application. The old process exited through the normal application command,
+the new binary reported the exact expected source, and local device identity,
+enrollment state and sharing rules were preserved. Sharing remained off, and the
+installer retained the previous application for recovery. This did not enroll or
+qualify a VM and does not claim equivalent interactive checks on other systems.
 
 ## Live deployment status
 
@@ -170,9 +193,7 @@ publish the existing draft without relaxing source identity or asset checks.
   Contributed runner pools and real no-capacity failures have been validated in
   the infrastructure project; successful contributed execution remains pending.
 - Verify worker recreation and runtime updates on real contributed machines;
-  complete native desktop and installer acceptance on each supported OS.
-- Publish the first complete release from `main`, verify the one-line installers,
-  and confirm each package on its native operating system.
+  complete interactive desktop and installer acceptance on the remaining OSes.
 - Enroll a real contributed VM, observe the CI qualification window, run a real CI
   job, and demonstrate recovery. Service admission requires its full 24-hour window.
 
