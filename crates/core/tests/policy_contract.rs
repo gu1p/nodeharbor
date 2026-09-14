@@ -116,6 +116,37 @@ fn budgets_leave_capacity_for_the_owner() {
     p.resources.cpus = 0;
     assert!(validate_policy(&p, &host().resources).is_err());
 }
+
+#[test]
+fn storage_minimum_and_free_space_failures_have_distinct_actionable_messages() {
+    let mut policy = Policy::default();
+    policy.resources.disk_gib = 14;
+    let error = validate_policy(&policy, &host().resources).unwrap_err();
+    assert!(
+        error.contains("at least 15 GiB") && error.contains("14 GiB"),
+        "{error}"
+    );
+    assert!(
+        !error.contains("10 GiB"),
+        "A minimum-size error is not a free-space error: {error}"
+    );
+    policy.resources.disk_gib = 100;
+    let mut capacity = host().resources;
+    capacity.disk_gib = 27;
+    let error = validate_policy(&policy, &capacity).unwrap_err();
+    for detail in ["100 GiB", "17 GiB", "10 GiB", "another drive"] {
+        assert!(error.contains(detail), "Missing {detail}: {error}");
+    }
+    assert!(
+        !error.contains("at least 15"),
+        "100 GiB already exceeds the minimum: {error}"
+    );
+    capacity.disk_gib = 110;
+    assert!(validate_policy(&policy, &capacity).is_ok());
+    policy.resources.disk_gib = 15;
+    capacity.disk_gib = 25;
+    assert!(validate_policy(&policy, &capacity).is_ok());
+}
 #[test]
 fn choosing_no_workload_class_prevents_admission() {
     let p = Policy {

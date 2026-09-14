@@ -252,6 +252,9 @@ impl Agent {
                         .sum::<u64>(),
                 "Use Storage locations to change the worker storage allowance"
             );
+            // Preserve the selected volume's actual failure before a failed
+            // observation is reduced to zero available disk capacity.
+            self.validate_storage(&current)?;
         }
         let host = self.snapshot().await?.resources;
         validate_policy(&policy, &host).map_err(anyhow::Error::msg)?;

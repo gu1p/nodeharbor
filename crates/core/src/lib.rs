@@ -137,8 +137,14 @@ pub fn validate_policy(policy: &Policy, host: &Resources) -> Result<(), String> 
     if r.memory_mib < 2048 || r.memory_mib > host.memory_mib.saturating_sub(2048) {
         return Err("Choose at least 2 GiB RAM and leave at least 2 GiB for this computer".into());
     }
-    if r.disk_gib < 15 || r.disk_gib > host.disk_gib.saturating_sub(10) {
-        return Err("Choose at least 15 GiB disk and leave 10 GiB free".into());
+    if r.disk_gib < 15 {
+        return Err(format!(
+            "Worker storage needs at least 15 GiB; {} GiB was requested",
+            r.disk_gib
+        ));
+    }
+    if r.disk_gib > host.disk_gib.saturating_sub(10) {
+        return Err(format!("Not enough space for {} GiB of worker storage: up to {} GiB can be allocated after keeping 10 GiB free. Choose a smaller allocation or another drive", r.disk_gib, host.disk_gib.saturating_sub(10)));
     }
     if policy.min_battery_percent > 100
         || policy.idle_after_minutes == 0

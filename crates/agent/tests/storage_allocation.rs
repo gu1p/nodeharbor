@@ -41,6 +41,66 @@ fn selection(path: &Path, size: u64) -> Selection {
 }
 
 #[test]
+fn selected_drive_shortage_reports_its_mount_requested_space_and_usable_capacity() {
+    let root = tempfile::tempdir().unwrap();
+    let external = root.path().join("selected");
+    std::fs::create_dir(&external).unwrap();
+    let volumes = vec![
+        volume(root.path(), "system", "system-pool", 1000),
+        volume(&external, "Work disk", "work-pool", 109),
+    ];
+    let error = plan(
+        &[selection(&external.join("worker"), 100)],
+        root.path(),
+        30,
+        &volumes,
+    )
+    .unwrap_err()
+    .to_string();
+    for detail in [
+        "Work disk",
+        external.to_str().unwrap(),
+        "100 GiB",
+        "99 GiB",
+        "10 GiB",
+    ] {
+        assert!(error.contains(detail), "Missing {detail}: {error}");
+    }
+    assert!(
+        !error.contains("15 GiB"),
+        "The selected allocation exceeds the minimum: {error}"
+    );
+}
+
+#[test]
+fn system_disk_shortage_is_distinct_from_selected_workload_capacity() {
+    let root = tempfile::tempdir().unwrap();
+    let external = root.path().join("selected");
+    std::fs::create_dir(&external).unwrap();
+    let mut volumes = vec![
+        volume(root.path(), "system", "system-pool", 25),
+        volume(&external, "Work disk", "work-pool", 259),
+    ];
+    let error = nodeharbor_agent::storage::reserve_system_disk(&mut volumes, root.path(), 16)
+        .unwrap_err()
+        .to_string();
+    for detail in [
+        "system disk",
+        root.path().to_str().unwrap(),
+        "16 GiB",
+        "25 GiB",
+        "10 GiB",
+    ] {
+        assert!(error.contains(detail), "Missing {detail}: {error}");
+    }
+    assert!(
+        !error.contains("Work disk"),
+        "The selected workload disk has enough space: {error}"
+    );
+    assert_eq!(volumes[1].available_gib, 259);
+}
+
+#[test]
 fn empty_selection_resolves_to_the_managed_directory_without_creating_it() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("managed");

@@ -51,22 +51,29 @@ export function StorageLocations({inventory,locations,onChange,onChoose,onDelete
  </section>;
 }
 
-export function StorageEditor({inventory,backend,onSaved,disabled}:{inventory:StorageInventory;backend?:Backend;onSaved?:(snapshot:Snapshot)=>void;disabled:boolean}) {
+export function StorageEditor({inventory,backend,onSaved,onDirtyChange,disabled}:{inventory:StorageInventory;backend?:Backend;onSaved?:(snapshot:Snapshot)=>void;onDirtyChange?:(dirty:boolean)=>void;disabled:boolean}) {
  const [locations,setLocations]=useState<StorageSelection[]>(()=>inventory.locations.map(({id,directory,allocationGib,volumeId})=>({id,directory,allocationGib,expectedVolumeId:volumeId})));
+ const [dirty,setDirty]=useState(false);
+ useEffect(()=>{onDirtyChange?.(dirty);return()=>onDirtyChange?.(false);},[dirty,onDirtyChange]);
  const [plan,setPlan]=useState<StoragePlan|null>(null);const [busy,setBusy]=useState(false);const [error,setError]=useState('');
  const [confirmed,setConfirmed]=useState(false);const [temporaryDirectory,setTemporaryDirectory]=useState('');const [singleDiskGib,setSingleDiskGib]=useState(inventory.configuredGib||30);
  const available=!!backend?.previewStorage&&!!backend?.applyStorage;
  const editable=available&&inventory.supported;
  const blocked=disabled||busy||!!inventory.operation;
  const deleteBlocked=disabled||busy||!available||!!(inventory.operation&&inventory.operation.phase!=='missing');
- const change=(next:StorageSelection[])=>{setLocations(next);setPlan(null);setError('');setConfirmed(false);};
+ const change=(next:StorageSelection[])=>{
+  const selected=next.map(l=>[l.id,l.directory,l.allocationGib,l.expectedVolumeId]);
+  const saved=inventory.locations.map(l=>[l.id,l.directory,l.allocationGib,l.volumeId]);
+  setDirty(JSON.stringify(selected)!==JSON.stringify(saved));setLocations(next);setPlan(null);setError('');setConfirmed(false);
+ };
+ const discard=()=>{setLocations(inventory.locations.map(({id,directory,allocationGib,volumeId})=>({id,directory,allocationGib,expectedVolumeId:volumeId})));setSingleDiskGib(inventory.configuredGib||30);setTemporaryDirectory('');setPlan(null);setError('');setConfirmed(false);setDirty(false);};
  async function review(options?:StorageReviewOptions){setBusy(true);setError('');setPlan(null);setConfirmed(false);try{
   const selected=options?.deleteAll?[]:locations;
   if(inventory.supported&&!options?.deleteAll&&!options?.restoreDisk&&selected.some(location=>!location.expectedVolumeId||!location.directory.trim()))throw new Error('Select a drive and a writable folder for every disk before review.');
   const request={...(temporaryDirectory?{temporaryDirectory}:{}),...options};
   setPlan(await (Object.keys(request).length?backend!.previewStorage!(selected,request):backend!.previewStorage!(selected)));
  }catch(error){setError(String(error instanceof Error?error.message:error));}finally{setBusy(false);}}
- async function apply(){if(!plan||(plan.maintenance?.kind==='deleteAll'&&!confirmed))return;setBusy(true);setError('');try{const snapshot=await backend!.applyStorage!(plan);setPlan(null);onSaved?.(snapshot);}catch(error){setError(String(error instanceof Error?error.message:error));}finally{setBusy(false);}}
+ async function apply(){if(!plan||(plan.maintenance?.kind==='deleteAll'&&!confirmed))return;setBusy(true);setError('');try{const snapshot=await backend!.applyStorage!(plan);setPlan(null);setDirty(false);onSaved?.(snapshot);}catch(error){setError(String(error instanceof Error?error.message:error));}finally{setBusy(false);}}
  async function choose(index:number){setBusy(true);setError('');try{const directory=await backend!.chooseStorageDirectory!();if(directory)change(locations.map((location,i)=>i===index?{...location,directory}:location));}catch(error){setError(String(error instanceof Error?error.message:error));}finally{setBusy(false);}}
  async function recovery(enabled:boolean){setBusy(true);setError('');try{onSaved?.(await backend!.setStorageRecovery!(enabled));}catch(error){setError(String(error));}finally{setBusy(false);}}
  async function retry(){setBusy(true);setError('');try{onSaved?.(await backend!.retryStorageMaintenance!());}catch(error){setError(String(error));}finally{setBusy(false);}}
@@ -84,10 +91,11 @@ export function StorageEditor({inventory,backend,onSaved,disabled}:{inventory:St
  </section>
  {error&&<p role="alert">{error}</p>}
  {available&&<div className="panel">
- {!inventory.supported&&<><label>Worker disk allocation (GiB)<input type="number" min={15} max={1048576} value={singleDiskGib} disabled={blocked} onChange={e=>{setSingleDiskGib(Number(e.target.value));setPlan(null);}}/></label><button type="button" disabled={blocked} onClick={()=>void review({singleDiskGib})}>Shrink allocation</button><button type="button" disabled={blocked} onClick={()=>void review({deleteAll:true})}>Delete all worker storage</button></>}
+ {!inventory.supported&&<><label>Worker disk allocation (GiB)<input type="number" min={15} max={1048576} value={singleDiskGib} disabled={blocked} onChange={e=>{setSingleDiskGib(Number(e.target.value));setDirty(Number(e.target.value)!==(inventory.configuredGib||30));setPlan(null);}}/></label><button type="button" disabled={blocked} onClick={()=>void review({singleDiskGib})}>Shrink allocation</button><button type="button" disabled={blocked} onClick={()=>void review({deleteAll:true})}>Delete all worker storage</button></>}
  <label>Temporary backup folder (optional)<input type="text" value={temporaryDirectory} disabled={blocked} onChange={e=>{setTemporaryDirectory(e.target.value);setPlan(null);}}/></label>
  <p>NodeHarbor prefers sufficient space on a selected volume. If necessary, choose another temporary folder. Backups remain private and are never extracted on this computer.</p>
  {editable&&<button type="button" disabled={blocked} onClick={()=>void review()}>Review storage changes</button>}
+ {dirty&&<button type="button" disabled={blocked} onClick={discard}>Discard storage changes</button>}
  {plan&&<div role="region" aria-label="Storage change review"><p role="status">Reviewed: {plan.totalGib} GiB allocated.{plan.requiresRestart?' Applying this change drains work and restarts the worker.':' These locations will be used when you prepare the worker.'}</p>
  <ul>{plan.locations.map(location=><li key={location.id}><code>{location.directory}</code> · {location.allocationGib} GiB</li>)}</ul>
  {plan.maintenance&&<><p>Downtime: {plan.maintenance.downtime}</p><p>Temporary space: {(plan.maintenance.temporaryBytes/1073741824).toFixed(2)} GiB. Minimum resulting capacity: {plan.maintenance.minimumGib} GiB.</p>{plan.maintenance.backup&&<p>Backup location: <code>{plan.maintenance.backup.directory}</code>. The backup is removed after restore verification; unfinished cleanup remains visible.</p>}<ul>{plan.maintenance.deletions.map(item=><li key={item}>{item}</li>)}</ul></>}

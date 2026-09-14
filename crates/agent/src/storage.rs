@@ -96,7 +96,8 @@ pub fn reserve_system_disk(
     );
     anyhow::ensure!(
         volume.available_gib >= remaining_gib.saturating_add(10),
-        "Not enough space on the application volume for its system disk and 10 GiB host reserve"
+        "Not enough space for the separate system disk on {} ({}): it needs {} GiB more plus 10 GiB kept free, but only {} GiB is free",
+        volume.label, volume.mount_point, remaining_gib, volume.available_gib
     );
     let pool = volume.capacity_pool.clone();
     for volume in volumes
@@ -326,8 +327,8 @@ pub fn plan_change(
         budget.1 = budget.1.min(volume.available_gib);
         anyhow::ensure!(
             budget.0 <= budget.1.saturating_sub(10),
-            "Not enough free space on {}; leave 10 GiB free in each storage pool",
-            volume.label
+            "Not enough free space on {} ({}): the selected allocations need {} GiB more, but only {} GiB can be allocated after keeping 10 GiB free. Choose a smaller allocation or another drive",
+            volume.label, volume.mount_point, budget.0, budget.1.saturating_sub(10)
         );
         let probe_directory = if path.exists() {
             path.as_path()

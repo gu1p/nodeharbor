@@ -194,3 +194,51 @@ it('requires a drive identity before review and keeps saved identities after reo
  expect(previewStorage).not.toHaveBeenCalled();
  expect(screen.getByRole('alert')).toHaveTextContent(/select a drive/i);
 });
+
+it('requires review of a 100 GiB drive draft before saving sharing rules against the old system disk',async()=>{
+ const initial:Snapshot={deviceId:'test',name:'Computer',platform:'linux',architecture:'amd64',state:'paused',reason:'Sharing is switched off',policy:defaultPolicy(),resources:{cpus:8,memoryMib:16384,diskGib:27},storage:{...inventory,revision:0},worker:{installed:false,running:false},enrolled:true,controllerUrl:'',version:'test',workloads:[]};
+ const location={id:'disk1',volumeId:'external',directory:'/Volumes/Work SSD/NodeHarbor',allocationGib:100};
+ const saved={...initial,policy:{...initial.policy,resources:{...initial.policy.resources,diskGib:100}},resources:{...initial.resources,diskGib:110},storage:{...inventory,revision:1,locations:[{...location,available:true,reason:''}]}};
+ const savePolicy=vi.fn().mockResolvedValue(saved);
+ const previewStorage=vi.fn().mockResolvedValue({revision:0,locations:[location],totalGib:100,requiresRestart:false});
+ const applyStorage=vi.fn().mockResolvedValue(saved);
+ const api:Backend={snapshot:vi.fn().mockResolvedValue(initial),savePolicy,action:vi.fn(),enroll:vi.fn(),fleet:vi.fn().mockResolvedValue([]),previewStorage,applyStorage};
+ const user=userEvent.setup();render(<App backend={api}/>);
+ await user.click(await screen.findByRole('button',{name:'Sharing rules'}));
+ const cpu=screen.getByRole('spinbutton',{name:'CPU cores'});await user.clear(cpu);await user.type(cpu,'3');
+ await user.click(screen.getByRole('button',{name:'Add drive'}));
+ await user.selectOptions(screen.getByRole('combobox',{name:'Drive for disk 1'}),'external');
+ const allocation=screen.getByRole('spinbutton',{name:'Allocation for disk 1 (GiB)'});
+ await user.clear(allocation);await user.type(allocation,'100');
+ const save=screen.getByRole('button',{name:'Save sharing rules'});
+ expect(save).toBeDisabled();
+ expect(save).toHaveAccessibleDescription(/storage changes are not saved.*review and apply/i);
+ expect(screen.getByRole('status')).toHaveTextContent(/storage changes are not saved/i);
+ await user.keyboard('{Enter}');
+ expect(savePolicy).not.toHaveBeenCalled();
+ await user.click(screen.getByRole('button',{name:'Review storage changes'}));
+ expect(previewStorage).toHaveBeenCalledWith([{directory:location.directory,allocationGib:100,expectedVolumeId:'external'}]);
+ expect(applyStorage).not.toHaveBeenCalled();
+ await user.click(await screen.findByRole('button',{name:'Apply storage changes'}));
+ expect(await screen.findByRole('button',{name:'Save sharing rules'})).toBeEnabled();
+ expect(allocation).not.toBeInTheDocument();
+ expect(screen.getByRole('spinbutton',{name:'Allocation for disk 1 (GiB)'})).toHaveValue(100);
+ expect(cpu).toHaveValue(3);
+ await user.click(screen.getByRole('button',{name:'Save sharing rules'}));
+ expect(savePolicy).toHaveBeenCalledWith(expect.objectContaining({resources:{cpus:3,memoryMib:4096,diskGib:100}}));
+});
+
+it('can discard a storage draft to save unrelated sharing rules',async()=>{
+ const initial:Snapshot={deviceId:'test',name:'Computer',platform:'linux',architecture:'amd64',state:'paused',reason:'Sharing is switched off',policy:defaultPolicy(),resources:{cpus:8,memoryMib:16384,diskGib:100},storage:inventory,worker:{installed:false,running:false},enrolled:true,controllerUrl:'',version:'test',workloads:[]};
+ const api:Backend={snapshot:vi.fn().mockResolvedValue(initial),savePolicy:vi.fn().mockResolvedValue(initial),action:vi.fn(),enroll:vi.fn(),fleet:vi.fn().mockResolvedValue([]),previewStorage:vi.fn(),applyStorage:vi.fn()};
+ const user=userEvent.setup();render(<App backend={api}/>);
+ await user.click(await screen.findByRole('button',{name:'Sharing rules'}));
+ await user.click(screen.getByRole('checkbox',{name:'Only while idle'}));
+ await user.click(screen.getByRole('button',{name:'Add drive'}));
+ await user.click(screen.getByRole('button',{name:'Discard storage changes'}));
+ expect(screen.queryByRole('combobox',{name:'Drive for disk 1'})).not.toBeInTheDocument();
+ expect(screen.getByRole('button',{name:'Save sharing rules'})).toBeEnabled();
+ await user.click(screen.getByRole('button',{name:'Save sharing rules'}));
+ expect(api.savePolicy).toHaveBeenCalledWith(expect.objectContaining({idleOnly:true}));
+ expect(api.applyStorage).not.toHaveBeenCalled();
+});
