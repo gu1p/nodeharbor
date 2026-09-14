@@ -304,7 +304,8 @@ async fn windows_runtime_rejects_selectable_locations_without_touching_configura
             std::env::temp_dir()
         })
         .unwrap();
-    let agent = open(directory.path(), Arc::new(Runtime::default()));
+    let runner = Arc::new(Runtime::default());
+    let agent = open(directory.path(), runner.clone());
     agent
         .store
         .update(|configuration| {
@@ -323,6 +324,35 @@ async fn windows_runtime_rejects_selectable_locations_without_touching_configura
         before,
         std::fs::read(directory.path().join("config.json")).unwrap()
     );
+    let config = agent.store.load().unwrap();
+    let mut policy = config.policy;
+    policy.resources.cpus = 1;
+    policy.resources.memory_mib = 2048;
+    policy.resources.disk_gib = 30;
+    policy.idle_only = true;
+    let plan = nodeharbor_agent::storage::ChangePlan {
+        maintenance: None,
+        revision: config.storage_revision,
+        locations: vec![nodeharbor_agent::storage::Location {
+            id: "disk".into(),
+            volume_id: "fixture".into(),
+            directory: directory.path().join("storage").to_string_lossy().into(),
+            allocation_gib: 30,
+        }],
+        total_gib: 30,
+        requires_restart: false,
+    };
+    let error = agent
+        .save_policy_with_storage(policy, config.remote.revision, plan)
+        .await
+        .err()
+        .expect("Combined saving must enforce the runtime's storage support");
+    assert!(error.to_string().contains("Multipass"), "{error}");
+    assert_eq!(
+        before,
+        std::fs::read(directory.path().join("config.json")).unwrap()
+    );
+    assert!(runner.0.lock().unwrap().is_empty());
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -422,6 +452,7 @@ async fn combined_save_commits_selected_capacity_and_policy_once_before_reopen_a
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test]
 async fn rejected_combined_saves_preserve_both_storage_and_policy() {
     for failure in [
@@ -466,6 +497,7 @@ async fn rejected_combined_saves_preserve_both_storage_and_policy() {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test]
 async fn combined_growth_persists_rules_and_a_durable_operation_without_waiting_for_maintenance() {
     let directory = tempfile::tempdir().unwrap();
@@ -564,6 +596,7 @@ async fn combined_save_rechecks_selected_drive_identity_and_capacity_before_any_
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test]
 async fn combined_setup_shrink_and_removal_keep_the_reviewed_rules_and_locations_after_reopen() {
     for remove in [false, true] {
