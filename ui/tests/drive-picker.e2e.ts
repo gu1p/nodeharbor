@@ -1,18 +1,20 @@
 import { test, expect } from '@playwright/test';
-test('an owner selects two drives and customizes independent allocations using only the keyboard', async ({page})=>{
+test('an owner selects two drives and customizes independent allocations using only the keyboard', async ({page,browserName})=>{
+ // WebKit on macOS follows the host's Option-Tab shortcut for all controls.
+ const tab=process.platform==='darwin'&&browserName==='webkit'?'Alt+Tab':'Tab';
  await page.goto('/tests/drive-picker.html');
- await page.keyboard.press('Tab');
+ await page.keyboard.press(tab);
  await expect(page.getByRole('button',{name:'Add drive'})).toBeFocused();
  await page.keyboard.press('Enter');
  await expect(page.getByRole('combobox',{name:'Drive for disk 1'})).toBeFocused();
  await page.keyboard.press('s');
  await expect(page.getByRole('textbox',{name:'Directory for disk 1'})).toHaveValue('/managed/storage');
- await page.keyboard.press('Tab');await page.keyboard.press('ControlOrMeta+A');await page.keyboard.type('45');
- await page.keyboard.press('Tab');await page.keyboard.press('ControlOrMeta+A');await page.keyboard.type('/managed/custom');
- await page.keyboard.press('Tab');await page.keyboard.press('Tab');await page.keyboard.press('Enter');
+ await page.keyboard.press(tab);await page.keyboard.press('ControlOrMeta+A');await page.keyboard.type('45');
+ await page.keyboard.press(tab);await page.keyboard.press('ControlOrMeta+A');await page.keyboard.type('/managed/custom');
+ await page.keyboard.press(tab);await page.keyboard.press(tab);await page.keyboard.press('Enter');
  await expect(page.getByRole('combobox',{name:'Drive for disk 2'})).toBeFocused();
  await page.keyboard.press('w');
- await page.keyboard.press('Tab');await page.keyboard.press('ControlOrMeta+A');await page.keyboard.type('80');
+ await page.keyboard.press(tab);await page.keyboard.press('ControlOrMeta+A');await page.keyboard.type('80');
  await expect(page.getByRole('textbox',{name:'Directory for disk 1'})).toHaveValue('/managed/custom');
  await expect(page.getByRole('spinbutton',{name:'Allocation for disk 1 (GiB)'})).toHaveValue('45');
  await expect(page.getByRole('textbox',{name:'Directory for disk 2'})).toHaveValue('/media/work/NodeHarbor');

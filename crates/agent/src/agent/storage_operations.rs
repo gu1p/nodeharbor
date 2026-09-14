@@ -1,3 +1,4 @@
+use super::sharing_settings::SharingSettings;
 use super::*;
 use crate::storage::{ChangePlan, Operation, OperationStatus, Selection};
 
@@ -58,8 +59,18 @@ impl Agent {
     }
 
     pub(super) async fn apply_storage_inner(&self, plan: ChangePlan) -> Result<Snapshot> {
+        self.apply_storage_settings(plan, None).await
+    }
+
+    pub(super) async fn apply_storage_settings(
+        &self,
+        plan: ChangePlan,
+        settings: Option<SharingSettings>,
+    ) -> Result<Snapshot> {
         if plan.maintenance.is_some() {
-            return self.apply_storage_maintenance(plan).await;
+            return self
+                .apply_storage_maintenance_settings(plan, settings)
+                .await;
         }
         let config = self.store.load()?;
         anyhow::ensure!(
@@ -124,6 +135,9 @@ impl Agent {
             location.id = reviewed.id.clone();
         }
         self.store.update(|current| {
+            if let Some(settings) = &settings {
+                settings.validate(current)?;
+            }
             anyhow::ensure!(
                 current.storage_revision == plan.revision && current.storage_operation.is_none(),
                 "Storage choices changed; review the changes again"
@@ -164,6 +178,9 @@ impl Agent {
                 current.storage_lifecycle.configured_locations = checked.locations.clone();
                 current.storage_locations = checked.locations.clone();
                 current.policy.resources.disk_gib = checked.total_gib;
+            }
+            if let Some(settings) = &settings {
+                settings.apply(current);
             }
             Ok(())
         })?;

@@ -73,7 +73,7 @@ export function RemoteConfiguration({backend,device,onClose}:{backend:Backend;de
  </section>;
 }
 
-function policyValues(policy:Policy|undefined|null):Record<string,string> {
+export function policyValues(policy:Policy|undefined|null):Record<string,string> {
  if(!policy)return {};
  const yes=(value:boolean)=>value?'Yes':'No';
  return {'Enable sharing':yes(policy.enabled),'CPU cores':String(policy.resources.cpus),'RAM (GiB)':String(policy.resources.memoryMib/1024),'Disk (GiB)':String(policy.resources.diskGib),'Only while idle':yes(policy.idleOnly),'Idle time (minutes)':String(policy.idleAfterMinutes),'Allow sharing on battery':yes(policy.allowBattery),'Minimum battery (%)':String(policy.minBatteryPercent),'Use a weekly schedule':yes(policy.scheduleEnabled),'Schedule':policy.schedule.map(w=>`${w.days.map(d=>['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][d]).join(', ')} ${formatMinute(w.startMinute)}–${formatMinute(w.endMinute)}`).join('; ')||'No windows','Start at login':yes(policy.startAtLogin),'Continue when the window closes':yes(policy.background),'Accept CI jobs':yes(policy.allowCi),'Accept eligible services':yes(policy.allowServices),'Drain deadline (seconds)':String(policy.drainSeconds)};

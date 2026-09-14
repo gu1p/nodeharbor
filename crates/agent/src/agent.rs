@@ -1,3 +1,4 @@
+mod sharing_settings;
 mod storage_lifecycle;
 mod storage_operations;
 use crate::{worker_transition, Configuration, Store, Vm, VmInfo, WorkerAction, WorkerInput};

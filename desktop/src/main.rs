@@ -74,14 +74,28 @@ async fn save_policy(
     state: State<'_, Desktop>,
     policy: Policy,
     expected_revision: Option<u64>,
+    storage_plan: Option<nodeharbor_agent::storage::ChangePlan>,
 ) -> Result<Snapshot, String> {
     let _settings = state.settings.lock().await;
+    if storage_plan.is_some() && expected_revision.is_none() {
+        return Err("Reload current settings before saving storage and sharing rules".into());
+    }
     settings::save_with_startup(&NativeStartup(&app), policy.start_at_login, || async {
-        state
-            .agent
-            .save_policy_versioned(policy, expected_revision)
-            .await
-            .map_err(|error| error.to_string())
+        match storage_plan {
+            Some(plan) => {
+                state
+                    .agent
+                    .save_policy_with_storage(policy, expected_revision.unwrap(), plan)
+                    .await
+            }
+            None => {
+                state
+                    .agent
+                    .save_policy_versioned(policy, expected_revision)
+                    .await
+            }
+        }
+        .map_err(|error| error.to_string())
     })
     .await
 }

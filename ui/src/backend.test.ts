@@ -75,3 +75,13 @@ it('exposes update status and owner controls only through the native updater',as
  const {backend}=await import('./backend');await backend.updates!();await backend.updateAction!('disable');
  expect(commands).toEqual([{cmd:'update_status',payload:{}},{cmd:'update_action',payload:{action:'disable'}}]);
 });
+
+it('sends rules, expected configuration revision and reviewed disks in one native save',async()=>{
+ const commands:{cmd:string;payload:unknown}[]=[];
+ mockIPC((cmd,payload)=>{commands.push({cmd,payload});return {};});
+ const {backend}=await import('./backend');
+ const policy=defaultPolicy();const storagePlan:StoragePlan={revision:3,locations:[{id:'one',volumeId:'data',directory:'/data/worker',allocationGib:100}],totalGib:100,requiresRestart:false};
+ policy.resources.diskGib=100;
+ await backend.savePolicy(policy,7,storagePlan);
+ expect(commands).toEqual([{cmd:'save_policy',payload:{policy,expectedRevision:7,storagePlan}}]);
+});

@@ -972,7 +972,11 @@ impl Agent {
         anyhow::bail!("Choose a temporary backup folder with at least {} GiB free plus the 10 GiB host reserve and remaining image growth; nothing was changed", bytes.div_ceil(GIB))
     }
 
-    pub(super) async fn apply_storage_maintenance(&self, plan: ChangePlan) -> Result<Snapshot> {
+    pub(super) async fn apply_storage_maintenance_settings(
+        &self,
+        plan: ChangePlan,
+        settings: Option<super::sharing_settings::SharingSettings>,
+    ) -> Result<Snapshot> {
         let config = self.store.load()?;
         anyhow::ensure!(
             config.storage_revision == plan.revision,
@@ -1034,7 +1038,19 @@ impl Agent {
                 && checked.locations.len() == plan.locations.len(),
             "Storage requirements changed; review again"
         );
+        if settings.is_some() && config.vm_provider == crate::VmProvider::Lima {
+            self.storage_runtime_preflight().await?;
+        }
         self.store.update(|c| {
+            if let Some(settings) = &settings {
+                settings.validate(c)?;
+            }
+            anyhow::ensure!(
+                !c.application_update_pending
+                    && c.recreation.is_none()
+                    && c.storage_operation.is_none(),
+                "Wait for current worker maintenance to finish"
+            );
             anyhow::ensure!(
                 c.storage_revision == plan.revision && c.storage_lifecycle.maintenance.is_none(),
                 "Storage choices changed; review again"
@@ -1062,6 +1078,9 @@ impl Agent {
                     c.policy.enabled = false;
                     c.prepare_requested = false;
                 }
+            }
+            if let Some(settings) = &settings {
+                settings.apply(c);
             }
             Ok(())
         })?;

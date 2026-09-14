@@ -366,3 +366,249 @@ async fn first_preparation_records_default_storage_before_attempting_runtime_wri
     );
     assert!(!saved.vm_configured);
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+async fn combined_save_commits_selected_capacity_and_policy_once_before_reopen_and_prepare() {
+    for allocations in [vec![100], vec![60, 40]] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let runner = Arc::new(Runtime::default());
+        let mut volumes = vec![selected_volume(&root, "system", 27)];
+        let mut selections = Vec::new();
+        for (i, gib) in allocations.iter().enumerate() {
+            let path = root.join(format!("selected-{i}"));
+            std::fs::create_dir(&path).unwrap();
+            let volume = selected_volume(&path, &format!("disk-{i}"), gib + 10);
+            selections.push(nodeharbor_agent::storage::Selection {
+                id: None,
+                expected_volume_id: Some(volume.id.clone()),
+                directory: path.join("NodeHarbor").to_string_lossy().into(),
+                allocation_gib: *gib,
+            });
+            volumes.push(volume);
+        }
+        let agent =
+            Agent::open_with_runner_and_volumes(&root, runner.clone(), volumes.clone()).unwrap();
+        agent
+            .store
+            .update(|c| {
+                c.device_token = Some("test-only".into());
+                c.policy.resources.cpus = 1;
+                c.policy.resources.memory_mib = 2048;
+                Ok(())
+            })
+            .unwrap();
+        let before = agent.store.load().unwrap();
+        let plan = agent.preview_storage(selections).await.unwrap();
+        let mut policy = before.policy;
+        policy.resources.disk_gib = 100;
+        policy.idle_only = true;
+        let saved = agent
+            .save_policy_with_storage(policy.clone(), before.remote.revision, plan.clone())
+            .await
+            .unwrap();
+        assert_eq!(saved.policy, policy);
+        assert_eq!(saved.configuration.revision, before.remote.revision + 1);
+        let reopened = Agent::open_with_runner_and_volumes(&root, runner.clone(), volumes).unwrap();
+        assert_eq!(
+            reopened.store.load().unwrap().storage_locations,
+            plan.locations
+        );
+        assert_eq!(reopened.store.load().unwrap().policy, policy);
+        reopened.action("prepare").await.unwrap();
+        assert!(reopened.store.load().unwrap().prepare_requested);
+        assert!(runner.0.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn rejected_combined_saves_preserve_both_storage_and_policy() {
+    for failure in [
+        "policy",
+        "revision",
+        "storage_revision",
+        "allocation",
+        "enabled",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let agent = open(&root, Arc::new(Runtime::default()));
+        let original = agent.store.load().unwrap();
+        let mut policy = original.policy.clone();
+        policy.resources.cpus = 1;
+        policy.resources.memory_mib = 2048;
+        let mut plan = agent.preview_storage(vec![]).await.unwrap();
+        policy.resources.disk_gib = plan.total_gib;
+        policy.idle_only = true;
+        let mut revision = original.remote.revision;
+        match failure {
+            "policy" => policy.resources.cpus = 0,
+            "revision" => revision += 1,
+            "storage_revision" => plan.revision += 1,
+            "allocation" => policy.resources.disk_gib += 1,
+            "enabled" => policy.enabled = true,
+            _ => unreachable!(),
+        }
+        let before = std::fs::read(root.join("config.json")).unwrap();
+        assert!(
+            agent
+                .save_policy_with_storage(policy, revision, plan)
+                .await
+                .is_err(),
+            "{failure}"
+        );
+        assert_eq!(
+            std::fs::read(root.join("config.json")).unwrap(),
+            before,
+            "{failure}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn combined_growth_persists_rules_and_a_durable_operation_without_waiting_for_maintenance() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let runner = Arc::new(Runtime::default());
+    let agent = open(&root, runner.clone());
+    let initial = agent.preview_storage(vec![]).await.unwrap();
+    agent.apply_storage(initial).await.unwrap();
+    agent
+        .store
+        .update(|c| {
+            c.vm_created = true;
+            c.vm_configured = true;
+            c.policy.resources.cpus = 1;
+            c.policy.resources.memory_mib = 2048;
+            Ok(())
+        })
+        .unwrap();
+    let config = agent.store.load().unwrap();
+    let old = &config.storage_locations[0];
+    let plan = agent
+        .preview_storage(vec![nodeharbor_agent::storage::Selection {
+            id: Some(old.id.clone()),
+            expected_volume_id: Some(old.volume_id.clone()),
+            directory: old.directory.clone(),
+            allocation_gib: 100,
+        }])
+        .await
+        .unwrap();
+    assert!(plan.requires_restart);
+    let mut policy = config.policy.clone();
+    policy.idle_only = true;
+    policy.resources.disk_gib = 100;
+    agent
+        .save_policy_with_storage(policy.clone(), config.remote.revision, plan)
+        .await
+        .unwrap();
+    let reopened = open(&root, runner.clone());
+    let saved = reopened.store.load().unwrap();
+    assert_eq!(saved.policy, policy);
+    assert_eq!(
+        saved.storage_operation.unwrap().target[0].allocation_gib,
+        100
+    );
+    assert_eq!(
+        saved.storage_locations[0].allocation_gib,
+        old.allocation_gib
+    );
+    assert!(runner.0.lock().unwrap().is_empty());
+    reopened.action("stop").await.unwrap();
+    assert!(reopened.store.load().unwrap().stop_requested);
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+async fn combined_save_rechecks_selected_drive_identity_and_capacity_before_any_write() {
+    for replaced in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let selected = root.join("data");
+        std::fs::create_dir(&selected).unwrap();
+        let mut volumes = vec![
+            selected_volume(&root, "system", 27),
+            selected_volume(&selected, "data", 110),
+        ];
+        let runner = Arc::new(Runtime::default());
+        let agent =
+            Agent::open_with_runner_and_volumes(&root, runner.clone(), volumes.clone()).unwrap();
+        let plan = agent
+            .preview_storage(vec![nodeharbor_agent::storage::Selection {
+                id: None,
+                expected_volume_id: Some("data".into()),
+                directory: selected.join("NodeHarbor").to_string_lossy().into(),
+                allocation_gib: 100,
+            }])
+            .await
+            .unwrap();
+        let current = agent.store.load().unwrap();
+        let mut policy = current.policy;
+        policy.resources.cpus = 1;
+        policy.resources.memory_mib = 2048;
+        policy.resources.disk_gib = 100;
+        if replaced {
+            volumes[1].id = "replacement".into();
+        } else {
+            volumes[1].available_gib = 109;
+        }
+        let changed = Agent::open_with_runner_and_volumes(&root, runner.clone(), volumes).unwrap();
+        let before = std::fs::read(root.join("config.json")).unwrap();
+        assert!(changed
+            .save_policy_with_storage(policy, current.remote.revision, plan)
+            .await
+            .is_err());
+        assert_eq!(std::fs::read(root.join("config.json")).unwrap(), before);
+        assert!(runner.0.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn combined_setup_shrink_and_removal_keep_the_reviewed_rules_and_locations_after_reopen() {
+    for remove in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let agent = open(&root, Arc::new(Runtime::default()));
+        let selections = (0..2)
+            .map(|i| nodeharbor_agent::storage::Selection {
+                id: None,
+                expected_volume_id: Some("fixture".into()),
+                directory: root.join(format!("disk-{i}")).to_string_lossy().into(),
+                allocation_gib: 50,
+            })
+            .collect();
+        let initial = agent.preview_storage(selections).await.unwrap();
+        agent.apply_storage(initial).await.unwrap();
+        let config = agent.store.load().unwrap();
+        let selected = config
+            .storage_locations
+            .iter()
+            .take(if remove { 1 } else { 2 })
+            .map(|l| nodeharbor_agent::storage::Selection {
+                id: Some(l.id.clone()),
+                expected_volume_id: Some(l.volume_id.clone()),
+                directory: l.directory.clone(),
+                allocation_gib: 30,
+            })
+            .collect();
+        let plan = agent.preview_storage(selected).await.unwrap();
+        assert!(plan.maintenance.is_some());
+        let mut policy = config.policy;
+        policy.resources.cpus = 1;
+        policy.resources.memory_mib = 2048;
+        policy.resources.disk_gib = plan.total_gib;
+        policy.idle_only = true;
+        agent
+            .save_policy_with_storage(policy.clone(), config.remote.revision, plan.clone())
+            .await
+            .unwrap();
+        let saved = open(&root, Arc::new(Runtime::default()))
+            .store
+            .load()
+            .unwrap();
+        assert_eq!(saved.policy, policy);
+        assert_eq!(saved.storage_locations, plan.locations);
+        assert_eq!(saved.remote.revision, config.remote.revision + 1);
+    }
+}

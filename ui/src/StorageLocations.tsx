@@ -1,3 +1,4 @@
+import { createStorageDraft, storageDraftDirty, type StorageDraft } from './sharingDraft';
 import { useId, useState, useRef, useEffect } from 'react';
 import type { Backend, Snapshot, StorageInventory, StoragePlan, StorageSelection, StorageReviewOptions } from './model';
 
@@ -51,12 +52,17 @@ export function StorageLocations({inventory,locations,onChange,onChoose,onDelete
  </section>;
 }
 
-export function StorageEditor({inventory,backend,onSaved,onDirtyChange,disabled}:{inventory:StorageInventory;backend?:Backend;onSaved?:(snapshot:Snapshot)=>void;onDirtyChange?:(dirty:boolean)=>void;disabled:boolean}) {
- const [locations,setLocations]=useState<StorageSelection[]>(()=>inventory.locations.map(({id,directory,allocationGib,volumeId})=>({id,directory,allocationGib,expectedVolumeId:volumeId})));
- const [dirty,setDirty]=useState(false);
+export function StorageEditor({inventory,backend,onSaved,onDirtyChange,disabled,draft,onDraftChange}:{draft?:StorageDraft;onDraftChange?:(draft:StorageDraft)=>void;inventory:StorageInventory;backend?:Backend;onSaved?:(snapshot:Snapshot)=>void;onDirtyChange?:(dirty:boolean)=>void;disabled:boolean}) {
+ const [localLocations,setLocalLocations]=useState<StorageSelection[]>(()=>inventory.locations.map(({id,directory,allocationGib,volumeId})=>({id,directory,allocationGib,expectedVolumeId:volumeId})));
+ const [localDirty,setDirty]=useState(false);
+ const locations=draft?.locations??localLocations;const dirty=draft?storageDraftDirty(draft):localDirty;
+ const setLocations=(next:StorageSelection[])=>{if(draft&&onDraftChange)onDraftChange({...draft,locations:next});else setLocalLocations(next);};
  useEffect(()=>{onDirtyChange?.(dirty);return()=>onDirtyChange?.(false);},[dirty,onDirtyChange]);
  const [plan,setPlan]=useState<StoragePlan|null>(null);const [busy,setBusy]=useState(false);const [error,setError]=useState('');
- const [confirmed,setConfirmed]=useState(false);const [temporaryDirectory,setTemporaryDirectory]=useState('');const [singleDiskGib,setSingleDiskGib]=useState(inventory.configuredGib||30);
+ const [confirmed,setConfirmed]=useState(false);const [localTemporaryDirectory,setLocalTemporaryDirectory]=useState('');const [localSingleDiskGib,setLocalSingleDiskGib]=useState(inventory.configuredGib||30);
+ const temporaryDirectory=draft?.temporaryDirectory??localTemporaryDirectory;const singleDiskGib=draft?.singleDiskGib??localSingleDiskGib;
+ const setTemporaryDirectory=(value:string)=>{if(draft&&onDraftChange)onDraftChange({...draft,temporaryDirectory:value});else setLocalTemporaryDirectory(value);};
+ const setSingleDiskGib=(value:number)=>{if(draft&&onDraftChange)onDraftChange({...draft,singleDiskGib:value});else setLocalSingleDiskGib(value);};
  const available=!!backend?.previewStorage&&!!backend?.applyStorage;
  const editable=available&&inventory.supported;
  const blocked=disabled||busy||!!inventory.operation;
@@ -66,7 +72,7 @@ export function StorageEditor({inventory,backend,onSaved,onDirtyChange,disabled}
   const saved=inventory.locations.map(l=>[l.id,l.directory,l.allocationGib,l.volumeId]);
   setDirty(JSON.stringify(selected)!==JSON.stringify(saved));setLocations(next);setPlan(null);setError('');setConfirmed(false);
  };
- const discard=()=>{setLocations(inventory.locations.map(({id,directory,allocationGib,volumeId})=>({id,directory,allocationGib,expectedVolumeId:volumeId})));setSingleDiskGib(inventory.configuredGib||30);setTemporaryDirectory('');setPlan(null);setError('');setConfirmed(false);setDirty(false);};
+ const discard=()=>{if(draft&&onDraftChange)onDraftChange(createStorageDraft(inventory));else {setLocations(inventory.locations.map(({id,directory,allocationGib,volumeId})=>({id,directory,allocationGib,expectedVolumeId:volumeId})));setSingleDiskGib(inventory.configuredGib||30);setTemporaryDirectory('');}setPlan(null);setError('');setConfirmed(false);setDirty(false);};
  async function review(options?:StorageReviewOptions){setBusy(true);setError('');setPlan(null);setConfirmed(false);try{
   const selected=options?.deleteAll?[]:locations;
   if(inventory.supported&&!options?.deleteAll&&!options?.restoreDisk&&selected.some(location=>!location.expectedVolumeId||!location.directory.trim()))throw new Error('Select a drive and a writable folder for every disk before review.');

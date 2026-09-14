@@ -84,6 +84,14 @@ jobs:
         run: python scripts/release.py stamp "$NODEHARBOR_VERSION" "$NODEHARBOR_COMMIT"
       - name: Required checks
         run: python scripts/check.py
+      - name: Install browser acceptance runtimes
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        working-directory: ui
+        run: npx playwright install --with-deps chromium webkit
+      - name: Verify the complete keyboard sharing setup
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        working-directory: ui
+        run: npm run e2e
       - name: Build native installers and worker tools
         run: python scripts/build.py "$BUILD_TARGET" "$NODEHARBOR_VERSION" "$NODEHARBOR_COMMIT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
