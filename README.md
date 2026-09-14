@@ -57,6 +57,19 @@ directory is on a different disk, without changing `TMPDIR`. The application dir
 must be writable by its owner; the normal installer uses `~/Applications`. Older
 installations need the current installer once to obtain the corrected updater.
 
+Lima also keeps your configured `TMPDIR`. If macOS denies access to an external
+temporary folder, open **System Settings → Privacy & Security → Files & Folders**,
+find **NodeHarbor** (older builds may appear as **nodeharbor**), and enable
+**Removable Volumes**. Fully quit and reopen the app before retrying. If that
+entry is unavailable, you can manually add the copy of NodeHarbor you launch to
+**Full Disk Access**, which grants broader file access. The normal installation
+is `~/Applications/NodeHarbor.app`. Grant access using your normal macOS account;
+NodeHarbor does not change directory permissions or redirect temporary files.
+Pilot macOS bundles use ad hoc signatures and explain their external-drive access
+in the system permission prompt. They remain without Developer ID signing or
+notarization, and updates may require you to grant access again. See
+[macOS permission validation](docs/macos-permission-validation.md).
+
 During preparation, **Your machine → Worker activity** shows the current step,
 elapsed time, live command output, and errors. It updates every second. Turn off
 **Follow latest output** to read earlier entries, or use **Copy logs** to share
