@@ -207,4 +207,6 @@ credentials, cluster credentials, or private deployment settings.
 
 Pilot desktop packages do not yet use Apple Developer ID distribution signing
 or a Windows distribution certificate. The release pipeline must verify all five
-desktop targets and the Android device/fleet qualification before publishing a release.
+desktop targets, signed Android device qualification, and the
+[reproducible acceptance scenarios](docs/reproducible-acceptance.md) before publishing
+a release. Run `make acceptance` locally; an existing private deployment is not required.

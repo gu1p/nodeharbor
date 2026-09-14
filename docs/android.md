@@ -113,20 +113,26 @@ Keep the production signing key backed up securely: updates must use the same
 identity. No key, password, device identity or fleet endpoint belongs in this repo.
 
 The trusted-main qualification job uses a dedicated self-hosted runner labeled
-`nodeharbor-android`. Set `NODEHARBOR_ANDROID_QUALIFICATION_CONFIG` in its private
-environment to a JSON file containing `dedicatedDevices: true`, a `devices` array
-of connected ARM64 API 33, 36 and 37 test devices (including a stock physical
-phone), `controller`, a fresh `enrollmentCode` when enrollment is needed,
-`kubernetesContext`, `namespace`, and `ciImage` pinned by SHA-256 with ARM64 Python 3.
-The existing kubeconfig, network and VPN policy are used unchanged. This runner
-must have ADB, Python, Android build-tools and kubectl available.
+`nodeharbor-android`. Set `NODEHARBOR_ANDROID_DEVICES_FILE` to a private JSON file
+with a `devices` array of connected ARM64 API 33, 36 and 37 test devices,
+including a stock physical phone. This runner needs ADB, Python and Android
+build-tools. Existing application signing identities and VPN policy are preserved.
 
-Qualification installs the exact signed APK, checks owner controls and VPN
-preservation, waits for normal fleet CI admission, schedules a real ARM64 job,
-checks its computation and owner node, and pauses through the app. The publish
-step requires this evidence in addition to all five desktop targets and controller
-image checks. Corresponding QEMU/GLib/libslirp sources, upstream licenses, patches
-and build scripts are published as a matching `-runtime-source.tar.gz` asset.
+The default release gate combines signed native device/upgrade checks with the
+exact-commit [reproducible controller and agent scenarios](reproducible-acceptance.md).
+It requires no existing deployment or infrastructure credentials. Reports clearly
+identify simulated infrastructure and do not claim live cluster qualification.
+All five desktop targets and controller image checks remain required. Corresponding
+QEMU/GLib/libslirp sources, licenses, patches and build scripts are published as
+a matching `-runtime-source.tar.gz` asset.
+
+For optional additional testing against an existing deployment, use
+`qualify_android.py --external-config PATH`. That private JSON includes
+`dedicatedDevices: true`, `devices`, `controller`, a fresh `enrollmentCode`,
+`kubernetesContext`, `namespace`, and `ciImage` pinned by SHA-256 with ARM64 Python 3.
+This mode additionally needs kubectl and retains the normal qualification window,
+actual ARM64 Kubernetes workload and owner-stop checks. It uses the supplied
+kubeconfig unchanged.
 
 ## Verification limits
 

@@ -50,6 +50,8 @@ signing secrets have been populated.
 
 Native desktop matrix results, the exact packaged Linux worker on two supported
 volumes, persistence and missing-drive behavior, signed Android device updates,
-API 36/37 coverage, and trusted-main fleet qualification remain required. No new
+API 36/37 coverage, and trusted-main qualification remain required. The release
+gate now uses [reproducible acceptance scenarios](reproducible-acceptance.md)
+with explicit infrastructure simulators; private deployment access is optional. No new
 release has been published by this change. Native qualification must identify the
 exact tested source commit and version before release delivery can be complete.

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Qualify the exact signed APK on dedicated devices and the unchanged fleet scheduler."""
+"""Qualify a signed APK with native devices and reproducible acceptance scenarios.
+
+External deployment qualification is optional via --external-config.
+"""
 import argparse
 import base64
 import json
@@ -10,7 +13,7 @@ import subprocess
 import time
 import uuid
 from build_android import certificate, previous_version, sdk_tool, verify_badging
-from release import checksum, validate_android_qualification, android_version_code
+from release import checksum, validate_android_qualification, validate_reproducible_acceptance, android_version_code
 from test_android import AndroidDevice, basic
 
 CI_LABEL = 'nodeharbor.node-restriction.kubernetes.io/ci'
@@ -63,7 +66,7 @@ def signed_upgrade(device, previous_apk, previous_tests, apk, tests, version):
     if device.vpn() != before: raise ValueError('The VPN policy changed during the signed upgrade')
 
 
-def qualify(folder, version, commit, config):
+def native_qualification(folder, version, commit, serials):
     prefix = f'nodeharbor-v{version}-aarch64-linux-android'
     manifest_path = folder / (prefix + '.json')
     manifest = json.loads(manifest_path.read_text())
@@ -73,8 +76,8 @@ def qualify(folder, version, commit, config):
     if (manifest['version'], manifest['commit']) != (version, commit): raise ValueError('Mismatched APK source identity')
     if checksum(apk) != next(asset['sha256'] for asset in manifest['assets'] if asset['name'].endswith('.apk')):
         raise ValueError('The APK changed after packaging')
-    if config.get('dedicatedDevices') is not True: raise ValueError('Use dedicated, authorized qualification devices')
-    devices = [AndroidDevice(serial) for serial in config['devices']]
+    if not serials or len(serials) != len(set(serials)): raise ValueError('Explicitly select distinct authorized Android devices')
+    devices = [AndroidDevice(serial) for serial in serials]
     if not {33, 36, 37}.issubset({device.api for device in devices}) or not any(device.physical for device in devices):
         raise ValueError('Connect dedicated ARM64 API 33, 36 and 37 devices, including a physical phone')
     previous = previous_version(version)
@@ -90,6 +93,12 @@ def qualify(folder, version, commit, config):
     for device in devices:
         signed_upgrade(device, previous_apk, baseline / 'android-tests.apk', apk, folder / 'android-tests.apk', version)
     reports = [basic(device, apk, folder / 'android-tests.apk') for device in devices]
+    return manifest_path, manifest, apk, devices, reports, previous
+
+
+def qualify(folder, version, commit, config):
+    if config.get('dedicatedDevices') is not True: raise ValueError('Use dedicated, authorized qualification devices')
+    manifest_path, manifest, apk, devices, reports, previous = native_qualification(folder, version, commit, config['devices'])
     phone = next(device for device in devices if device.physical)
     before = phone.vpn()
     provisioning = base64.b64encode(json.dumps({'controller':config['controller'],
@@ -125,7 +134,7 @@ def qualify(folder, version, commit, config):
         if 'NODEHARBOR_ARM64_CI_OK' not in kube(['logs', 'job/' + name]): raise ValueError('The actual ARM64 computation did not pass')
         phone.instrument(['FleetStopContract'], timeout=180)
         if phone.vpn() != before: raise ValueError('The phone VPN policy changed during the real worker test')
-        evidence = dict(version=version, commit=commit, apkSha256=checksum(apk), certificateSha256=certificate(apk),
+        evidence = dict(qualificationMode='external', version=version, commit=commit, apkSha256=checksum(apk), certificateSha256=certificate(apk),
                         signedRelease=True, physical=True, apiLevels=sorted({report['apiLevel'] for report in reports}),
                         ownerControlsPassed=True, vpnPreserved=True, ciQualified=True, arm64JobSucceeded=True,
                         upgradePassed=True, upgradeFromVersion=previous)
@@ -143,13 +152,47 @@ def qualify(folder, version, commit, config):
             if created: kube(['delete', 'job', name, '--wait=true', '--timeout=60s'])
 
 
+
+def qualify_reproducible(folder, version, commit, serials, acceptance_path):
+    acceptance = json.loads(acceptance_path.read_text())
+    # Reject incomplete, stale or dirty-source scenarios before any device install.
+    validate_reproducible_acceptance(acceptance, version, commit)
+    manifest_path, manifest, apk, devices, reports, previous = native_qualification(folder, version, commit, serials)
+    evidence = dict(qualificationMode='reproducible', version=version, commit=commit,
+                    apkSha256=checksum(apk), certificateSha256=certificate(apk), signedRelease=True,
+                    physical=any(device.physical for device in devices),
+                    apiLevels=sorted({report['apiLevel'] for report in reports}),
+                    ownerControlsPassed=all(report['ownerControlsPassed'] for report in reports),
+                    vpnPreserved=all(report['vpnPreserved'] for report in reports),
+                    nativeContractsPassed=all(report['passed'] for report in reports),
+                    upgradePassed=True, upgradeFromVersion=previous, acceptance=acceptance)
+    validate_android_qualification(evidence, version, commit, checksum(apk))
+    if evidence['certificateSha256'] != manifest['certificateSha256']:
+        raise ValueError('The tested APK signing identity changed')
+    manifest['qualification'] = evidence
+    manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+    (folder / 'android-qualification.json').write_text(json.dumps(evidence, indent=2) + '\n')
+    print('Signed Android native checks and reproducible controller/agent scenarios passed; infrastructure was simulated')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('folder', type=Path); parser.add_argument('version'); parser.add_argument('commit')
+    parser.add_argument('--serial', action='append', help='Authorized test device; repeat for API 33/36/37 coverage')
+    parser.add_argument('--acceptance-report', type=Path, help='Report from scripts/acceptance.py for this exact source')
+    parser.add_argument('--external-config', type=Path, help='Optional private deployment configuration for additional live qualification')
     args = parser.parse_args()
-    path = os.environ.get('NODEHARBOR_ANDROID_QUALIFICATION_CONFIG')
-    if not path: raise ValueError('Configure a private qualification file for dedicated Android devices and a real fleet')
-    qualify(args.folder, args.version, args.commit, json.loads(Path(path).read_text()))
+    if args.external_config:
+        if args.serial or args.acceptance_report: parser.error('--external-config cannot be combined with local scenario arguments')
+        qualify(args.folder, args.version, args.commit, json.loads(args.external_config.read_text()))
+    else:
+        serials = args.serial
+        device_file = os.environ.get('NODEHARBOR_ANDROID_DEVICES_FILE')
+        if not serials and device_file:
+            serials = json.loads(Path(device_file).read_text())['devices']
+        if not serials: parser.error('Select devices with --serial or NODEHARBOR_ANDROID_DEVICES_FILE; no deployment credentials are needed')
+        if not args.acceptance_report: parser.error('--acceptance-report is required; run scripts/acceptance.py first')
+        qualify_reproducible(args.folder, args.version, args.commit, serials, args.acceptance_report)
 
 
 if __name__ == '__main__': main()

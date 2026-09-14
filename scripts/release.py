@@ -33,12 +33,35 @@ def android_version_code(version: str) -> int:
         raise ValueError('Android version exceeds its supported version-code range')
     return code
 
+ACCEPTANCE_SCENARIOS = ('enrollment_authentication', 'preparation_failure_recovery',
+    'qualification_and_owner_controls', 'missing_storage_and_restart',
+    'revocation_and_reenrollment', 'infrastructure_http_contracts')
+
+def validate_reproducible_acceptance(evidence: dict, version: str, commit: str):
+    if (evidence.get('schemaVersion'), evidence.get('version'), evidence.get('commit')) != (1, version, commit):
+        raise ValueError('Acceptance scenarios must identify the exact source and version')
+    if evidence.get('dirtySource') is not False or evidence.get('infrastructure') != 'simulated' or evidence.get('nativeRuntimeTested') is not False:
+        raise ValueError('Reproducible evidence must identify clean source and explicitly simulated infrastructure')
+    scenarios = evidence.get('scenarios', {})
+    if not isinstance(scenarios, dict): raise ValueError('Acceptance scenarios are missing')
+    for name in ACCEPTANCE_SCENARIOS:
+        result = scenarios.get(name, {})
+        if not isinstance(result, dict) or result.get('passed') is not True or type(result.get('tests')) is not int or result['tests'] < 1:
+            raise ValueError('Acceptance scenario did not execute successfully: ' + name)
+
 def validate_android_qualification(evidence: dict, version: str, commit: str, apk_sha256: str):
     if (evidence.get('version'), evidence.get('commit'), evidence.get('apkSha256')) != (version, commit, apk_sha256):
         raise ValueError('Android qualification does not identify this exact APK and source')
-    required = ['signedRelease', 'physical', 'ownerControlsPassed', 'vpnPreserved', 'ciQualified', 'arm64JobSucceeded', 'upgradePassed']
+    required = ['signedRelease', 'physical', 'ownerControlsPassed', 'vpnPreserved', 'upgradePassed']
     if any(evidence.get(field) is not True for field in required):
-        raise ValueError('Android requires signed physical-device, owner-control, VPN and real ARM64 CI qualification')
+        raise ValueError('Android requires signed physical-device, owner-control, VPN and upgrade qualification')
+    mode = evidence.get('qualificationMode', 'external')
+    if mode == 'reproducible':
+        if evidence.get('nativeContractsPassed') is not True or evidence.get('ciQualified') is True or evidence.get('arm64JobSucceeded') is True:
+            raise ValueError('Native contracts must pass; simulated infrastructure cannot claim a live workload')
+        validate_reproducible_acceptance(evidence.get('acceptance', {}), version, commit)
+    elif mode != 'external' or evidence.get('ciQualified') is not True or evidence.get('arm64JobSucceeded') is not True:
+        raise ValueError('External qualification requires the actual qualified ARM64 workload')
     if android_version_code(evidence.get('upgradeFromVersion', '')) >= android_version_code(version):
         raise ValueError('Android qualification must verify an upgrade from a lower signed version')
     if not {33, 36, 37}.issubset(set(evidence.get('apiLevels', []))):
