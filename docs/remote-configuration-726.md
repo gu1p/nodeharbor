@@ -308,3 +308,10 @@ supported Debian/AppImage file mappings to place this independently verified
 runtime under `usr/libexec/nodeharbor/lima`, the standard private-executable
 layout. Both packaged launchers resolve that same directory. Preserve the
 upstream archive inventory and byte checks instead of accepting rewritten tools.
+
+Windows run 34817658078 (`d57bbaf`) passes all Rust tests with the test manifest,
+then Clippy rejects two Unix-only uses in `lima_storage.rs`: the directory builder's
+mutation and the metadata argument (`/tmp/nodeharbor-726-d57-windows.log`). Scope
+the mutable builder to the Unix permission block and explicitly consume metadata
+on other targets. Keep Unix owner/mode verification and unsupported-runtime
+rejection intact; do not suppress the warning policy.

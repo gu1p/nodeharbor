@@ -646,12 +646,14 @@ fn prepare_parent(location: &Location, device: &str, identity: &VolumeIdentity) 
 
 fn private_directory(path: &Path, create: bool) -> Result<()> {
     if create && std::fs::symlink_metadata(path).is_err() {
-        let mut builder = std::fs::DirBuilder::new();
+        let builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
-        {
+        let builder = {
             use std::os::unix::fs::DirBuilderExt;
+            let mut builder = builder;
             builder.mode(0o700);
-        }
+            builder
+        };
         builder
             .create(path)
             .context("Cannot create private worker storage directory")?;
@@ -666,6 +668,8 @@ fn private_directory(path: &Path, create: bool) -> Result<()> {
 }
 
 fn private_metadata(metadata: &std::fs::Metadata) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = metadata;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
