@@ -112,7 +112,15 @@ def run(args):
             physical_key(symbol, False)
             if shift:
                 physical_key(0xffe1, False)
-        time.sleep(.15)
+        # XTest input and AT-SPI actions use separate queues. Wait for WebKit
+        # to consume every key before an accessibility action changes pages.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            current = Atspi.Text.get_text(control(name, 'entry'), 0, -1)
+            if current == str(value):
+                return
+            time.sleep(.05)
+        raise AssertionError(f'Keyboard input did not reach {name}: {current!r}')
 
     def key(value):
         physical_key(value, True)

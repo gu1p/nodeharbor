@@ -3,6 +3,7 @@ test('an owner selects two drives and customizes independent allocations using o
  // WebKit on macOS follows the host's Option-Tab shortcut for all controls.
  const tab=process.platform==='darwin'&&browserName==='webkit'?'Alt+Tab':'Tab';
  await page.goto('/tests/drive-picker.html');
+ await expect(page.getByRole('button',{name:'Add drive'})).toBeVisible();
  await page.keyboard.press(tab);
  await expect(page.getByRole('button',{name:'Add drive'})).toBeFocused();
  await page.keyboard.press('Enter');
