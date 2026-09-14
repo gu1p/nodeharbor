@@ -68,6 +68,13 @@ def bundle_configuration(target):
         bundle['linux']={'deb':{'depends':['libwebkit2gtk-4.1-0','libayatana-appindicator3-1','libxss1',emulator,firmware,'qemu-utils','openssh-client','gzip']}}
     return bundle
 
+def bundle_environment(target,environ):
+    env=dict(environ)
+    if 'linux' in target:
+        # linuxdeploy otherwise strips the pinned Lima executables in AppImages.
+        env['NO_STRIP']='1'
+    return env
+
 def check_vm_runtime(application,platform='macos'):
     if platform=='macos':directory=Path(application)/'Contents/Resources/lima'
     elif platform=='linux':directory=Path(application)/'usr/lib/NodeHarbor/lima'

@@ -111,3 +111,20 @@ fn old_installations_have_non_destructive_recovery_and_disabled_storage_persists
             .disabled
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn backup_review_rejects_aliases_of_directories_that_will_be_replaced() {
+    use nodeharbor_agent::storage_lifecycle::require_backup_outside;
+    let root = tempfile::tempdir().unwrap();
+    let actual = root.path().join("actual");
+    let alias = root.path().join("alias");
+    std::fs::create_dir(&actual).unwrap();
+    std::os::unix::fs::symlink(&actual, &alias).unwrap();
+    assert!(require_backup_outside(&actual, &alias).is_err());
+    assert!(require_backup_outside(&actual.join("backup"), &alias).is_err());
+    assert!(require_backup_outside(&actual.join("new"), &alias.join("new")).is_err());
+    require_backup_outside(root.path(), &alias.join("not-yet/created")).unwrap();
+    assert!(!actual.join("new").exists());
+    assert!(!actual.join("not-yet").exists());
+}

@@ -8,7 +8,7 @@ import shutil
 import subprocess
 from release import TARGETS, collect
 from package_smoke import smoke_packages
-from vm_runtime import bundle_configuration
+from vm_runtime import bundle_configuration, bundle_environment
 
 ROOT=Path(__file__).resolve().parents[1]
 def run(command,cwd=ROOT,env=None):
@@ -37,7 +37,7 @@ def main():
     tauri=ROOT/'ui/node_modules/.bin'/('tauri.cmd' if os.name=='nt' else 'tauri')
     command=[tauri,'build','--target',args.target,'--bundles',bundles,'--config',config]
     if args.debug:command.append('--debug')
-    run(command,cwd=ROOT/'desktop',env=env)
+    run(command,cwd=ROOT/'desktop',env=bundle_environment(args.target,env))
     if args.debug:return
     if 'linux' in args.target:
         run(['cargo','build','--locked','--release','-p','nodeharbor-controller','--target',args.target],env=env)

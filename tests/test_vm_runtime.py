@@ -21,6 +21,17 @@ def archive(path, entries):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 class VmRuntime(unittest.TestCase):
+    def test_linux_bundling_preserves_verified_runtime_bytes_without_changing_host_environment(self):
+        runtime=module()
+        host={'PATH':'owner-path', 'NO_STRIP':'owner-value'}
+        for target in ['aarch64-unknown-linux-gnu','x86_64-unknown-linux-gnu']:
+            env=runtime.bundle_environment(target,host)
+            self.assertEqual(env['NO_STRIP'],'1')
+            self.assertEqual(env['PATH'],'owner-path')
+        for target in ['aarch64-apple-darwin','x86_64-pc-windows-msvc']:
+            self.assertEqual(runtime.bundle_environment(target,host),host)
+        self.assertEqual(host,{'PATH':'owner-path','NO_STRIP':'owner-value'})
+
     def test_linux_runtime_archives_are_pinned_for_both_native_architectures(self):
         runtime=module()
         expected={

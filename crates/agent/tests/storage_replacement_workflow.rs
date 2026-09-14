@@ -166,7 +166,9 @@ async fn multipass_replacement_verifies_before_deletion_and_resumes_restore_afte
         json!({"version":1,"deviceId":id,"name":host.name}).to_string(),
     )
     .unwrap();
-    std::fs::create_dir(&host.directory).unwrap();
+    let actual = directory.path().join("daemon-data");
+    std::fs::create_dir(&actual).unwrap();
+    std::os::unix::fs::symlink(&actual, &host.directory).unwrap();
     let mut constrained = volumes.clone();
     constrained[0].available_gib = 12;
     let constrained_agent =

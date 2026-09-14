@@ -322,15 +322,19 @@ mod storage_tests {
     }
     #[test]
     fn replacement_configuration_is_idempotent_and_preserves_unrelated_provisioning() {
-        let mut config = configuration_with_storage(
+        let result = configuration_with_storage(
             OWNER,
             &nodeharbor_core::Resources::default(),
             &json!([]),
             &[disk("nhold", 30)],
             OWNER,
             1,
-        )
-        .unwrap();
+        );
+        if cfg!(target_os = "windows") {
+            assert!(result.unwrap_err().to_string().contains("macOS or Linux"));
+            return;
+        }
+        let mut config = result.unwrap();
         let unrelated = json!({"mode":"system","script":"echo unrelated"});
         config["provision"]
             .as_array_mut()

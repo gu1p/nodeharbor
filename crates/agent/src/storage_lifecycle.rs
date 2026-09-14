@@ -7,6 +7,49 @@ use std::{fs::File, io::Read, path::Path};
 
 pub const GIB: u64 = 1 << 30;
 
+/// A backup must survive deletion of the managed VM and image directories.
+/// Resolve aliases even when a forbidden directory has not been created yet.
+pub fn require_backup_outside(backup: &Path, replaced: &Path) -> Result<()> {
+    anyhow::ensure!(
+        replaced.is_absolute()
+            && !replaced
+                .components()
+                .any(|part| part == std::path::Component::ParentDir),
+        "Cannot verify the managed storage directory"
+    );
+    let backup = crate::storage::canonical_directory(backup)?;
+    let mut ancestor = replaced;
+    let mut missing = Vec::new();
+    let mut resolved = loop {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => {
+                break ancestor
+                    .canonicalize()
+                    .context("Cannot resolve managed storage directory")?
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(
+                    ancestor
+                        .file_name()
+                        .context("Cannot resolve managed storage directory")?,
+                );
+                ancestor = ancestor
+                    .parent()
+                    .context("Cannot resolve managed storage directory")?;
+            }
+            Err(error) => return Err(error).context("Cannot inspect managed storage directory"),
+        }
+    };
+    for component in missing.into_iter().rev() {
+        resolved.push(component);
+    }
+    anyhow::ensure!(
+        !backup.starts_with(resolved),
+        "Choose a backup folder outside the managed VM and image directories that will be replaced"
+    );
+    Ok(())
+}
+
 /// Read-only runtime evidence; never included in ordinary heartbeats.
 pub struct ReplacementSpace {
     pub directory: std::path::PathBuf,

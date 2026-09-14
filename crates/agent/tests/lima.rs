@@ -93,14 +93,24 @@ fn budget() -> Resources {
 }
 
 #[tokio::test]
-async fn lima_preparation_uses_native_networking_without_host_files_or_personal_keys() {
+async fn lima_preparation_respects_platform_support_and_native_isolation() {
     let dir = tempfile::tempdir().unwrap();
     let host = Arc::new(LimaHost::default());
     let vm = Vm::managed(ID, dir.path(), host.clone()).unwrap();
     assert!(!vm.info().await.unwrap().installed);
-    vm.create(&budget(), dir.path(), guest_files())
-        .await
-        .unwrap();
+    let result = vm.create(&budget(), dir.path(), guest_files()).await;
+    if cfg!(target_os = "windows") {
+        assert!(result.unwrap_err().to_string().contains("macOS or Linux"));
+        assert!(!vm.has_receipt().unwrap());
+        assert!(host
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|args| args[0] == "list"));
+        return;
+    }
+    result.unwrap();
     assert!(vm.info().await.unwrap().reachable);
     let config = host.configuration.lock().unwrap().clone().unwrap();
     assert_eq!(
@@ -157,6 +167,7 @@ async fn lima_preparation_uses_native_networking_without_host_files_or_personal_
         .any(|a| matches!(a[0].as_str(), "exec" | "launch" | "set")));
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test]
 async fn failed_lima_creation_keeps_an_ownership_receipt_and_can_be_stopped() {
     let dir = tempfile::tempdir().unwrap();

@@ -924,7 +924,9 @@ impl Agent {
             if let Some((space, _)) = replacement {
                 forbidden.push(space.directory.clone());
             }
-            anyhow::ensure!(!forbidden.iter().any(|dir| path.starts_with(dir)), "Choose a backup folder outside the managed VM and image directories that will be replaced");
+            for directory in forbidden {
+                require_backup_outside(&path, &directory)?;
+            }
             let Some(volume) = crate::storage::volume_for(&path, &inventory.volumes) else {
                 continue;
             };

@@ -44,7 +44,15 @@ fn empty_selection_resolves_to_the_managed_directory_without_creating_it() {
     let volumes = vec![volume(root.path(), "primary", "pool", 100)];
     let result = plan(&[], &directory, 30, &volumes).unwrap();
     assert_eq!(result.len(), 1);
-    assert_eq!(result[0].directory, directory.to_str().unwrap());
+    assert_eq!(
+        result[0].directory,
+        root.path()
+            .canonicalize()
+            .unwrap()
+            .join("managed")
+            .to_str()
+            .unwrap()
+    );
     assert_eq!(result[0].volume_id, "primary");
     assert_eq!(result[0].allocation_gib, 30);
     assert!(!directory.exists());

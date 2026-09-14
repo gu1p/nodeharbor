@@ -247,3 +247,41 @@ The next full check exposed a remaining fixture expectation: the Lima command
 assertion still expected two CPUs/4 GiB after the fixture moved to one CPU/2 GiB.
 Recorded in `/tmp/nodeharbor-726-ci-fixes-check-3.log`; update the exact expected
 command while keeping the required disk size and applied-value checks.
+
+Run 34815111911 (`df6b036`) advances past capacity lookup, then macOS reports
+"original storage volume ... replaced" in the heartbeat fixture. Reproduced
+locally with `TMPDIR=/tmp cargo test --locked -p nodeharbor-agent --test heartbeat
+selected_volume_capacity` (`/tmp/nodeharbor-726-heartbeat-alias-red.log`). The
+fixture hand-wrote an aliased saved location, unlike the local storage API which
+persists canonical paths. Canonicalize the fixture root; preserve exact saved
+location comparison and replacement-volume rejection in production.
+
+The same run's Windows checks now pass Python/UI and reach Rust. The Lima
+replacement fixture unwraps a successful configuration on Windows, although
+Lima is unsupported there (`/tmp/nodeharbor-726-df6b036-windows.log`). Keep the
+native success checks on macOS/Linux and assert rejection before mutation on
+Windows. The initial-creation integration needs the same platform contract;
+interrupted native creation runs only where the runtime is supported.
+
+An explicit aliased-temp run found the storage-allocation unit's expected path
+was also noncanonical (`/tmp/nodeharbor-726-storage-alias-red.log`); compare the
+canonical parent plus the new child directory. A full run with `/tmp` additionally
+hits the existing preparation fixture's physical capacity guard: this local
+system volume has only 17 GiB free. Keep that guard, and exercise aliased paths
+on the normal capacious test volume instead.
+
+The full alias run exposed a production backup-review bug, not just a fixture:
+`multipass_replacement_verifies_before_deletion_and_resumes_restore_after_restart`
+accepted a backup inside an aliased daemon directory (expected rejection at line
+199, `/tmp/nodeharbor-726-platform-alias-check.log`). Canonical candidate paths
+were compared against unresolved forbidden paths. Add an always-aliased runtime
+fixture and a unit contract for existing aliases and missing child directories;
+resolve both sides before checking the deletion boundary, without filesystem
+mutation or relaxing volume identity checks.
+
+Linux ARM64 now verifies the Debian package, then rejects the AppImage because
+`bin/limactl` no longer matches the pinned runtime checksum
+(`/tmp/nodeharbor-726-df6b036-linux-arm.log`). The AppImage linuxdeploy tool strips
+embedded binaries by default. Its supported `NO_STRIP` setting preserves the
+pinned runtime; apply it only to the Linux bundler subprocess environment and
+retain checksum verification for every packaged component.

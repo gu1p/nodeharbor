@@ -79,14 +79,15 @@ async fn selected_volume_capacity_controls_permission_without_sending_host_paths
         .into_future(),
     );
     let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
     let agent = Agent::open_with_runner_and_volumes(
-        dir.path(),
+        root.as_path(),
         Arc::new(NoVmCommands),
         vec![nodeharbor_agent::storage::Volume {
             id: "fixture-volume".into(),
             capacity_pool: "fixture-pool".into(),
             label: "Test volume".into(),
-            mount_point: dir.path().to_string_lossy().into(),
+            mount_point: root.as_path().to_string_lossy().into(),
             filesystem: "apfs".into(),
             available_gib: 1_000_100,
             configured_gib: 0,
@@ -113,7 +114,7 @@ async fn selected_volume_capacity_controls_permission_without_sending_host_paths
             c.storage_locations = vec![nodeharbor_agent::storage::Location {
                 id: "nhfixture".into(),
                 volume_id: "fixture-volume".into(),
-                directory: dir.path().join("storage").to_string_lossy().into(),
+                directory: root.as_path().join("storage").to_string_lossy().into(),
                 allocation_gib: 1_000_000,
             }];
             Ok(())
@@ -130,7 +131,7 @@ async fn selected_volume_capacity_controls_permission_without_sending_host_paths
     assert!(
         !encoded.contains("fixture-volume")
             && !encoded.contains("fixture-pool")
-            && !encoded.contains(dir.path().to_str().unwrap())
+            && !encoded.contains(root.as_path().to_str().unwrap())
     );
     server.abort();
 }
