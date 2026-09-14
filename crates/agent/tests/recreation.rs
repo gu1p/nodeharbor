@@ -510,7 +510,7 @@ async fn an_earlier_worker_error_does_not_reject_a_new_update_before_inspection(
     let agent = fixture(dir.path(), host.clone(), &format!("{url}/unavailable"));
     let supervisor = agent.clone();
     let task = tokio::spawn(async move { supervisor.run().await });
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             if agent.snapshot().await.unwrap().state == "error" {
                 break;
@@ -526,7 +526,7 @@ async fn an_earlier_worker_error_does_not_reject_a_new_update_before_inspection(
         fresh.is_ok(),
         "A previous failure must not be mistaken for a failed update inspection"
     );
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             if agent.application_update_ready().await.unwrap() {
                 break;

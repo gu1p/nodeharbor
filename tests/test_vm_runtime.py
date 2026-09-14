@@ -38,7 +38,7 @@ class VmRuntime(unittest.TestCase):
             with self.subTest(target=target),patch.object(runtime,'bundle_lima',return_value=Path('/verified/lima')) as bundled:
                 config=runtime.bundle_configuration(target)
                 bundled.assert_called_once_with(target)
-                self.assertEqual(config['resources'],{'/verified/lima':'lima/'})
+                self.assertEqual(config['resources'],{str(Path('/verified/lima')):'lima/'})
                 dependencies=config['linux']['deb']['depends']
                 for dependency in [emulator,'qemu-utils','openssh-client','gzip','libwebkit2gtk-4.1-0','libayatana-appindicator3-1','libxss1']:
                     self.assertIn(dependency,dependencies)
@@ -57,7 +57,7 @@ class VmRuntime(unittest.TestCase):
         for package in [Path('/package/deb'),Path('/package/squashfs-root')]:
             with self.subTest(package=package),patch.object(runtime,'verify_bundle') as verify,patch.object(runtime.subprocess,'check_output',return_value='limactl version 2.2.0\n') as command:
                 runtime.check_vm_runtime(package,platform='linux')
-                directory=package/'usr/lib/nodeharbor/lima'
+                directory=package/'usr/lib/NodeHarbor/lima'
                 verify.assert_called_once_with(directory)
                 self.assertEqual(command.call_args.args[0],[str(directory/'bin/limactl'),'--version'])
 
@@ -94,5 +94,5 @@ class VmRuntime(unittest.TestCase):
         with patch.object(runtime,'bundle_lima',return_value=Path('/verified/lima')) as bundled:
             config=runtime.bundle_configuration('aarch64-apple-darwin')
         bundled.assert_called_once_with('aarch64-apple-darwin')
-        self.assertEqual(config['resources'],{'/verified/lima':'lima/'})
+        self.assertEqual(config['resources'],{str(Path('/verified/lima')):'lima/'})
         self.assertNotIn('linux',config)

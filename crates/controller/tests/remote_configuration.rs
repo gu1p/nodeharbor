@@ -188,6 +188,8 @@ async fn a_real_agent_receives_and_acknowledges_an_edit_over_the_authenticated_c
     let (_, view) = call(&app, &path, Some("admin"), None).await;
     let mut request = edit(view["report"]["revision"].as_u64().unwrap());
     request["policy"]["idleOnly"] = json!(true);
+    request["policy"]["resources"]["cpus"] = json!(1);
+    request["policy"]["resources"]["memoryMib"] = json!(2048);
     assert_eq!(
         call(&app, &path, Some("admin"), Some(request.clone()))
             .await

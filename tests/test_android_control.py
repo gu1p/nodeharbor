@@ -18,6 +18,13 @@ OWNER = '9511182e-9c48-4d20-a15b-1da8bb441386'
 
 
 class AndroidGuestControlContract(unittest.TestCase):
+    def setUp(self):
+        # The protocol runs in an ARM64 Linux guest, independent of the test host.
+        uname = mock.patch.object(control.os, 'uname', create=True,
+                                  return_value=mock.Mock(machine='aarch64'))
+        uname.start()
+        self.addCleanup(uname.stop)
+
     def test_storage_work_is_asynchronous_and_never_accepts_arbitrary_commands(self):
         owner_request = dict(id=1, deviceId=OWNER, command='storage', storage=dict(deviceId=OWNER,
             operation='00000000-0000-4000-8000-000000000001', action='backup',

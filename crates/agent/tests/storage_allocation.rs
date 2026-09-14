@@ -1,6 +1,21 @@
 use nodeharbor_agent::storage::{plan, Selection, Volume};
 use std::path::Path;
 
+#[cfg(unix)]
+#[test]
+fn system_disk_capacity_resolves_an_existing_directory_alias() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("data");
+    let alias = root.path().join("alias");
+    std::fs::create_dir(&data).unwrap();
+    std::os::unix::fs::symlink(&data, &alias).unwrap();
+    let mut volumes = vec![volume(&data, "fixture", "fixture-pool", 100)];
+    nodeharbor_agent::storage::reserve_system_disk(&mut volumes, &alias, 16).unwrap();
+    assert_eq!(volumes[0].available_gib, 84);
+    std::fs::remove_file(&alias).unwrap();
+    assert!(nodeharbor_agent::storage::reserve_system_disk(&mut volumes, &alias, 16).is_err());
+}
+
 fn volume(root: &Path, id: &str, pool: &str, free: u64) -> Volume {
     Volume {
         id: id.into(),

@@ -70,7 +70,7 @@ def bundle_configuration(target):
 
 def check_vm_runtime(application,platform='macos'):
     if platform=='macos':directory=Path(application)/'Contents/Resources/lima'
-    elif platform=='linux':directory=Path(application)/'usr/lib/nodeharbor/lima'
+    elif platform=='linux':directory=Path(application)/'usr/lib/NodeHarbor/lima'
     else:raise ValueError('This platform has no bundled Lima runtime')
     verify_bundle(directory)
     output=subprocess.check_output([str(directory/'bin/limactl'),'--version'],text=True,timeout=30).strip()

@@ -204,3 +204,46 @@ New behavioral/UI contracts, before storage transport implementation:
 - The CLI replacement action also passes the revision from its settings read to
   the already-tested versioned replacement API, matching the desktop's conflict
   protection. No local confirmation or native approval is bypassed.
+
+
+## Remote-main release follow-up (2026-09-14)
+
+The owner pushed `fa6f7e5` and authorized monitoring, fixes, and publication.
+Before fixes, Native release run 34813759192 failed:
+- Linux x86_64 remote-configuration integration: ten cases exceeded the runner's
+  CPU allowance (fixtures requested two or three CPUs without leaving one for
+  the host). Use the minimum supported CPU/memory allocation in these fixtures;
+  retain physical validation and all mutation/consent assertions.
+- macOS ARM64 heartbeat integration: the application system-disk volume could
+  not be resolved through a noncanonical temporary-directory alias.
+- Windows Python contracts: guest `os.uname` unavailable on the test host, and
+  Unix literal path assertions differed from native `Path` output. Model the
+  ARM64 Linux guest API and compare native paths without dropping the contracts.
+- Linux package verification already failed on previous main run 34807630731:
+  Tauri installs resources under its product name, `usr/lib/NodeHarbor`; runtime
+  lookup and verification incorrectly expected lowercase `nodeharbor`.
+- Android signing fails because the repository has no Android signing secrets.
+  GitHub also reports zero qualification runners. Deployment requires the
+  existing signing identity and physical-device qualification; neither is
+  replaced by a development key or skipped qualification.
+
+Regression sequence: existing behavioral/packaging contracts above first, then
+resource-layout and aliased-volume unit regressions, then existing controller and
+agent integration with valid small-host fixtures, before production fixes.
+
+Local red evidence: `make check` failed the two Linux package-directory
+assertions; the runtime-layout Rust contract failed on the case-sensitive product
+directory, and the new alias capacity test failed with "system-disk volume is
+unavailable". Logs: `/tmp/nodeharbor-726-ci-regressions-red.log`,
+`/tmp/nodeharbor-726-ci-unit-red.log`, `/tmp/nodeharbor-726-ci-alias-red.log`.
+
+The first full fix check also reproduced the previously observed recreation test
+flake: the three-second setup wait expired while polling snapshots with native
+hardware/storage discovery (`/tmp/nodeharbor-726-ci-fixes-check.log`). The test's
+bounded synchronization waits now allow 30 seconds under parallel host load;
+its error-before-update ordering and readiness assertions remain unchanged.
+No production restart, owner deadline, or health timeout is changed.
+The next full check exposed a remaining fixture expectation: the Lima command
+assertion still expected two CPUs/4 GiB after the fixture moved to one CPU/2 GiB.
+Recorded in `/tmp/nodeharbor-726-ci-fixes-check-3.log`; update the exact expected
+command while keeping the required disk size and applied-value checks.

@@ -7,7 +7,14 @@ fn command(revision: u64) -> ConfigurationCommand {
             operation: None,
             request_id: "request-726".into(),
             expected_revision: revision,
-            policy: nodeharbor_core::Policy::default(),
+            policy: nodeharbor_core::Policy {
+                resources: nodeharbor_core::Resources {
+                    cpus: 1,
+                    memory_mib: 2048,
+                    disk_gib: 30,
+                },
+                ..Default::default()
+            },
             acknowledge_interruption: true,
         },
         actor: "administrator@example.test".into(),
@@ -343,8 +350,8 @@ async fn remote_resource_changes_stop_the_owned_worker_then_report_the_acknowled
     agent.set_remote_consent(true).await.unwrap();
     let mut request = command(agent.configuration_report().unwrap().revision);
     request.edit.policy.resources = nodeharbor_core::Resources {
-        cpus: 3,
-        memory_mib: 6144,
+        cpus: 1,
+        memory_mib: 2048,
         disk_gib: 30,
     };
     let desired = request.edit.policy.resources.clone();
@@ -379,7 +386,7 @@ async fn revocation_during_runtime_application_stops_subsequent_commands_and_pre
     let agent = owned_agent(dir.path(), host.clone());
     agent.set_remote_consent(true).await.unwrap();
     let mut request = command(agent.configuration_report().unwrap().revision);
-    request.edit.policy.resources.cpus = 3;
+    request.edit.policy.resources.cpus = 1;
     agent.receive_configuration(request).unwrap();
     let task = {
         let agent = agent.clone();
@@ -566,7 +573,7 @@ async fn lima_disk_growth_uses_owned_runtime_storage_and_returns_effective_value
         .lock()
         .unwrap()
         .iter()
-        .any(|a| a == &["edit", "worker", "--cpus=2", "--memory=4", "--disk=35"]));
+        .any(|a| a == &["edit", "worker", "--cpus=1", "--memory=2", "--disk=35"]));
 }
 
 #[tokio::test]

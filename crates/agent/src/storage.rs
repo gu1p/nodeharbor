@@ -181,6 +181,12 @@ pub(crate) fn canonical_directory(path: &Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn volume_for<'a>(path: &Path, volumes: &'a [Volume]) -> Option<&'a Volume> {
+    // Native inventory uses canonical mount points. Resolve existing aliases
+    // (including macOS /var) before matching, without recreating missing mounts.
+    let path = path
+        .canonicalize()
+        .or_else(|_| canonical_directory(path))
+        .ok()?;
     #[cfg(target_os = "macos")]
     if volumes
         .iter()
