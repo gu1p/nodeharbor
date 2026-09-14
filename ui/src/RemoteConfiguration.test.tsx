@@ -142,3 +142,15 @@ it('shows previous, requested and acknowledged storage choices with the administ
  const table=screen.getByRole('table',{name:'Storage changed by admin@example.test'});
  expect(table).toHaveTextContent(/Previous.*Requested.*Node acknowledgment/);expect(table).toHaveTextContent('30 GiB');expect(table).toHaveTextContent('45 GiB');
 });
+
+it('keeps remote policy review from silently ignoring an unapplied remote storage draft',async()=>{
+ const storage=storageInventory();const backend=api(true,{configuration:vi.fn().mockResolvedValue({online:true,report:{...report(),storage,capabilities:{...report().capabilities,storage:true}},requests:[]})});
+ const user=userEvent.setup();render(<App backend={backend}/>);
+ await user.click(await screen.findByRole('button',{name:'Configure Office node'}));
+ await user.click(await screen.findByRole('button',{name:'Add drive'}));
+ expect(screen.getByRole('button',{name:'Review configuration'})).toBeDisabled();
+ expect(screen.getByRole('button',{name:'Review configuration'})).toHaveAccessibleDescription(/review and apply.*below/i);
+ await user.click(screen.getByRole('button',{name:'Discard storage changes'}));
+ expect(screen.getByRole('button',{name:'Review configuration'})).toBeEnabled();
+ expect(backend.configureDevice).not.toHaveBeenCalled();
+});
