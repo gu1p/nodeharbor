@@ -18,6 +18,32 @@ OWNER = '9511182e-9c48-4d20-a15b-1da8bb441386'
 
 
 class AndroidGuestControlContract(unittest.TestCase):
+    def test_storage_work_is_asynchronous_and_never_accepts_arbitrary_commands(self):
+        owner_request = dict(id=1, deviceId=OWNER, command='storage', storage=dict(deviceId=OWNER,
+            operation='00000000-0000-4000-8000-000000000001', action='backup',
+            previousPoolId='00000000-0000-4000-8000-000000000002'))
+        self.assertEqual(control.validate_request(owner_request, OWNER), owner_request)
+        for payload in [dict(owner_request['storage'], action='exec'), dict(owner_request['storage'], path='/other'),
+                        dict(owner_request['storage'], deviceId='00000000-0000-4000-8000-000000000002')]:
+            with self.assertRaises(ValueError): control.validate_request(dict(owner_request, storage=payload), OWNER)
+        guest = control.Guest(OWNER)
+        with mock.patch.object(control.threading, 'Thread') as thread:
+            guest.start_storage(owner_request['storage'])
+            self.assertTrue(guest.preparing)
+            thread.return_value.start.assert_called_once()
+            self.assertEqual(control.validate_request(dict(id=2, deviceId=OWNER, command='lease'), OWNER)['command'], 'lease')
+            with self.assertRaises(ValueError): guest.configure({'deviceId': OWNER})
+
+    def test_workload_inventory_preserves_readable_identity_and_system_components(self):
+        value = {'items': [
+            {'state': 'SANDBOX_READY', 'metadata': {'uid': 'job-uid', 'namespace': 'jobs', 'name': 'build-worker'}},
+            {'state': 'SANDBOX_NOTREADY', 'metadata': {'uid': 'probe-uid', 'namespace': 'nodeharbor-system', 'name': 'nodeharbor-probe-abc'}},
+        ]}
+        self.assertEqual(control.pod_inventory(json.dumps(value)), [
+            {'uid': 'job-uid', 'namespace': 'jobs', 'name': 'build-worker', 'state': 'Running'},
+            {'uid': 'probe-uid', 'namespace': 'nodeharbor-system', 'name': 'nodeharbor-probe-abc', 'state': 'Starting'},
+        ])
+
     def test_early_owner_renewal_is_atomic_without_starting_another_interpreter(self):
         with tempfile.TemporaryDirectory() as directory:
             lease = Path(directory) / 'run/lease'
@@ -38,14 +64,14 @@ class AndroidGuestControlContract(unittest.TestCase):
         guest.configured = False
         # A unit activation and its code must agree before readiness. Replacing
         # the Python file alone does not update a running process's unit ordering.
-        with mock.patch.dict(control.os.environ, {'NODEHARBOR_CONTROL_UNIT_REVISION': '4'}):
-            self.assertEqual(guest.status()['controlRevision'], '4')
+        with mock.patch.dict(control.os.environ, {'NODEHARBOR_CONTROL_UNIT_REVISION': '6'}):
+            self.assertEqual(guest.status()['controlRevision'], '6')
 
     def test_new_code_under_a_legacy_unit_answers_without_advertising_readiness(self):
         guest = control.Guest(OWNER)
         for configured in [False, True]:
             guest.configured = configured
-            for revision in ['', '2', '3', 'unexpected']:
+            for revision in ['', '2', '3', '4', '5', 'unexpected']:
                 with self.subTest(revision=revision, configured=configured), mock.patch.dict(control.os.environ, {'NODEHARBOR_CONTROL_UNIT_REVISION': revision}), \
                         mock.patch.object(control.subprocess, 'run', side_effect=AssertionError('Early status must not block owner leases')):
                     status = guest.status()
@@ -66,7 +92,7 @@ class AndroidGuestControlContract(unittest.TestCase):
     def test_unavailable_service_status_never_claims_a_running_or_empty_worker(self):
         guest = control.Guest(OWNER)
         guest.configured = True
-        with mock.patch.dict(control.os.environ, {'NODEHARBOR_CONTROL_UNIT_REVISION': '4'}), \
+        with mock.patch.dict(control.os.environ, {'NODEHARBOR_CONTROL_UNIT_REVISION': '6'}), \
                 mock.patch.object(control.subprocess, 'run', side_effect=control.subprocess.TimeoutExpired('systemctl', 10)) as command:
             status = guest.status()
         command.assert_called_once()

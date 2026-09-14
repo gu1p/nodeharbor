@@ -115,11 +115,13 @@ impl ApiClient {
                 request = request.header("traceparent", parent);
             }
         }
-        if let Some(body) = body {
-            request = request.json(&body);
-        }
+        // Set the media type before json(), which supplies application/json only
+        // when absent. header() appends; calling it afterwards sends two types.
         if method == Method::PATCH {
             request = request.header("content-type", "application/merge-patch+json");
+        }
+        if let Some(body) = body {
+            request = request.json(&body);
         }
         let mut response = request
             .send()
@@ -427,6 +429,40 @@ impl Cluster for Provisioner {
             "netbirdSetupKey":setup_key,"serverUrl":self.config.server_url,"k3sToken":format!("K10{}::{token_id}.{token_secret}",self.config.ca_hash),
             "expiresAt":expires_at,"runtime":runtime}),
         )
+    }
+    async fn maintenance(&self, device: &DeviceIdentity) -> Result<Value> {
+        anyhow::ensure!(
+            self.node(device).await?.is_some(),
+            "The enrolled worker is not registered in Kubernetes"
+        );
+        self.kube.call(Method::PATCH, &format!("/api/v1/nodes/{}", device.node_name()), Some(json!({
+            "spec":{"unschedulable":true},"metadata":{"labels":{CI_LABEL:Value::Null,SERVICES_LABEL:Value::Null}}
+        }))).await?;
+        let system_pods = self.probe_pod_uids(device).await?;
+        let pods = self
+            .kube
+            .call(
+                Method::GET,
+                &format!(
+                    "/api/v1/pods?fieldSelector=spec.nodeName%3D{}",
+                    device.node_name()
+                ),
+                None,
+            )
+            .await?;
+        let workloads = pods["items"]
+            .as_array()
+            .context("Kubernetes returned no workload inventory")?
+            .iter()
+            .filter(|pod| {
+                !["Succeeded", "Failed"]
+                    .contains(&pod["status"]["phase"].as_str().unwrap_or_default())
+                    && !pod["metadata"]["uid"]
+                        .as_str()
+                        .is_some_and(|uid| system_pods.iter().any(|system| system == uid))
+            })
+            .count();
+        Ok(json!({"workloads":workloads,"systemPodUids":system_pods}))
     }
     async fn drain(&self, device: &DeviceIdentity) -> Result<()> {
         if self.node(device).await?.is_none() {

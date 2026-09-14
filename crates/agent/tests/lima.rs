@@ -103,7 +103,16 @@ async fn lima_preparation_uses_native_networking_without_host_files_or_personal_
         .unwrap();
     assert!(vm.info().await.unwrap().reachable);
     let config = host.configuration.lock().unwrap().clone().unwrap();
-    assert_eq!(config["vmType"], "vz");
+    assert_eq!(
+        config["vmType"],
+        if cfg!(target_os = "macos") {
+            "vz"
+        } else {
+            "qemu"
+        }
+    );
+    assert_eq!(config["plain"], true);
+    assert_eq!(config["ssh"]["overVsock"], false);
     assert_eq!(config["networks"], json!([{"lima":"user-v2"}]));
     assert_eq!(config["mounts"], json!([]));
     assert_eq!(config["ssh"]["forwardAgent"], false);
@@ -119,7 +128,7 @@ async fn lima_preparation_uses_native_networking_without_host_files_or_personal_
         .unwrap()
         .starts_with("sha256:"));
     let data = config["provision"].as_array().unwrap();
-    assert_eq!(data.len(), 5);
+    assert_eq!(data.len(), 6);
     for entry in data {
         assert_eq!(entry["mode"], "data");
         assert_eq!(entry["overwrite"], false);

@@ -7,7 +7,7 @@ struct Args {
     node_name: String,
     #[arg(long, default_value = "0.0.0.0:8091")]
     listen: SocketAddr,
-    #[arg(long, default_value = "kubernetes.default.svc.cluster.local")]
+    #[arg(long, default_value = "kubernetes.default.svc.cluster.local.")]
     dns_name: String,
 }
 #[tokio::main]
@@ -20,4 +20,16 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_cluster_dns_query_is_absolute_and_avoids_search_suffixes() {
+        let args =
+            Args::try_parse_from(["nodeharbor-probe", "--node-name", "test-worker"]).unwrap();
+        assert_eq!(args.dns_name, "kubernetes.default.svc.cluster.local.");
+    }
 }

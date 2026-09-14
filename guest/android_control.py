@@ -8,11 +8,12 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from watchdog import renew_lease as renew_owner_lease
 
 LIMIT = 1024 * 1024
-CONTROL_REVISION = '4'
+CONTROL_REVISION = '6'
 ROOT = Path('/etc/nodeharbor')
 PORT = '/dev/virtio-ports/io.github.gu1p.nodeharbor.control'
 EVENTS = set()
@@ -77,14 +78,27 @@ def validate_request(value, owner):
     if type(value.get('id')) is not int or not 0 <= value['id'] < 2**53:
         raise ValueError('Invalid owner request number')
     command = value.get('command')
-    if command not in {'status', 'lease', 'configure', 'poweroff'}:
+    if command not in {'status', 'lease', 'configure', 'poweroff', 'storage'}:
         raise ValueError('Unsupported owner command')
-    keys = {'id', 'deviceId', 'command'} | ({'bootstrap'} if command == 'configure' else set())
+    keys = {'id', 'deviceId', 'command'} | ({'bootstrap'} if command == 'configure' else {'storage'} if command == 'storage' else set())
     if set(value) != keys: raise ValueError('Unsupported owner command fields')
     if command == 'configure':
         config = value['bootstrap']
         if not isinstance(config, dict) or config.get('deviceId') != owner:
             raise ValueError('Bootstrap belongs to a different owner')
+    if command == 'storage':
+        storage = value['storage']
+        if not isinstance(storage, dict) or storage.get('deviceId') != owner:
+            raise ValueError('Storage operation belongs to another owner')
+        action = storage.get('action')
+        fields = {'deviceId', 'operation', 'action', 'previousPoolId'}
+        if action == 'apply': fields |= {'pool', 'restore'}
+        if action not in {'inspect', 'backup', 'apply', 'cleanup'} or set(storage) != fields:
+            raise ValueError('Unsupported storage operation')
+        if str(uuid.UUID(storage['operation'])) != storage['operation']:
+            raise ValueError('Invalid storage operation identity')
+        if storage['previousPoolId'] is not None and str(uuid.UUID(storage['previousPoolId'])) != storage['previousPoolId']:
+            raise ValueError('Invalid original pool identity')
     return value
 
 
@@ -100,7 +114,11 @@ def pod_inventory(text):
                 not isinstance(uid, str) or not 1 <= len(uid) <= 128 or
                 not isinstance(namespace, str) or not 1 <= len(namespace) <= 253):
             raise ValueError('Unknown workload state')
-        pods.append({'uid': uid, 'namespace': namespace})
+        name = metadata.get('name', uid)
+        if not isinstance(name, str) or not 1 <= len(name) <= 253:
+            raise ValueError('Invalid workload name')
+        pods.append({'uid': uid, 'namespace': namespace, 'name': name,
+                     'state': 'Running' if item['state'] == 'SANDBOX_READY' else 'Starting'})
     return pods
 
 
@@ -112,6 +130,57 @@ class Guest:
         self.error = ''
         self.progress = ''
         self.configured = (ROOT / 'android-configured').is_file()
+        revision = ROOT / 'android-configured-revision'
+        self.configuration_revision = revision.read_text().strip() if revision.is_file() else ''
+        self.storage_result = None
+        self.storage_error = ''
+        self.pool_status = None
+        self.pool_checked_at = 0.0
+        self.pool_checking = False
+
+    def start_storage(self, request):
+        with self.lock:
+            if self.preparing: raise ValueError('Worker preparation is already running')
+            self.preparing, self.storage_error, self.storage_result = True, '', None
+            if request['action'] in {'backup', 'apply'}:
+                self.configured = False
+                self.configuration_revision = ''
+        threading.Thread(target=self._storage, args=(request,), daemon=True).start()
+
+    def _storage(self, request):
+        try:
+            if request['action'] in {'backup', 'apply'}:
+                (ROOT / 'android-configured-revision').unlink(missing_ok=True)
+            with subprocess.Popen(['/usr/bin/python3', '/usr/local/lib/nodeharbor/android_storage.py'],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as child:
+                try: output, _ = child.communicate(json.dumps(request).encode(), timeout=1200)
+                except subprocess.TimeoutExpired:
+                    child.kill(); child.wait(); raise
+                if child.returncode or len(output) > 65536: raise ValueError('Guest storage operation failed')
+                result = json.loads(output)
+                if result.get('operation') != request['operation'] or result.get('action') != request['action'] or result.get('ok') is not True:
+                    raise ValueError('Guest storage result belongs to another operation')
+            with self.lock:
+                self.storage_result = result
+                self.pool_status = None; self.pool_checked_at = 0
+        except Exception:
+            with self.lock: self.storage_error = 'Guest storage maintenance failed; original disks and any verified backup were preserved'
+        finally:
+            with self.lock: self.preparing = False
+
+    def _check_pool(self):
+        result = None
+        try:
+            output = subprocess.run(['/usr/bin/python3', '/usr/local/lib/nodeharbor/storage_pool.py', 'check'],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10, check=True).stdout
+            if len(output) <= 65536:
+                value = json.loads(output)
+                if value.get('deviceId') == self.owner and value.get('migrationComplete'):
+                    result = {'generation': value['generation'], 'poolId': value['poolId']}
+        except Exception: pass
+        finally:
+            with self.lock:
+                self.pool_status = result; self.pool_checked_at = time.monotonic(); self.pool_checking = False
 
     def configure(self, bootstrap):
         with self.lock:
@@ -137,13 +206,25 @@ class Guest:
             temporary.write_text(self.owner)
             temporary.chmod(0o600)
             temporary.replace(marker)
-            with self.lock: self.configured = True
+            revision = ROOT / 'android-configured-revision'
+            temporary = revision.with_suffix('.new')
+            temporary.write_text(CONTROL_REVISION)
+            temporary.chmod(0o600)
+            temporary.replace(revision)
+            with self.lock:
+                self.configured = True
+                self.configuration_revision = CONTROL_REVISION
         except Exception:
             with self.lock: self.error = 'Worker preparation failed; check fleet connectivity and retry'
         finally:
             with self.lock: self.preparing = False
 
     def status(self):
+        pooled = (ROOT / 'storage-state.json').exists()
+        with self.lock:
+            if pooled and not self.preparing and not self.pool_checking and time.monotonic() - self.pool_checked_at > 10:
+                self.pool_checking = True
+                threading.Thread(target=self._check_pool, daemon=True).start()
         with self.lock: configured = self.configured
         active = False
         if configured and control_revision():
@@ -169,9 +250,13 @@ class Guest:
                     finally: timer.cancel()
             except Exception: pass
         with self.lock:
+            storage = self.pool_status if time.monotonic() - self.pool_checked_at < 30 else None
             return {'configured': self.configured, 'preparing': self.preparing, 'error': self.error,
-                    'running': active, 'pods': pods, 'architecture': os.uname().machine,
-                    'controlRevision': control_revision()}
+                    'running': active and (not pooled or storage is not None), 'pods': pods, 'architecture': os.uname().machine,
+                    'storageResult': self.storage_result, 'storageError': self.storage_error,
+                    'storageGeneration': storage['generation'] if storage else -1 if pooled else 0,
+                    'storagePoolId': storage['poolId'] if storage else '',
+                    'controlRevision': control_revision(), 'configurationRevision': self.configuration_revision}
 
 
 def main():
@@ -185,12 +270,13 @@ def main():
         while True:
             request = validate_request(read_frame(channel), owner)
             command = request['command']
-            lifecycle_event(command + '-received')
+            if command != 'storage': lifecycle_event(command + '-received')
             result = {'id': request['id'], 'deviceId': owner}
             try:
                 if command == 'lease':
                     renew_owner_lease()
                 elif command == 'configure': guest.configure(request['bootstrap'])
+                elif command == 'storage': guest.start_storage(request['storage'])
                 elif command == 'status': result.update(guest.status())
                 result['ok'] = True
             except Exception:

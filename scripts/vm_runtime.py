@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bundle the pinned, unmodified native Lima distribution into the macOS app."""
+"""Bundle the pinned, unmodified native Lima distribution into supported apps."""
 import hashlib
 import json
 from pathlib import Path
@@ -58,8 +58,20 @@ def bundle_lima(target):
     verify_bundle(directory)
     return directory
 
-def check_vm_runtime(application):
-    directory=Path(application)/'Contents/Resources/lima'
+def bundle_configuration(target):
+    bundle={'externalBin':['binaries/nodeharbor-agent']}
+    if 'apple-darwin' in target or 'linux' in target:
+        bundle['resources']={str(bundle_lima(target)):'lima/'}
+    if 'linux' in target:
+        emulator='qemu-system-arm' if target.startswith('aarch64-') else 'qemu-system-x86'
+        firmware='qemu-efi-aarch64' if target.startswith('aarch64-') else 'ovmf'
+        bundle['linux']={'deb':{'depends':['libwebkit2gtk-4.1-0','libayatana-appindicator3-1','libxss1',emulator,firmware,'qemu-utils','openssh-client','gzip']}}
+    return bundle
+
+def check_vm_runtime(application,platform='macos'):
+    if platform=='macos':directory=Path(application)/'Contents/Resources/lima'
+    elif platform=='linux':directory=Path(application)/'usr/lib/nodeharbor/lima'
+    else:raise ValueError('This platform has no bundled Lima runtime')
     verify_bundle(directory)
     output=subprocess.check_output([str(directory/'bin/limactl'),'--version'],text=True,timeout=30).strip()
     if output!='limactl version '+MANIFEST['version']:raise ValueError('The bundled VM runtime reports the wrong version')

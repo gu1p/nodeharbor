@@ -48,4 +48,4 @@ class ShutdownCoordinator {
 fun workerNeedsWake(ownerEnabled: Boolean, processing: Boolean, stopping: Boolean, alreadyHeld: Boolean): Boolean =
     (ownerEnabled && processing) || (stopping && alreadyHeld)
 
-const val GUEST_CONTROL_REVISION = "4"
+const val GUEST_CONTROL_REVISION = "6"

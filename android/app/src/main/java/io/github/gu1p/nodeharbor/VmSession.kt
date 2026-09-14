@@ -14,9 +14,12 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
-data class GuestPod(val uid: String, val namespace: String)
+data class GuestPod(val uid: String, val namespace: String, val name: String = uid, val state: String = "Unknown")
 data class GuestStatus(val configured: Boolean, val preparing: Boolean, val running: Boolean, val pods: List<GuestPod>?, val error: String,
-                       val controlRevision: String = GUEST_CONTROL_REVISION) {
+                       val controlRevision: String = GUEST_CONTROL_REVISION,
+                       val configurationRevision: String = GUEST_CONTROL_REVISION,
+                       val storageGeneration: Long = 0, val storagePoolId: String = "",
+                       val storageResult: JSONObject? = null, val storageError: String = "") {
     fun workloadCount(systemPodUids: Set<String>): Int = pods?.count { it.namespace != "kube-system" && it.uid !in systemPodUids } ?: Int.MAX_VALUE
 }
 
@@ -24,7 +27,8 @@ data class GuestStatus(val configured: Boolean, val preparing: Boolean, val runn
 class VmSession private constructor(private val context: Context, private val owner: String,
                                     val policy: PhonePolicy, private val networkAllowed: () -> Boolean,
                                     private val record: (String) -> Unit,
-                                    private val privateConsole: ((ByteArray) -> Unit)? = null) : Closeable {
+                                    private val privateConsole: ((ByteArray) -> Unit)? = null,
+                                    private val poolFiles: List<java.io.File> = emptyList()) : Closeable {
     private val stopping = AtomicBoolean(false)
     private val dead = CountDownLatch(1)
     private val coordinator = ShutdownCoordinator()
@@ -79,8 +83,14 @@ class VmSession private constructor(private val context: Context, private val ow
                 files += ParcelFileDescriptor.open(guest.file(name), if (index == 0) ParcelFileDescriptor.MODE_READ_WRITE else ParcelFileDescriptor.MODE_READ_ONLY)
             }
             check(!stopping.get()) { "The owner stopped VM startup" }
+            val members = poolFiles.map { file ->
+                val writable = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_WRITE).also { files += it }
+                val readable = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).also { files += it }
+                writable to readable
+            }
             bootSubmitted = true
-            sandbox.boot(files[0], files[1], files[2], files[3], output[1], control[1], files[4], broker, policy.cpus, policy.memoryMib)
+            sandbox.bootPool(files[0], files[1], files[2], files[3], output[1], control[1], files[4],
+                members.map { it.first }.toTypedArray(), members.map { it.second }.toTypedArray(), broker, policy.cpus, policy.memoryMib)
             launched = true
             check(!confirmedStopped) { "The isolated worker stopped during startup" }
             record("Starting the owned Ubuntu worker")
@@ -141,12 +151,18 @@ class VmSession private constructor(private val context: Context, private val ow
             val uid = item.getString("uid")
             val namespace = item.getString("namespace")
             require(uid.length in 1..128 && namespace.length in 1..253) { "The guest returned an invalid workload inventory" }
-            GuestPod(uid, namespace)
+            val name = item.optString("name", uid)
+            val state = item.optString("state", "Unknown")
+            require(name.length in 1..253 && state in setOf("Running", "Starting", "Unknown")) { "The guest returned invalid workload details" }
+            GuestPod(uid, namespace, name, state)
         } }
         return GuestStatus(value.getBoolean("configured"), value.getBoolean("preparing"), value.getBoolean("running"), pods,
-            if (value.optString("error").isBlank()) "" else "The guest could not prepare the worker; check fleet connectivity and retry", value.optString("controlRevision"))
+            if (value.optString("error").isBlank()) "" else "The guest could not prepare the worker; check fleet connectivity and retry",
+            value.optString("controlRevision"), value.optString("configurationRevision"), value.optLong("storageGeneration", -1),
+            value.optString("storagePoolId"), value.optJSONObject("storageResult"), value.optString("storageError").take(2048))
     }
     fun configure(bootstrap: JSONObject) { check(!stopping.get()); checkNotNull(channel).request(GuestCommand.Configure, bootstrap) }
+    fun storage(request: JSONObject) { check(!stopping.get()); checkNotNull(channel).request(GuestCommand.Storage, request) }
     fun renewLease() { check(!stopping.get()); checkNotNull(channel).request(GuestCommand.Lease) }
     private fun requestPoweroff() {
         record("Owner submitted the shutdown command")
@@ -215,17 +231,22 @@ class VmSession private constructor(private val context: Context, private val ow
         fun start(context: Context, owner: String, policy: PhonePolicy, guest: OwnedGuest,
                   networkAllowed: () -> Boolean, record: (String) -> Unit,
                   privateConsole: ((ByteArray) -> Unit)? = null,
+                  storage: OwnedPhoneStorage? = null, storageMaintenance: Boolean = false,
                   created: (VmSession) -> Unit = {}): VmSession {
             check(networkAllowed()) { "The owner has stopped worker processing" }
             val receipt = checkNotNull(guest.receipt(owner)) { "Prepare an owned worker first" }
-            check(receipt.complete && receipt.diskGib == policy.diskGib) { "The owned worker storage is incomplete or needs replacement" }
+            check(receipt.complete && (storage != null || receipt.diskGib == policy.diskGib)) { "The owned worker storage is incomplete or needs replacement" }
             check(guest.file("root.img").length() == receipt.diskGib * 1024L * 1024 * 1024) { "The owned worker disk changed size" }
             for (name in listOf("kernel", "initrd", "seed.iso")) check(guest.file(name).isFile && guest.file(name).length() in 1..(128L * 1024 * 1024)) {
                 "The owned worker boot files are missing or invalid"
             }
             val reservation = guest.reserveForVm(owner)
-            val session = VmSession(context, owner, policy, networkAllowed, record, privateConsole)
-            session.storageReservation = reservation
+            val poolReservation = try { storage?.reserveForVm(owner, storageMaintenance) }
+                catch (error: Exception) { reservation.close(); throw error }
+            val members = try { storage?.vmFiles(owner, storageMaintenance).orEmpty() }
+                catch (error: Exception) { poolReservation?.close(); reservation.close(); throw error }
+            val session = VmSession(context, owner, policy, networkAllowed, record, privateConsole, members)
+            session.storageReservation = Closeable { try { poolReservation?.close() } finally { reservation.close() } }
             try { created(session); session.launch(guest); return session }
             catch (error: Exception) { session.shutdown(SystemClock.elapsedRealtime(), immediate = true); throw error }
             finally {

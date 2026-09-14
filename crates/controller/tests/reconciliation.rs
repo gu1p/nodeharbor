@@ -9,12 +9,13 @@ const ID: &str = "9511182e-9c48-4d20-a15b-1da8bb441386";
 struct Backend {
     placements: Mutex<Vec<(bool, bool, bool)>>,
     fail: Mutex<bool>,
+    rtt: Mutex<Option<f64>>,
 }
 #[async_trait]
 impl HealthBackend for Backend {
     async fn observe(&self, _: &DeviceIdentity, _: &Resources) -> anyhow::Result<f64> {
         anyhow::ensure!(!*self.fail.lock().unwrap(), "Network probe unavailable");
-        Ok(40.0)
+        Ok(self.rtt.lock().unwrap().unwrap_or(40.0))
     }
     async fn place(
         &self,
@@ -73,6 +74,34 @@ async fn only_independent_observations_and_owner_opt_ins_enable_placement() {
         .execute(&state.db)
         .await
         .unwrap();
+    seen(&state, 630).await;
+    reconciler
+        .tick_at(Utc.timestamp_opt(630, 0).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        backend.placements.lock().unwrap().last(),
+        Some(&(false, false, true))
+    );
+}
+#[tokio::test]
+async fn saved_observations_apply_the_shared_latency_percentile_to_actual_admission() {
+    let state = enrolled().await;
+    let backend = Arc::new(Backend::default());
+    let reconciler = Reconciler::new(state.clone(), backend.clone());
+    for now in (0..=600).step_by(30) {
+        *backend.rtt.lock().unwrap() = Some(if now == 570 { 507.0 } else { 275.0 });
+        seen(&state, now).await;
+        reconciler
+            .tick_at(Utc.timestamp_opt(now, 0).unwrap())
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        backend.placements.lock().unwrap().last(),
+        Some(&(true, false, true))
+    );
+    *backend.rtt.lock().unwrap() = Some(501.0);
     seen(&state, 630).await;
     reconciler
         .tick_at(Utc.timestamp_opt(630, 0).unwrap())

@@ -22,6 +22,7 @@ android {
         targetSdk = 37
         versionCode = identifiedCode.toInt()
         versionName = identifiedVersion
+        manifestPlaceholders["sourceCommit"] = identifiedCommit
         buildConfigField("String", "SOURCE_COMMIT", "\"$identifiedCommit\"")
         buildConfigField("boolean", "DIRTY_SOURCE", providers.environmentVariable("NODEHARBOR_DIRTY_SOURCE").orElse("true").get())
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

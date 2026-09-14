@@ -4,6 +4,26 @@ import { expect, it, vi } from 'vitest';
 import { App } from './App';
 import { defaultPolicy, type Backend, type Policy } from './model';
 
+it('explains a failed replacement without claiming that a stopped worker is draining',async()=>{
+ const {state,api}=fixture(true);
+ Object.assign(state,{state:'error',reason:'The fleet server could not remove the previous worker access (503)'});
+ render(<App backend={api}/>);
+ const alert=await screen.findByRole('alert');
+ expect(alert).toHaveTextContent('Replacement needs attention');
+ expect(alert).toHaveTextContent('NodeHarbor retries automatically while the app is open');
+ expect(await screen.findByRole('heading',{name:state.reason})).toBeVisible();
+ expect(screen.queryByText(/Running work drains/)).not.toBeInTheDocument();
+ expect(screen.queryByRole('button',{name:'Start sharing'})).not.toBeInTheDocument();
+});
+
+it('shows a stopped replacement as access cleanup rather than a job drain',async()=>{
+ const {state,api}=fixture(true);
+ Object.assign(state,{state:'replacing',reason:'Removing the previous worker access'});
+ render(<App backend={api}/>);
+ expect(await screen.findByText(/The worker is stopped. Removing its previous access and disk/)).toBeVisible();
+ expect(screen.queryByText(/Running work drains/)).not.toBeInTheDocument();
+});
+
 function fixture(pending = false) {
  const state = {deviceId:'owner',name:'My computer',platform:'macos',architecture:'arm64',state:'paused',reason:'Sharing is switched off',policy:defaultPolicy(),resources:{cpus:8,memoryMib:16384,diskGib:100},allocatedResources:{cpus:2,memoryMib:4096,diskGib:30},recreationPending:pending,worker:{installed:true,running:false},enrolled:true,controllerUrl:'https://workers.example.com',version:'test',workloads:[]};
  const api: Backend & {recreateWorker: ReturnType<typeof vi.fn>} = {snapshot:vi.fn().mockResolvedValue(state),savePolicy:vi.fn().mockResolvedValue(state),action:vi.fn().mockResolvedValue(state),enroll:vi.fn().mockResolvedValue(state),fleet:vi.fn().mockResolvedValue([]),recreateWorker:vi.fn().mockImplementation(async (policy:Policy)=>({...state,policy:{...policy,enabled:false},recreationPending:true}))};

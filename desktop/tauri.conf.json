@@ -10,10 +10,17 @@
     "frontendDist": "../ui/dist"
   },
   "app": {
-    "windows": [{
-      "label": "main", "title": "NodeHarbor", "width": 1280, "height": 850,
-      "minWidth": 720, "minHeight": 600, "visible": false
-    }],
+    "windows": [
+      {
+        "label": "main",
+        "title": "NodeHarbor",
+        "width": 1280,
+        "height": 850,
+        "minWidth": 720,
+        "minHeight": 600,
+        "visible": false
+      }
+    ],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; object-src 'none'; frame-src 'none'; base-uri 'none'"
     }
@@ -24,9 +31,41 @@
     "category": "DeveloperTool",
     "shortDescription": "Contribute spare capacity to your Kubernetes fleet",
     "longDescription": "NodeHarbor connects a dedicated Linux virtual machine to your private worker fleet, with explicit resource limits and sharing rules.",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
-    "macOS": {"minimumSystemVersion": "14.0"},
-    "windows": {"nsis": {"installMode": "currentUser", "displayLanguageSelector": false}},
-    "linux": {"deb": {"depends": ["libwebkit2gtk-4.1-0", "libayatana-appindicator3-1", "libxss1"]}}
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "14.0"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libayatana-appindicator3-1",
+          "libxss1"
+        ]
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXkgQ0YwQTc5QUYwMDEzNjQ1NwpSV1JYWkJNQXIza0t6MTNuVE1vV0Jjc3F4eE5JMEc3cG9RcFB2UFlaVElnUXNxSURLM1BPdDBLRgo=",
+      "endpoints": [
+        "https://gu1p.github.io/nodeharbor/updates/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

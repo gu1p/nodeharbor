@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 import unittest
 import plistlib
+import tempfile
 from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -11,6 +12,18 @@ def module():
     value=importlib.util.module_from_spec(spec);spec.loader.exec_module(value);return value
 
 class PackageSmoke(unittest.TestCase):
+    def test_linux_deb_and_appimage_both_verify_their_embedded_vm_runtime(self):
+        smoke=module()
+        with tempfile.TemporaryDirectory() as temporary:
+            folder=Path(temporary)
+            target='x86_64-unknown-linux-gnu'
+            (folder/f'nodeharbor-v0.1.20-{target}.AppImage').touch()
+            with patch.object(smoke,'run'),patch.object(smoke,'check_executable'),patch.object(smoke,'check_vm_runtime') as runtime:
+                smoke.smoke_packages(folder,target,'0.1.20','a'*40)
+            self.assertEqual(runtime.call_count,2)
+            self.assertEqual([call.args[0].name for call in runtime.call_args_list],['deb','squashfs-root'])
+            self.assertEqual([call.kwargs for call in runtime.call_args_list],[{'platform':'linux'},{'platform':'linux'}])
+
     def test_disk_image_checks_use_the_os_mount_location_and_always_detach(self):
         smoke=module()
         response=plistlib.dumps({'system-entities':[{'dev-entry':'/dev/disk999'},{'dev-entry':'/dev/disk999s1','mount-point':'/Volumes/NodeHarbor Package'}]})

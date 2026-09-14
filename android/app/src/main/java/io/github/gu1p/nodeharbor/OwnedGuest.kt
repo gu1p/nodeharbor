@@ -179,7 +179,7 @@ class OwnedGuest(private val context: Context, val directory: File = context.noB
             writes.put(JSONObject().put("path", path).put("owner", "root:root").put("permissions", mode).put("content", content))
         }
         write("/etc/nodeharbor/device-id", receipt.deviceId + "\n", "0600")
-        for (name in listOf("configure_worker.py", "watchdog.py", "android_control.py"))
+        for (name in listOf("configure_worker.py", "watchdog.py", "android_control.py", "storage_pool.py", "storage_backup.py", "android_storage.py"))
             write("/usr/local/lib/nodeharbor/$name", context.assets.open(name).bufferedReader().use { it.readText() })
         write("/etc/systemd/system/nodeharbor-watchdog.service", "[Unit]\nDescription=Check the NodeHarbor owner lease\n[Service]\nType=oneshot\nExecStart=/usr/bin/python3 /usr/local/lib/nodeharbor/watchdog.py\n", "0644")
         // Lease monitoring waits for the channel. Do not implicitly put this

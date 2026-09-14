@@ -4,14 +4,14 @@ import org.json.JSONObject
 import org.json.JSONTokener
 import java.util.UUID
 
-enum class GuestCommand(val wire: String) { Status("status"), Lease("lease"), Configure("configure"), Poweroff("poweroff") }
+enum class GuestCommand(val wire: String) { Status("status"), Lease("lease"), Configure("configure"), Poweroff("poweroff"), Storage("storage") }
 
 fun guestRequest(id: Long, owner: String, command: GuestCommand, bootstrap: JSONObject? = null): ByteArray {
     require(id in 0 until (1L shl 53) && UUID.fromString(owner).toString() == owner)
-    require((command == GuestCommand.Configure) == (bootstrap != null)) { "A bootstrap grant is required only for worker configuration" }
+    require((command in setOf(GuestCommand.Configure, GuestCommand.Storage)) == (bootstrap != null)) { "This owner command requires its fixed payload" }
     if (bootstrap != null) require(bootstrap.getString("deviceId") == owner) { "The bootstrap grant belongs to a different phone" }
     val request = JSONObject().put("id", id).put("deviceId", owner).put("command", command.wire)
-    if (bootstrap != null) request.put("bootstrap", bootstrap)
+    if (bootstrap != null) request.put(if (command == GuestCommand.Storage) "storage" else "bootstrap", bootstrap)
     return request.toString().toByteArray(Charsets.UTF_8).also { require(it.size <= 1024 * 1024) { "The owner command exceeds its supported size" } }
 }
 

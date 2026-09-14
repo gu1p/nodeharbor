@@ -13,7 +13,7 @@ add_custom_command(OUTPUT "${RUST_OUTPUT}"
     "CARGO_TARGET_DIR=${CMAKE_CURRENT_BINARY_DIR}/rust"
     "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${NDK_BIN}/aarch64-linux-android33-clang"
     "${CARGO}" build --manifest-path "${REPOSITORY}/crates/core/Cargo.toml" --locked --release --target aarch64-linux-android
-  DEPENDS ${RUST_SOURCES} "${REPOSITORY}/Cargo.lock" "${REPOSITORY}/crates/core/Cargo.toml"
+  DEPENDS ${RUST_SOURCES} "${REPOSITORY}/Cargo.lock" "${REPOSITORY}/crates/core/Cargo.toml" "${REPOSITORY}/nodeharbor.minisign.pub"
   WORKING_DIRECTORY "${REPOSITORY}" VERBATIM)
 add_custom_target(android_owner_rules DEPENDS "${RUST_OUTPUT}")
 add_library(owner_rules STATIC IMPORTED)

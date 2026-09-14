@@ -97,20 +97,62 @@ class RuntimeInstallation(unittest.TestCase):
             for name in ['netbird','k3s']:self.assertEqual((binary/name).read_bytes(),b'old '+name.encode())
 
 class GuestNetworkConfiguration(unittest.TestCase):
-    def prepare(self, resolver_text, install=None, fail_command=None):
+    def prepare(self, resolver_text, install=None, fail_command=None, command_handler=None, storage_state=None, storage_request=False, storage_service=False):
         config=GuestContract().config()
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);(root/'device-id').write_text(config['deviceId'])
+            if storage_state is not None:(root/'storage-state.json').write_text(json.dumps(storage_state))
+            if storage_request:(root/'storage-request.json').write_text('{}')
+            service_marker=root/'storage.service'
+            if storage_service:service_marker.write_text('[Service]\n')
             resolver=root/'resolv.conf';resolver.write_text(resolver_text)
             writes={};commands=[]
             def run(*args, **kwargs):
                 commands.append(args)
                 if args==fail_command:raise RuntimeError('Guest service restart failed')
+                if command_handler is not None:command_handler(args)
                 return json.dumps({'netbirdIp':'100.75.1.2/16'}) if 'status' in args else ''
-            with patch.object(configure,'ROOT',root), patch.object(configure,'RESOLV_CONF',resolver,create=True), patch.object(configure.sys,'platform','linux'), patch.object(configure.os,'geteuid',return_value=0,create=True), patch.object(configure.sys,'stdin',io.StringIO(json.dumps(config))), patch.object(configure,'install_runtime',new=install if install is not None else Mock()), patch.object(configure,'run',side_effect=run), patch.object(configure,'write',side_effect=lambda path,content,mode=0o600:writes.update({str(path):content})):
+            with patch.object(configure,'ROOT',root), patch.object(configure,'STORAGE_SERVICE',service_marker,create=True), patch.object(configure,'RESOLV_CONF',resolver,create=True), patch.object(configure.sys,'platform','linux'), patch.object(configure.os,'geteuid',return_value=0,create=True), patch.object(configure.sys,'stdin',io.StringIO(json.dumps(config))), patch.object(configure,'install_runtime',new=install if install is not None else Mock()), patch.object(configure,'run',side_effect=run), patch.object(configure,'write',side_effect=lambda path,content,mode=0o600:writes.update({str(path):content})):
                 configure.main()
             self.assertEqual(resolver.read_text(),resolver_text)
             return commands,writes,str(resolver)
+
+    def test_pooled_worker_puts_every_ephemeral_storage_consumer_on_the_same_filesystem(self):
+        state={'format':1,'deviceId':GuestContract().config()['deviceId'],'poolId':GuestContract().config()['deviceId'],'migrationComplete':True}
+        commands,writes,_=self.prepare('nameserver 192.168.64.1\n',storage_state=state)
+        k3s=json.loads(writes['/etc/rancher/k3s/config.yaml'])
+        pool='/var/lib/nodeharbor/storage'
+        self.assertEqual(k3s.get('data-dir'),pool+'/k3s')
+        self.assertIn('root-dir='+pool+'/kubelet',k3s['kubelet-arg'])
+        dropin=json.loads(writes[pool+'/k3s/agent/etc/kubelet.conf.d/10-nodeharbor.conf'])
+        self.assertEqual(dropin['podLogsDir'],pool+'/pods')
+        service=writes['/etc/systemd/system/k3s-agent.service']
+        self.assertIn('Requires=netbird.service nodeharbor-storage.service',service)
+        self.assertIn('After=network-online.target netbird.service nodeharbor-storage.service',service)
+        self.assertIn('ExecStartPre=/usr/bin/python3 /usr/local/lib/nodeharbor/storage_pool.py check',service)
+        self.assertIn(('/usr/bin/python3','/usr/local/lib/nodeharbor/storage_pool.py','check'),commands)
+
+    def test_missing_pool_cannot_fall_back_to_the_legacy_root_disk_or_start_network_services(self):
+        state={'format':1,'deviceId':GuestContract().config()['deviceId'],'poolId':GuestContract().config()['deviceId'],'migrationComplete':True}
+        install=Mock()
+        with self.assertRaisesRegex(RuntimeError,'restart failed'):
+            self.prepare('nameserver 192.168.64.1\n',storage_state=state,install=install,
+                         fail_command=('/usr/bin/python3','/usr/local/lib/nodeharbor/storage_pool.py','check'))
+        install.assert_not_called()
+
+    def test_missing_pool_state_cannot_turn_a_configured_worker_back_into_legacy_storage(self):
+        for markers in [{'storage_request':True}, {'storage_service':True}]:
+            install=Mock()
+            with self.subTest(markers=markers), self.assertRaisesRegex(ValueError,'storage|Storage'):
+                self.prepare('nameserver 192.168.64.1\n',install=install,**markers)
+            install.assert_not_called()
+
+    def test_existing_worker_data_requires_completed_explicit_migration_before_switching_paths(self):
+        state={'format':1,'deviceId':GuestContract().config()['deviceId'],'poolId':GuestContract().config()['deviceId'],'migrationComplete':False}
+        install=Mock()
+        with self.assertRaisesRegex(ValueError,'migration'):
+            self.prepare('nameserver 192.168.64.1\n',storage_state=state,install=install)
+        install.assert_not_called()
 
     def test_slow_k3s_startup_waits_for_real_readiness_under_the_owners_deadline(self):
         import configparser
@@ -120,6 +162,15 @@ class GuestNetworkConfiguration(unittest.TestCase):
         self.assertEqual(service['Service']['Type'],'notify')
         self.assertEqual(service['Service'].get('TimeoutStartSec'),'0',
             'K3s must not be killed by systemd before the supervising owner\'s bounded preparation operation expires')
+
+    def test_restart_reports_fresh_node_status_before_the_network_policy_startup_wait(self):
+        _,writes,_=self.prepare('nameserver 192.168.64.1\n')
+        path='/var/lib/rancher/k3s/agent/etc/kubelet.conf.d/10-nodeharbor.conf'
+        self.assertIn(path,writes,
+            'K3s waits for a new Ready heartbeat; the default five-minute report interval stalls warm boots')
+        config=json.loads(writes[path])
+        self.assertEqual(config,{'apiVersion':'kubelet.config.k8s.io/v1beta1',
+            'kind':'KubeletConfiguration','nodeStatusReportFrequency':'30s'})
 
     def test_preparation_restarts_services_to_apply_new_binaries_and_worker_configuration(self):
         commands,writes,_=self.prepare('nameserver 192.168.64.1\n')
@@ -156,6 +207,32 @@ class GuestNetworkConfiguration(unittest.TestCase):
         self.assertEqual(k3s['resolv-conf'],resolver)
         self.assertNotIn('/etc/rancher/k3s/resolv.conf',writes)
         self.assertEqual(k3s['flannel-iface'],'wt0')
+
+    def test_kubernetes_tunnels_cannot_become_netbirds_transport(self):
+        commands,_,_=self.prepare('nameserver 192.168.64.1\n')
+        up=next(args for args in commands if args[:2]==('/usr/local/bin/netbird','up'))
+        self.assertIn('--extra-iface-blacklist',up,
+            'NetBird otherwise selects Flannel addresses after K3s starts, recursively tunneling its own transport')
+        excluded=up[up.index('--extra-iface-blacklist')+1].split(',')
+        for interface in ['flannel.1','cni0','kube-ipvs0']:
+            self.assertTrue(any(interface.startswith(prefix) for prefix in excluded))
+        for interface in ['eth0','enp7s0']:
+            self.assertFalse(any(interface.startswith(prefix) for prefix in excluded))
+
+    def test_retry_applies_settings_when_netbird_has_already_reconnected_at_boot(self):
+        # NetBird 0.78.1's daemon-mode `up` returns "Already connected" before
+        # applying any flags. A restarted daemon can auto-connect immediately.
+        state={'connected':True,'excluded':[]}
+        def netbird(args):
+            if args==('systemctl','restart','netbird'):state['connected']=True
+            if args==('/usr/local/bin/netbird','down'):state['connected']=False
+            if args[:2]==('/usr/local/bin/netbird','up') and not state['connected']:
+                state['excluded']=args[args.index('--extra-iface-blacklist')+1].split(',')
+                state['connected']=True
+        self.prepare('nameserver 192.168.64.1\n',command_handler=netbird)
+        self.assertTrue(state['connected'])
+        self.assertEqual(state['excluded'],['flannel','cni','kube-ipvs'],
+            'A successful retry must actually apply the transport exclusions')
 
     def test_unusable_guest_dns_is_reported_without_installing_or_starting_a_worker(self):
         install=Mock()

@@ -11,6 +11,10 @@ interface ISandbox {
         in ParcelFileDescriptor seed, in ParcelFileDescriptor console, in ParcelFileDescriptor control,
         in ParcelFileDescriptor diskReader, ISocketBroker broker, int cpus, int memoryMib);
     void stop();
+    void bootPool(in ParcelFileDescriptor disk, in ParcelFileDescriptor kernel, in ParcelFileDescriptor initrd,
+        in ParcelFileDescriptor seed, in ParcelFileDescriptor console, in ParcelFileDescriptor control,
+        in ParcelFileDescriptor diskReader, in ParcelFileDescriptor[] storage, in ParcelFileDescriptor[] readers,
+        ISocketBroker broker, int cpus, int memoryMib);
     String networkProbe(ISocketBroker broker, in byte[] address);
     boolean guestNetworkProbe(ISocketBroker broker, in byte[] dns);
 }

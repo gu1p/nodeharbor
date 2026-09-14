@@ -18,6 +18,10 @@ enum Request {
     Transition {
         input: WorkerInput,
     },
+    VerifyUpdate {
+        path: String,
+        signature: String,
+    },
 }
 
 pub fn android_request(input: &str) -> Result<String, String> {
@@ -34,6 +38,9 @@ pub fn android_request(input: &str) -> Result<String, String> {
             serde_json::to_string(&validate_policy(&policy, &host).err())
         }
         Request::Transition { input } => serde_json::to_string(&worker_transition(&input)),
+        Request::VerifyUpdate { path, signature } => {
+            serde_json::to_string(&crate::updates::verify_release_file(&path, &signature))
+        }
     };
     result.map_err(|_| "Owner rule result could not be encoded".into())
 }

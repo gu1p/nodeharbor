@@ -9,6 +9,7 @@ import uuid
 
 FILES={
     '/usr/local/lib/nodeharbor/configure_worker.py':'0700',
+    '/usr/local/lib/nodeharbor/storage_pool.py':'0700',
     '/usr/local/lib/nodeharbor/watchdog.py':'0700',
     '/etc/systemd/system/nodeharbor-watchdog.service':'0644',
     '/etc/systemd/system/nodeharbor-watchdog.timer':'0644',

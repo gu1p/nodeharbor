@@ -6,6 +6,7 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
 def module():
@@ -20,6 +21,46 @@ def archive(path, entries):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 class VmRuntime(unittest.TestCase):
+    def test_linux_runtime_archives_are_pinned_for_both_native_architectures(self):
+        runtime=module()
+        expected={
+            'aarch64-unknown-linux-gnu':('aarch64','7c6a09c6844f55f811e9b7b2b60a6070a512c696c8ec752dfdb3c8ed50ed0364'),
+            'x86_64-unknown-linux-gnu':('x86_64','a0ea1ccf6b7335a900adb5f8d2b8384457965fecb1ba72f09b4e3e46d12f424a'),
+        }
+        for target,(arch,digest) in expected.items():
+            with self.subTest(target=target):
+                self.assertEqual(runtime.MANIFEST['archives'].get(target),{
+                    'name':f'lima-2.2.0-Linux-{arch}.tar.gz','sha256':digest,'guestArch':arch})
+
+    def test_linux_packages_include_lima_and_architecture_specific_qemu_dependencies(self):
+        runtime=module()
+        for target,emulator in [('aarch64-unknown-linux-gnu','qemu-system-arm'),('x86_64-unknown-linux-gnu','qemu-system-x86')]:
+            with self.subTest(target=target),patch.object(runtime,'bundle_lima',return_value=Path('/verified/lima')) as bundled:
+                config=runtime.bundle_configuration(target)
+                bundled.assert_called_once_with(target)
+                self.assertEqual(config['resources'],{'/verified/lima':'lima/'})
+                dependencies=config['linux']['deb']['depends']
+                for dependency in [emulator,'qemu-utils','openssh-client','gzip','libwebkit2gtk-4.1-0','libayatana-appindicator3-1','libxss1']:
+                    self.assertIn(dependency,dependencies)
+                self.assertNotIn('multipass',dependencies)
+
+    def test_windows_packaging_keeps_its_existing_runtime_provider(self):
+        runtime=module()
+        with patch.object(runtime,'bundle_lima') as bundled:
+            config=runtime.bundle_configuration('x86_64-pc-windows-msvc')
+        bundled.assert_not_called()
+        self.assertNotIn('resources',config)
+        self.assertNotIn('linux',config)
+
+    def test_linux_runtime_smoke_check_uses_the_shared_desktop_and_cli_resource_directory(self):
+        runtime=module()
+        for package in [Path('/package/deb'),Path('/package/squashfs-root')]:
+            with self.subTest(package=package),patch.object(runtime,'verify_bundle') as verify,patch.object(runtime.subprocess,'check_output',return_value='limactl version 2.2.0\n') as command:
+                runtime.check_vm_runtime(package,platform='linux')
+                directory=package/'usr/lib/nodeharbor/lima'
+                verify.assert_called_once_with(directory)
+                self.assertEqual(command.call_args.args[0],[str(directory/'bin/limactl'),'--version'])
+
     def test_bundle_keeps_runtime_layout_and_license_in_application_resources(self):
         runtime=module()
         with tempfile.TemporaryDirectory() as temporary:
@@ -47,7 +88,11 @@ class VmRuntime(unittest.TestCase):
     def test_macos_builds_bundle_and_smoke_test_the_runtime(self):
         build=(ROOT/'scripts/build.py').read_text()
         smoke=(ROOT/'scripts/package_smoke.py').read_text()
-        self.assertIn('bundle_lima(',build)
-        self.assertIn('resources',build)
+        self.assertIn('bundle_configuration(args.target)',build)
         self.assertIn('check_vm_runtime(',smoke)
-
+        runtime=module()
+        with patch.object(runtime,'bundle_lima',return_value=Path('/verified/lima')) as bundled:
+            config=runtime.bundle_configuration('aarch64-apple-darwin')
+        bundled.assert_called_once_with('aarch64-apple-darwin')
+        self.assertEqual(config['resources'],{'/verified/lima':'lima/'})
+        self.assertNotIn('linux',config)

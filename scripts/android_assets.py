@@ -33,7 +33,8 @@ def main():
     destination = ROOT / 'android/app/build/generated/worker-assets'
     destination.mkdir(parents=True, exist_ok=True)
     for source in [ROOT / 'android/runtime/lock.json', receipt_path,
-                   *(ROOT / 'guest' / name for name in ['configure_worker.py', 'watchdog.py', 'android_control.py'])]:
+                   *(ROOT / 'guest' / name for name in ['configure_worker.py', 'watchdog.py', 'android_control.py',
+                                                       'storage_pool.py', 'storage_backup.py', 'android_storage.py'])]:
         shutil.copyfile(source, destination / source.name)
     (destination / 'runtime-credits.txt').write_text(
         'QEMU 11.1.1 — GPL-2.0 (individual files may use other compatible licenses).\n'

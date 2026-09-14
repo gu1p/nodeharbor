@@ -29,11 +29,14 @@ class PhoneAgent(private val context: Context) {
     private val mutable = MutableStateFlow(UiState(phoneName = Build.MODEL.take(120),
         phoneDescription = "Android ${Build.VERSION.RELEASE} · ARM64"))
     val state = mutable.asStateFlow()
-    val supervisor = PhoneSupervisor(context, store, ::client, { status, reason, ci, services ->
+    val supervisor = PhoneSupervisor(context, store, ::client, { status, reason, ci, services, workloads ->
         val saved = store.load()
         mutable.update { it.copy(state = status, reason = reason, policy = saved.policy,
-            workerInstalled = saved.workerInstalled, eligibleCi = ci, eligibleServices = services) }
+            workerInstalled = saved.workerInstalled, eligibleCi = ci, eligibleServices = services, workloads = workloads) }
     }, ::record, ::showError)
+    val updates = AppUpdates(context, store, supervisor) { value -> mutable.update { it.copy(updates = value) } }
+    val storage = PhoneStorage(context, store, supervisor, ::startService, ::client,
+        { value -> mutable.update { it.copy(storage = value) } }, ::record, ::showError)
 
     fun visibility(visible: Boolean) { supervisor.visible = visible }
     fun recoverInBackground(): Boolean = store.load().let { shouldAutoStart(it.policy, StartCause.Recovery, it.policy.enabled, it.userStopped, false) }
@@ -53,11 +56,12 @@ class PhoneAgent(private val context: Context) {
     /** Never queue an owner stop behind a slow enrollment, fleet request or setup. */
     fun stopOwner() {
         store.update { it.copy(policy = it.policy.copy(enabled = false), userStopped = true, prepareRequested = false) }
+        storage.cancel()
         record("Sharing switched off; current work has only its remaining drain allowance")
         refresh()
     }
 
-    fun refresh() = task(busy = false) { refreshState() }
+    fun refresh() = task(busy = false) { refreshState(); updates.resumeAfterPermission() }
     private fun recoverSavedEnrollment(): StoredState {
         val saved = store.load()
         val recovered = recoverEnrollment(saved, store.token())
@@ -106,8 +110,24 @@ class PhoneAgent(private val context: Context) {
 
     fun action(action: UiAction) {
         if (action == UiAction.Pause || action == UiAction.Stop) { stopOwner(); return }
+        if (action is UiAction.Update) { updates.action(action.action); return }
+        if (action == UiAction.Storage("cancel")) { storage.cancel(); return }
+        if (action is UiAction.Storage && action.action != "delete") {
+            try { storage.action(action.action) } catch (error: Exception) { showError(error.message ?: "Storage action failed") }
+            return
+        }
+        if (action == UiAction.ReviewUpdate) { updates.reviewInstallation(); return }
         task {
         when (action) {
+            is UiAction.ReviewStorage -> storage.review(action.disks)
+            is UiAction.StorageRecovery -> storage.recoveryPreference(action.enabled)
+            is UiAction.Storage -> if (action.action == "delete") {
+                check(!store.load().applicationUpdatePending) { "Cancel the application update before deleting storage" }
+                check(!mutable.value.storage.busy) { "Stop current storage work before deleting its files" }
+                store.update { it.copy(policy = it.policy.copy(enabled = false), userStopped = true, prepareRequested = false,
+                    storageDeleteRequested = true, resetRequest = it.resetRequest.ifEmpty { UUID.randomUUID().toString() }) }
+                supervisor.retry(); startService()
+            }
             UiAction.ContinuousSetup -> {
                 store.update { it.copy(policy = it.policy.continuous()) }
                 record("Continuous sharing preferences saved. Review the phone setup permissions.")
@@ -130,7 +150,9 @@ class PhoneAgent(private val context: Context) {
             UiAction.Prepare, UiAction.Resume -> {
                 check(!supervisor.lifecycleStopping) { "Wait for Android to confirm worker shutdown" }
                 val saved = recoverSavedEnrollment()
+                check(!saved.applicationUpdatePending) { "Cancel the application update before preparing or resuming the worker" }
                 check(saved.deviceId.isNotEmpty()) { "Connect this phone to your fleet first" }
+                check(!saved.storageOperationPending && OwnedPhoneStorage(context).load(saved.deviceId).ready) { "Review or finish worker storage changes before enabling sharing" }
                 val snapshot = phoneSnapshot(context, true, supervisor.ownedDiskGib(saved.deviceId))
                 NativeRules.validate(saved.policy, snapshot.host)?.let { throw IllegalArgumentException(it) }
                 check(saved.resetRequest.isEmpty()) { "Finish removing the previous worker before preparing another" }
@@ -141,6 +163,8 @@ class PhoneAgent(private val context: Context) {
             }
             UiAction.Replace -> {
                 check(!supervisor.lifecycleStopping) { "Wait for Android to confirm worker shutdown" }
+                check(!store.load().applicationUpdatePending) { "Cancel the application update before replacing the worker" }
+                check(!mutable.value.storage.busy) { "Stop current storage work before replacing the worker" }
                 store.update { it.copy(policy = it.policy.copy(enabled = false), userStopped = true, prepareRequested = false,
                     resetRequest = it.resetRequest.ifEmpty { UUID.randomUUID().toString() }) }
                 supervisor.retry()

@@ -2,6 +2,8 @@
 use serde::{Deserialize, Serialize};
 mod android;
 pub use android::android_request;
+mod updates;
+pub use updates::verify_signed_update;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkerInput {

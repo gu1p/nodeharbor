@@ -2,7 +2,9 @@
   "version": "2.2.0",
   "archives": {
     "aarch64-apple-darwin": {"name": "lima-2.2.0-Darwin-arm64.tar.gz", "sha256": "bbdef91774885a0d05f7b048c4eb89ae2bcf3a0c252ae7ca7934e63df76d93c3", "guestArch": "aarch64"},
-    "x86_64-apple-darwin": {"name": "lima-2.2.0-Darwin-x86_64.tar.gz", "sha256": "0d6f99c19f6e4bc3c92730c4c29d929e6927f0cb0a0ba1a84383367135a8ff31", "guestArch": "x86_64"}
+    "x86_64-apple-darwin": {"name": "lima-2.2.0-Darwin-x86_64.tar.gz", "sha256": "0d6f99c19f6e4bc3c92730c4c29d929e6927f0cb0a0ba1a84383367135a8ff31", "guestArch": "x86_64"},
+    "aarch64-unknown-linux-gnu": {"name": "lima-2.2.0-Linux-aarch64.tar.gz", "sha256": "7c6a09c6844f55f811e9b7b2b60a6070a512c696c8ec752dfdb3c8ed50ed0364", "guestArch": "aarch64"},
+    "x86_64-unknown-linux-gnu": {"name": "lima-2.2.0-Linux-x86_64.tar.gz", "sha256": "a0ea1ccf6b7335a900adb5f8d2b8384457965fecb1ba72f09b4e3e46d12f424a", "guestArch": "x86_64"}
   },
   "images": {
     "aarch64": {"location": "https://cloud-images.ubuntu.com/releases/noble/release-20260705/ubuntu-24.04-server-cloudimg-arm64.img", "arch": "aarch64", "digest": "sha256:7df0201546f75b8bcc1044594c806c35749421ad3c9bc1be2a3ab806cfae39cc"},

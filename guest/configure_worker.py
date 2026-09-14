@@ -19,6 +19,7 @@ import uuid
 
 ROOT=Path('/etc/nodeharbor')
 RESOLV_CONF=Path('/run/systemd/resolve/resolv.conf')
+STORAGE_SERVICE=Path('/etc/systemd/system/nodeharbor-storage.service')
 
 def progress(message):
     print('NodeHarbor step: '+message,flush=True)
@@ -129,6 +130,15 @@ def main():
     config=json.load(sys.stdin);validate_config(config)
     if (ROOT/'device-id').read_text().strip()!=config['deviceId']:
         raise SystemExit('Refusing to configure a VM owned by another device')
+    pooled=(ROOT/'storage-state.json').exists()
+    if not pooled and ((ROOT/'storage-request.json').exists() or STORAGE_SERVICE.exists() or (ROOT/'storage-state.json').is_symlink()):
+        raise ValueError('Configured storage state is missing; restore the owned pool before configuring Kubernetes')
+    if pooled:
+        state=json.loads((ROOT/'storage-state.json').read_text())
+        if state.get('deviceId')!=config['deviceId']:raise ValueError('Storage belongs to another device')
+        if not state.get('migrationComplete'):raise ValueError('Complete the explicit worker storage migration before configuring Kubernetes')
+        progress('Checking the configured storage pool')
+        run('/usr/bin/python3','/usr/local/lib/nodeharbor/storage_pool.py','check')
     # Use Ubuntu's DHCP-provided upstream DNS. NetBird must not replace it, and
     # invalid DNS must not silently fall back to an unrelated public resolver.
     progress('Checking Ubuntu DNS')
@@ -143,7 +153,13 @@ def main():
     environment=dict(os.environ)
     if config.get('netbirdSetupKey'):environment['NB_SETUP_KEY']=config['netbirdSetupKey']
     progress('Connecting to the private network')
+    # `up` ignores all flags when the daemon has already auto-connected. Apply
+    # settings through a normal reconnect of this owned guest's peer.
+    run('/usr/local/bin/netbird','down')
+    # Flannel runs over NetBird. Its interfaces cannot carry NetBird's own ICE
+    # transport: selecting them creates a recursive tunnel after Kubernetes starts.
     run('/usr/local/bin/netbird','up','--management-url',config['netbirdManagementUrl'],'--hostname',config['nodeName'],'--mtu','1280',
+        '--extra-iface-blacklist','flannel,cni,kube-ipvs',
         '--disable-dns','--disable-server-routes','--disable-client-routes=false','--allow-server-ssh=false',env=environment)
     peer_ip=None
     progress('Waiting for a private network address')
@@ -164,7 +180,20 @@ def main():
          'node-label':['nodeharbor.sikalio.dev/device='+config['deviceId']],
          'resolv-conf':str(RESOLV_CONF),
          'kubelet-arg':['system-reserved=cpu=100m,memory=256Mi','kube-reserved=cpu=150m,memory=256Mi','eviction-hard=memory.available<256Mi,nodefs.available<10%,imagefs.available<15%','container-log-max-size=10Mi','container-log-max-files=2','max-pods=30']}
+    data_directory='/var/lib/rancher/k3s'
+    if pooled:
+        data_directory='/var/lib/nodeharbor/storage/k3s'
+        k3s['data-dir']=data_directory
+        k3s['kubelet-arg'].append('root-dir=/var/lib/nodeharbor/storage/kubelet')
     write('/etc/rancher/k3s/config.yaml',json.dumps(k3s,indent=2)+'\n')
+    # K3s netpol startup waits for a Ready heartbeat newer than CNI startup.
+    # The default five-minute reporting interval can stall an otherwise healthy
+    # warm boot. Use K3s's supported kubelet drop-in for timely node reports.
+    kubelet={
+        'apiVersion':'kubelet.config.k8s.io/v1beta1','kind':'KubeletConfiguration',
+        'nodeStatusReportFrequency':'30s'}
+    if pooled:kubelet['podLogsDir']='/var/lib/nodeharbor/storage/pods'
+    write(data_directory+'/agent/etc/kubelet.conf.d/10-nodeharbor.conf',json.dumps(kubelet)+'\n',0o644)
     unit='''[Unit]
 Description=NodeHarbor Kubernetes worker
 After=network-online.target netbird.service
@@ -184,6 +213,10 @@ TasksMax=infinity
 [Install]
 WantedBy=multi-user.target
 '''
+    if pooled:
+        unit=unit.replace('After=network-online.target netbird.service','After=network-online.target netbird.service nodeharbor-storage.service')
+        unit=unit.replace('Requires=netbird.service','Requires=netbird.service nodeharbor-storage.service')
+        unit=unit.replace('ExecStart=/usr/local/bin/k3s','ExecStartPre=/usr/bin/python3 /usr/local/lib/nodeharbor/storage_pool.py check\nExecStart=/usr/local/bin/k3s')
     write('/etc/systemd/system/k3s-agent.service',unit,0o644)
     run('systemctl','daemon-reload')
     run('systemctl','enable','--now','nodeharbor-watchdog.timer')

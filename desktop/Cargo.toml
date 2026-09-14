@@ -6,6 +6,7 @@ edition.workspace = true
 name = "nodeharbor"
 path = "src/main.rs"
 [dependencies]
+async-trait.workspace = true
 nodeharbor-agent = { path = "../crates/agent" }
 nodeharbor-core = { path = "../crates/core" }
 serde.workspace = true
@@ -13,6 +14,17 @@ serde_json.workspace = true
 tokio.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
+tauri-plugin-dialog = "=2.7.3"
 tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "=2.11.0"
+[target.'cfg(target_os = "macos")'.dependencies]
+anyhow.workspace = true
+flate2 = "1"
+tar = "0.4"
+tempfile.workspace = true
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSError", "NSFileManager", "NSString", "NSURL"] }
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+tempfile.workspace = true

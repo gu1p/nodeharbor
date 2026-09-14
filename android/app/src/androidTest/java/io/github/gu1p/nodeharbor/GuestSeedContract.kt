@@ -5,6 +5,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class GuestSeedContract {
+    @Test fun mainGuestFixesAreCarriedIntoOwnedDiskUpgrades() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val receipt = GuestReceipt("00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002", 15, "test", true)
+        val seed = OwnedGuest(context).workerSeed(receipt).toString(Charsets.UTF_8)
+        assertTrue("Existing disks must adopt the new guest programs", seed.contains("CONTROL_REVISION = '6'"))
+        assertTrue(seed.contains("--extra-iface-blacklist"))
+        assertTrue(seed.contains("nodeStatusReportFrequency"))
+        assertTrue("An existing configured disk must report whether its worker configuration was refreshed", seed.contains("configurationRevision"))
+    }
+
     @Test fun readinessIdentifiesTheActivatedServiceDefinitionAsWellAsItsPythonFile() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val receipt = GuestReceipt("00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002", 15, "test", true)

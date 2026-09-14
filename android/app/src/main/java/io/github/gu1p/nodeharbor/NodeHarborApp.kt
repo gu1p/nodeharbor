@@ -42,6 +42,9 @@ data class UiState(
     val fleet: List<FleetDevice> = emptyList(),
     val eligibleCi: Boolean = false,
     val eligibleServices: Boolean = false,
+    val workloads: List<GuestPod>? = null,
+    val updates: AppUpdateStatus = AppUpdateStatus(),
+    val storage: StorageUiState = StorageUiState(),
 )
 
 sealed interface UiAction {
@@ -57,6 +60,12 @@ sealed interface UiAction {
     data object Replace : UiAction
     data object RefreshFleet : UiAction
     data object CopyLogs : UiAction
+    data object OpenUpdateSettings : UiAction
+    data object ReviewUpdate : UiAction
+    data class Update(val action: String) : UiAction
+    data class Storage(val action: String) : UiAction
+    data class ReviewStorage(val disks: List<PhoneStorageDisk>) : UiAction
+    data class StorageRecovery(val enabled: Boolean) : UiAction
     data class SavePolicy(val policy: PhonePolicy) : UiAction
 }
 
@@ -123,6 +132,9 @@ fun NodeHarborApp(state: UiState, onAction: (UiAction) -> Unit, onEnroll: (Strin
                             Text("${state.policy.cpus} CPUs · ${state.policy.memoryMib / 1024} GiB RAM · ${state.policy.diskGib} GiB disk")
                             Text("Your phone. Your limits.", color = HarborColors.onSurfaceVariant)
                         }
+                        WorkloadPanels(state.workloads)
+                        AppUpdatesPanel(state.updates, onAction)
+                        StoragePanel(state.storage, state.enrolled, onAction)
                         HarborCard {
                             Text("Worker activity", style = MaterialTheme.typography.titleMedium)
                             if (state.activity.isEmpty()) Text("Worker activity will appear here.", color = HarborColors.onSurfaceVariant)
@@ -176,7 +188,7 @@ fun NodeHarborApp(state: UiState, onAction: (UiAction) -> Unit, onEnroll: (Strin
 }
 
 @Composable
-private fun HarborCard(content: @Composable ColumnScope.() -> Unit) {
+internal fun HarborCard(content: @Composable ColumnScope.() -> Unit) {
     Surface(shape = RoundedCornerShape(12.dp), color = HarborColors.surface, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
     }

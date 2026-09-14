@@ -73,7 +73,7 @@ class WorkerBootReceiver : BroadcastReceiver() {
         Thread({
             try {
                 val agent = (context.applicationContext as NodeHarborApplication).agent
-                if (intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) agent.stopOwner()
+                if (intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) agent.startAutomatically(StartCause.Recovery)
                 else agent.startAutomatically(StartCause.Boot)
             } finally { pending.finish() }
         }, "nodeharbor-boot-policy").start()

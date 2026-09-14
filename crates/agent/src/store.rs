@@ -22,6 +22,10 @@ pub struct WorkerRecreation {
 #[serde(rename_all = "camelCase")]
 pub struct Configuration {
     pub format_version: u32,
+    #[serde(default = "updates_enabled")]
+    pub automatic_updates: bool,
+    #[serde(default)]
+    pub application_update_pending: bool,
     #[serde(default)]
     pub vm_provider: crate::VmProvider,
     pub device_id: String,
@@ -42,12 +46,28 @@ pub struct Configuration {
     #[serde(default)]
     pub allocated_resources: Option<nodeharbor_core::Resources>,
     #[serde(default)]
+    pub storage_locations: Vec<crate::storage::Location>,
+    #[serde(default)]
+    pub storage_revision: u64,
+    #[serde(default)]
+    pub storage_generation: u64,
+    #[serde(default)]
+    pub storage_operation: Option<crate::storage::Operation>,
+    #[serde(default)]
+    pub storage_retained: Vec<crate::storage::Location>,
+    #[serde(default)]
+    pub storage_boot_gib: u64,
+    #[serde(default)]
+    pub storage_lifecycle: crate::storage_lifecycle::Lifecycle,
+    #[serde(default)]
     pub recreation: Option<WorkerRecreation>,
 }
 impl Default for Configuration {
     fn default() -> Self {
         Self {
             format_version: 1,
+            automatic_updates: true,
+            application_update_pending: false,
             vm_provider: crate::VmProvider::Multipass,
             device_id: Uuid::new_v4().to_string(),
             name: sysinfo::System::host_name().unwrap_or_else(|| "My computer".into()),
@@ -60,9 +80,19 @@ impl Default for Configuration {
             vm_created: false,
             vm_configured: false,
             allocated_resources: None,
+            storage_locations: Vec::new(),
+            storage_revision: 0,
+            storage_generation: 0,
+            storage_operation: None,
+            storage_retained: Vec::new(),
+            storage_boot_gib: 0,
+            storage_lifecycle: Default::default(),
             recreation: None,
         }
     }
+}
+fn updates_enabled() -> bool {
+    true
 }
 #[derive(Clone)]
 pub struct Store {
@@ -109,12 +139,25 @@ impl Store {
         let config: Configuration = serde_json::from_reader(file)
             .context("NodeHarbor settings are damaged; the original file has been preserved")?;
         anyhow::ensure!(
-            matches!(config.format_version, 1 | 2),
+            matches!(config.format_version, 1..=5),
             "These settings require a newer NodeHarbor application"
         );
         anyhow::ensure!(
-            config.vm_provider != crate::VmProvider::Lima || config.format_version == 2,
+            config.vm_provider != crate::VmProvider::Lima || config.format_version >= 2,
             "The worker runtime requires versioned settings; the original file has been preserved"
+        );
+        anyhow::ensure!(
+            config.storage_locations.is_empty() || config.format_version >= 3,
+            "Storage locations require versioned settings; the original file has been preserved"
+        );
+        anyhow::ensure!(
+            (config.storage_operation.is_none()
+                && config.storage_generation == 0
+                && config.storage_revision == 0
+                && config.storage_retained.is_empty()
+                && config.storage_boot_gib == 0)
+                || config.format_version >= 4,
+            "Storage operations require versioned settings; the original file has been preserved"
         );
         Uuid::parse_str(&config.device_id).context("Invalid saved device identity")?;
         Ok(config)
@@ -130,6 +173,12 @@ impl Store {
         Ok(config)
     }
     fn write(&self, config: &Configuration) -> Result<()> {
+        let mut config = config.clone();
+        if serde_json::to_value(&config.storage_lifecycle)?
+            != serde_json::to_value(crate::storage_lifecycle::Lifecycle::default())?
+        {
+            config.format_version = config.format_version.max(5);
+        }
         let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
         #[cfg(unix)]
         {
@@ -138,12 +187,14 @@ impl Store {
                 .as_file()
                 .set_permissions(fs::Permissions::from_mode(0o600))?;
         }
-        serde_json::to_writer_pretty(&mut temporary, config)?;
+        serde_json::to_writer_pretty(&mut temporary, &config)?;
         temporary.write_all(b"\n")?;
         temporary.as_file().sync_all()?;
         temporary
             .persist(self.path())
             .context("Cannot replace NodeHarbor settings")?;
+        #[cfg(unix)]
+        File::open(&self.directory)?.sync_all()?;
         Ok(())
     }
     pub fn supervisor_lock(&self) -> Result<File> {

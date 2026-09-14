@@ -25,7 +25,9 @@ class MainActivity : ComponentActivity() {
             val state by agent.state.collectAsState()
             NodeHarborApp(state, ::onAction) { url, code -> agent.enroll(url, code) }
         }
+        if (intent.action == AppUpdates.REVIEW_INSTALLATION) agent.updates.reviewInstallation()
     }
+    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); if (intent.action == AppUpdates.REVIEW_INSTALLATION) agent.updates.reviewInstallation() }
     override fun onStart() { super.onStart(); agent.visibility(true); agent.refresh(); agent.startAutomatically(StartCause.Open) }
     override fun onStop() { if (!isChangingConfigurations) agent.visibility(false); super.onStop() }
     private fun onAction(action: UiAction) {
@@ -33,6 +35,7 @@ class MainActivity : ComponentActivity() {
             when (action) {
                 UiAction.OpenBatterySettings -> startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
                 UiAction.OpenAppSettings -> startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:$packageName".toUri()))
+                UiAction.OpenUpdateSettings -> startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, "package:$packageName".toUri()))
                 UiAction.RequestNotifications -> notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
                 UiAction.RequestLocalNetwork -> if (android.os.Build.VERSION.SDK_INT >= 37) localNetworkPermission.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
                 UiAction.CopyLogs -> getSystemService(ClipboardManager::class.java).setPrimaryClip(

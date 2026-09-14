@@ -16,6 +16,11 @@ data class StoredState(
     val workerGeneration: String = "",
     val drainDeadlineMillis: Long? = null,
     val resetRequest: String = "",
+    val automaticUpdates: Boolean = true,
+    val applicationUpdatePending: Boolean = false,
+    val updateInstallVersion: Int = 0,
+    val storageOperationPending: Boolean = false,
+    val storageDeleteRequested: Boolean = false,
 ) {
     fun encode(): String = JSONObject().put("formatVersion", 1)
         .put("shared", policy.sharedJson()).put("phone", policy.phoneJson())
@@ -24,7 +29,10 @@ data class StoredState(
         .put("prepareRequested", prepareRequested).put("workerInstalled", workerInstalled)
         .put("drainingSince", drainingSince ?: JSONObject.NULL)
         .put("workerGeneration", workerGeneration)
-        .put("drainDeadlineMillis", drainDeadlineMillis ?: JSONObject.NULL).put("resetRequest", resetRequest).toString()
+        .put("drainDeadlineMillis", drainDeadlineMillis ?: JSONObject.NULL).put("resetRequest", resetRequest)
+        .put("automaticUpdates", automaticUpdates).put("applicationUpdatePending", applicationUpdatePending)
+        .put("updateInstallVersion", updateInstallVersion).put("storageOperationPending", storageOperationPending)
+        .put("storageDeleteRequested", storageDeleteRequested).toString()
 
     companion object {
         fun decode(text: String, installedVersion: Int): StoredState {
@@ -39,9 +47,11 @@ data class StoredState(
                 val resources = shared.getJSONObject("resources")
                 val windows = shared.getJSONArray("schedule")
                 val changed = data.getInt("installedVersion") != installedVersion
+                val ownedUpdate = changed && data.optBoolean("applicationUpdatePending") &&
+                    data.optInt("updateInstallVersion") == installedVersion && installedVersion > 0
                 return StoredState(
                     policy = PhonePolicy(
-                        enabled = !changed && shared.getBoolean("enabled"),
+                        enabled = (!changed || ownedUpdate) && shared.getBoolean("enabled"),
                         cpus = resources.getInt("cpus"), memoryMib = resources.getInt("memoryMib"), diskGib = resources.getInt("diskGib"),
                         allowBattery = shared.getBoolean("allowBattery"), minBatteryPercent = shared.getInt("minBatteryPercent"),
                         allowCi = shared.getBoolean("allowCi"), allowServices = shared.getBoolean("allowServices"),
@@ -56,13 +66,18 @@ data class StoredState(
                         allowMetered = phone.getBoolean("allowMetered"), screenOffOnly = phone.getBoolean("screenOffOnly"),
                     ),
                     deviceId = id, controllerUrl = data.getString("controllerUrl"), installedVersion = installedVersion,
-                    userStopped = changed || data.getBoolean("userStopped"),
+                    userStopped = (changed && !ownedUpdate) || data.getBoolean("userStopped"),
                     prepareRequested = !changed && data.getBoolean("prepareRequested"),
                     workerInstalled = data.getBoolean("workerInstalled"),
                     drainingSince = if (data.isNull("drainingSince")) null else data.getLong("drainingSince"),
                     workerGeneration = data.getString("workerGeneration"),
                     drainDeadlineMillis = if (data.isNull("drainDeadlineMillis")) null else data.getLong("drainDeadlineMillis"),
                     resetRequest = data.optString("resetRequest").also { if (it.isNotEmpty()) UUID.fromString(it) },
+                    automaticUpdates = data.optBoolean("automaticUpdates", true),
+                    applicationUpdatePending = !changed && data.optBoolean("applicationUpdatePending"),
+                    updateInstallVersion = if (changed) 0 else data.optInt("updateInstallVersion").also { require(it >= 0) },
+                    storageOperationPending = data.optBoolean("storageOperationPending", false),
+                    storageDeleteRequested = data.optBoolean("storageDeleteRequested", false),
                 )
             } catch (error: Exception) {
                 throw IllegalArgumentException("Saved settings could not be read; the original file has been preserved", error)

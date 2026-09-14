@@ -30,10 +30,32 @@ class SandboxService : Service() {
         override fun boot(disk: ParcelFileDescriptor, kernel: ParcelFileDescriptor, initrd: ParcelFileDescriptor,
                           seed: ParcelFileDescriptor, console: ParcelFileDescriptor, control: ParcelFileDescriptor,
                           diskReader: ParcelFileDescriptor, broker: ISocketBroker, cpus: Int, memoryMib: Int) {
+            bootPool(disk, kernel, initrd, seed, console, control, diskReader, emptyArray(), emptyArray(), broker, cpus, memoryMib)
+        }
+        override fun bootPool(disk: ParcelFileDescriptor, kernel: ParcelFileDescriptor, initrd: ParcelFileDescriptor,
+                          seed: ParcelFileDescriptor, console: ParcelFileDescriptor, control: ParcelFileDescriptor,
+                          diskReader: ParcelFileDescriptor, storage: Array<ParcelFileDescriptor>, readers: Array<ParcelFileDescriptor>,
+                          broker: ISocketBroker, cpus: Int, memoryMib: Int) {
+            require(storage.size == readers.size && storage.size <= 16) { "Invalid owned storage descriptors" }
+            val files = listOf(disk, kernel, initrd, seed, diskReader) + storage + readers
+            val ownedDisks = listOf(disk) + storage
+            val readDisks = listOf(diskReader) + readers
+            val identities = ownedDisks.mapIndexed { index, file ->
+                val identity = Os.fstat(file.fileDescriptor)
+                val reader = Os.fstat(readDisks[index].fileDescriptor)
+                require(OsConstants.S_ISREG(identity.st_mode) && identity.st_size > 0 &&
+                    identity.st_dev == reader.st_dev && identity.st_ino == reader.st_ino &&
+                    Os.fcntlInt(file.fileDescriptor, OsConstants.F_GETFL, 0) and OsConstants.O_ACCMODE == OsConstants.O_RDWR &&
+                    Os.fcntlInt(readDisks[index].fileDescriptor, OsConstants.F_GETFL, 0) and OsConstants.O_ACCMODE == OsConstants.O_RDONLY) {
+                    "Each owned disk needs matching writable and read-only descriptors"
+                }
+                identity.st_dev to identity.st_ino
+            }
+            require(identities.distinct().size == identities.size) { "A storage member cannot be attached more than once" }
             check(started.compareAndSet(false, true)) { "The isolated runtime is already in use" }
-            val files = listOf(disk, kernel, initrd, seed, diskReader)
             val network = ParcelFileDescriptor.createSocketPair()
-            val args = guestArguments(PhonePolicy(cpus = cpus, memoryMib = memoryMib), files.map { it.fd }, console.fd, control.fd, network[0].fd)
+            val args = guestArguments(PhonePolicy(cpus = cpus, memoryMib = memoryMib), files.take(5).map { it.fd }, console.fd, control.fd, network[0].fd,
+                storage.zip(readers).map { it.first.fd to it.second.fd })
             for (file in files) {
                 val flags = Os.fcntlInt(file.fileDescriptor, OsConstants.F_GETFD, 0)
                 Os.fcntlInt(file.fileDescriptor, OsConstants.F_SETFD, flags and OsConstants.FD_CLOEXEC.inv())

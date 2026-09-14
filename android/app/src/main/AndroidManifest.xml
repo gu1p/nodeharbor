@@ -8,9 +8,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <application android:name=".NodeHarborApplication" android:label="NodeHarbor" android:icon="@drawable/ic_nodeharbor"
         android:usesCleartextTraffic="false"
         android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules" android:supportsRtl="true">
+        <meta-data android:name="io.github.gu1p.nodeharbor.SOURCE_COMMIT" android:value="${sourceCommit}" />
         <activity android:name=".MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -18,6 +20,7 @@
             </intent-filter>
         </activity>
         <service android:name=".SandboxService" android:exported="false" android:isolatedProcess="true" />
+        <receiver android:name=".UpdateInstallReceiver" android:exported="false" />
         <service android:name=".WorkerService" android:exported="false" android:stopWithTask="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Owner-enabled continuous isolated Linux worker for fleet CI and services, with notification stop controls and bounded draining" />

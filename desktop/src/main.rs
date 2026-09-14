@@ -11,7 +11,13 @@ use tauri::{
     AppHandle, Manager, State,
 };
 use tauri_plugin_autostart::ManagerExt;
+#[cfg(target_os = "macos")]
+mod macos_update;
 mod settings;
+mod storage_commands;
+mod storage_dialog;
+mod update_flow;
+mod updates;
 
 struct NativeStartup<'a>(&'a AppHandle);
 impl settings::StartupRegistration for NativeStartup<'_> {
@@ -35,6 +41,21 @@ struct Desktop {
     agent: Agent,
     settings: tokio::sync::Mutex<()>,
     quitting: AtomicBool,
+}
+
+#[tauri::command]
+fn update_status(state: State<'_, std::sync::Arc<updates::Updates>>) -> updates::Status {
+    state.status()
+}
+#[tauri::command]
+async fn update_action(
+    app: AppHandle,
+    state: State<'_, Desktop>,
+    updates: State<'_, std::sync::Arc<updates::Updates>>,
+    action: String,
+) -> Result<updates::Status, String> {
+    let _settings = state.settings.lock().await;
+    updates.action(&app, &action)
 }
 
 #[tauri::command]
@@ -108,6 +129,13 @@ fn show(app: &AppHandle) {
 }
 
 fn request_close(app: &AppHandle, explicit_quit: bool) {
+    if app
+        .state::<std::sync::Arc<updates::Updates>>()
+        .status()
+        .is_installing()
+    {
+        return;
+    }
     let state = app.state::<Desktop>();
     let Ok(config) = state.agent.store.load() else {
         // A damaged configuration must stay visible instead of silently
@@ -181,6 +209,8 @@ fn main() {
                 show(app);
             }
         }))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_autostart::Builder::new()
                 .app_name("NodeHarbor")
@@ -188,10 +218,17 @@ fn main() {
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
+            update_status,
+            update_action,
             snapshot,
             activity,
             save_policy,
             recreate_worker,
+            storage_commands::preview_storage,
+            storage_commands::apply_storage,
+            storage_commands::set_storage_recovery,
+            storage_commands::retry_storage_maintenance,
+            storage_commands::choose_storage_directory,
             worker_action,
             enroll,
             fleet
@@ -207,6 +244,8 @@ fn main() {
                 .unwrap_or_else(Store::default_directory)?;
             let agent = Agent::open(&directory)?;
             let supervisor = agent.clone();
+            let updates = updates::Updates::new(agent.store.load()?.automatic_updates);
+            app.manage(updates.clone());
             app.manage(Desktop {
                 agent,
                 settings: tokio::sync::Mutex::new(()),
@@ -241,7 +280,13 @@ fn main() {
                     _ => {}
                 })
                 .build(app)?;
+            let update_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                if let Err(error) = supervisor.cancel_application_update().await {
+                    eprintln!("NodeHarbor update recovery: {error}");
+                    return;
+                }
+                tauri::async_runtime::spawn(updates.run(update_app));
                 if let Err(error) = supervisor.run().await {
                     eprintln!("NodeHarbor supervisor: {error}");
                 }
