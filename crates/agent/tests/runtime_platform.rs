@@ -75,13 +75,43 @@ fn macos_preflight_requires_the_packaged_app_minimum_and_hardware_virtualization
 }
 
 #[test]
-fn existing_multipass_workers_keep_their_provider_after_the_linux_default_changes() {
+fn obsolete_multipass_settings_reset_only_on_linux() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
+    store
+        .update(|configuration| {
+            configuration.vm_provider = VmProvider::Multipass;
+            configuration.device_token = Some("obsolete-test-enrollment".into());
+            configuration.policy.enabled = true;
+            Ok(())
+        })
+        .unwrap();
     let before = store.load().unwrap();
+    let original = std::fs::read(directory.path().join("config.json")).unwrap();
     let reopened = Agent::open(directory.path()).unwrap().store.load().unwrap();
-    assert_eq!(reopened.vm_provider, VmProvider::Multipass);
-    assert_eq!(reopened.device_id, before.device_id);
+    if cfg!(target_os = "linux") {
+        assert_eq!(reopened.vm_provider, VmProvider::Lima);
+        assert_ne!(reopened.device_id, before.device_id);
+        assert!(reopened.device_token.is_none());
+        assert!(!reopened.policy.enabled);
+        assert!(reopened.setup_notice.unwrap().contains("enroll again"));
+        let archive = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("obsolete-multipass-")
+            })
+            .unwrap();
+        assert_eq!(std::fs::read(archive).unwrap(), original);
+    } else {
+        assert_eq!(reopened.vm_provider, VmProvider::Multipass);
+        assert_eq!(reopened.device_id, before.device_id);
+        assert_eq!(reopened.device_token, before.device_token);
+        assert!(reopened.policy.enabled);
+    }
 }
 
 #[test]
