@@ -58,6 +58,21 @@ def bundle_lima(target):
     verify_bundle(directory)
     return directory
 
+def bundle_files(directory):
+    root=Path(directory).resolve(strict=True)
+    files={}
+    def visit(path,ancestors):
+        resolved=path.resolve(strict=True)
+        if not resolved.is_relative_to(root) or resolved in ancestors:
+            raise ValueError('VM runtime links must stay inside the bundle without cycles')
+        if path.is_dir():
+            for child in sorted(path.iterdir()):visit(child,ancestors|{resolved})
+        elif path.is_file():
+            files['/usr/libexec/nodeharbor/lima/'+path.relative_to(root).as_posix()]=str(path)
+        else:raise ValueError('VM runtime contains an unsupported file type')
+    visit(root,set())
+    return files
+
 def bundle_configuration(target):
     bundle={'externalBin':['binaries/nodeharbor-agent']}
     if 'apple-darwin' in target:
@@ -66,8 +81,9 @@ def bundle_configuration(target):
         emulator='qemu-system-arm' if target.startswith('aarch64-') else 'qemu-system-x86'
         firmware='qemu-efi-aarch64' if target.startswith('aarch64-') else 'ovmf'
         # Keep the separately verified tools outside linuxdeploy's usr/lib ELF
-        # rewriting. Tauri's package mappings preserve this private tool layout.
-        files={'/usr/libexec/nodeharbor/lima':str(bundle_lima(target))}
+        # rewriting. File mappings materialize aliases: Tauri's Debian tar writer
+        # cannot archive directory symlinks copied through a directory mapping.
+        files=bundle_files(bundle_lima(target))
         bundle['linux']={'deb':{'files':files,'depends':['libwebkit2gtk-4.1-0','libayatana-appindicator3-1','libxss1',emulator,firmware,'qemu-utils','openssh-client','gzip']},'appimage':{'files':files}}
     return bundle
 

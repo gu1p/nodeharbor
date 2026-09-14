@@ -322,3 +322,15 @@ also contains `0.1.72`. The CLI upgrade contract fails with `(0, 1, 65) not grea
 than (0, 1, 72)` (`/tmp/nodeharbor-726-release-version-red.log`). Start this feature's
 release line at `0.2`, retaining the deterministic first-parent sequence, exact
 source stamping, immutable-tag checks, and update-channel downgrade protection.
+
+Linux ARM64 run 34818491941 (`38bc5d5`) fails Debian archive creation with
+`Is a directory (os error 21)` (`/tmp/nodeharbor-726-38bc-linux-arm.log`). The pinned
+Lima archive contains `share/doc/lima/templates -> ../../lima/templates`; Tauri's
+custom directory copier preserves that alias but its Debian tar writer treats it
+as a regular file. The package round-trip contract fails on directory mappings,
+and the alias-boundary unit fails before the file mapper exists
+(`/tmp/nodeharbor-726-runtime-file-mapping-red.log`,
+`/tmp/nodeharbor-726-runtime-file-boundary-red.log`). Enumerate individual regular
+files, including internal alias contents, through supported package mappings.
+Reject aliases outside the verified root and directory cycles; retain original
+runtime bytes, executable modes, inventory, license, and template paths.

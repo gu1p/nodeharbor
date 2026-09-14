@@ -2,7 +2,9 @@
 import hashlib
 import importlib.util
 import io
+import os
 from pathlib import Path
+import shutil
 import tarfile
 import tempfile
 import unittest
@@ -45,18 +47,57 @@ class VmRuntime(unittest.TestCase):
 
     def test_linux_packages_include_lima_and_architecture_specific_qemu_dependencies(self):
         runtime=module()
-        for target,emulator in [('aarch64-unknown-linux-gnu','qemu-system-arm'),('x86_64-unknown-linux-gnu','qemu-system-x86')]:
-            with self.subTest(target=target),patch.object(runtime,'bundle_lima',return_value=Path('/verified/lima')) as bundled:
-                config=runtime.bundle_configuration(target)
-                bundled.assert_called_once_with(target)
-                self.assertNotIn('resources',config)
-                for package in ['deb','appimage']:
-                    self.assertEqual(config['linux'][package]['files'],
-                                     {'/usr/libexec/nodeharbor/lima':str(Path('/verified/lima'))})
-                dependencies=config['linux']['deb']['depends']
-                for dependency in [emulator,'qemu-utils','openssh-client','gzip','libwebkit2gtk-4.1-0','libayatana-appindicator3-1','libxss1']:
-                    self.assertIn(dependency,dependencies)
-                self.assertNotIn('multipass',dependencies)
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve();(root/'bin').mkdir();(root/'bin/limactl').write_bytes(b'limactl')
+            for target,emulator in [('aarch64-unknown-linux-gnu','qemu-system-arm'),('x86_64-unknown-linux-gnu','qemu-system-x86')]:
+                with self.subTest(target=target),patch.object(runtime,'bundle_lima',return_value=root) as bundled:
+                    config=runtime.bundle_configuration(target)
+                    bundled.assert_called_once_with(target)
+                    self.assertNotIn('resources',config)
+                    for package in ['deb','appimage']:
+                        self.assertEqual(config['linux'][package]['files'],
+                                         {'/usr/libexec/nodeharbor/lima/bin/limactl':str(root/'bin/limactl')})
+                    dependencies=config['linux']['deb']['depends']
+                    for dependency in [emulator,'qemu-utils','openssh-client','gzip','libwebkit2gtk-4.1-0','libayatana-appindicator3-1','libxss1']:
+                        self.assertIn(dependency,dependencies)
+                    self.assertNotIn('multipass',dependencies)
+
+    @unittest.skipIf(os.name=='nt','Linux bundle aliases require Unix symlinks')
+    def test_linux_runtime_file_mapping_rejects_escaping_or_recursive_aliases(self):
+        runtime=module()
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve();source=root/'lima';source.mkdir()
+            outside=root/'outside';outside.write_bytes(b'host file')
+            alias=source/'alias';alias.symlink_to(outside)
+            with self.assertRaisesRegex(ValueError,'inside the bundle without cycles'):
+                runtime.bundle_files(source)
+            alias.unlink();alias.symlink_to(source,target_is_directory=True)
+            with self.assertRaisesRegex(ValueError,'inside the bundle without cycles'):
+                runtime.bundle_files(source)
+
+    @unittest.skipIf(os.name=='nt','Linux bundle aliases require Unix symlinks')
+    def test_linux_package_mapping_preserves_verified_tools_and_directory_alias_contents(self):
+        runtime=module()
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory).resolve();source=root/'lima';bundle=root/'lima.tar.gz'
+            digest=archive(bundle,{'bin/limactl':b'executable','share/lima/lima-guestagent.Linux-aarch64.gz':b'guest',
+                                  'share/doc/lima/LICENSE':b'license','share/doc/lima/templates/default.yaml':b'template'})
+            runtime.extract_bundle(bundle,source,digest,'aarch64')
+            (source/'share/lima/templates').symlink_to('../doc/lima/templates',target_is_directory=True)
+            (source/'bin/lima').symlink_to('limactl')
+            with patch.object(runtime,'bundle_lima',return_value=source), patch.dict(runtime.MANIFEST['archives'],{'fixture':{'sha256':digest}}):
+                config=runtime.bundle_configuration('aarch64-unknown-linux-gnu')
+                for kind in ['deb','appimage']:
+                    package=root/kind
+                    for destination,original in config['linux'][kind]['files'].items():
+                        self.assertTrue(Path(original).is_file(),'Package mappings must contain files, not directories')
+                        path=package/destination.lstrip('/');path.parent.mkdir(parents=True,exist_ok=True)
+                        shutil.copy2(original,path)
+                    installed=package/'usr/libexec/nodeharbor/lima'
+                    runtime.verify_bundle(installed)
+                    self.assertEqual((installed/'share/lima/templates/default.yaml').read_bytes(),b'template')
+                    self.assertEqual((installed/'bin/lima').read_bytes(),b'executable')
+                    self.assertFalse(any(path.is_symlink() for path in installed.rglob('*')))
 
     def test_windows_packaging_keeps_its_existing_runtime_provider(self):
         runtime=module()
