@@ -3,7 +3,7 @@ mod storage_commands;
 #[path = "../src/storage_dialog.rs"]
 mod storage_dialog;
 
-use nodeharbor_agent::{Agent, Store};
+use nodeharbor_agent::{Agent, VmProvider};
 use serde_json::{json, Value};
 use tauri::{test, webview::InvokeRequest};
 
@@ -14,12 +14,21 @@ struct Desktop {
 
 fn invoke(command: &str, body: Value) -> (Result<Value, Value>, Vec<u8>, Vec<u8>) {
     let directory = tempfile::tempdir().unwrap();
-    // Existing Multipass settings must stay intact even on a new Lima host.
-    let store = Store::open(directory.path()).unwrap();
+    // Exercise the unsupported runtime capability explicitly. Native startup
+    // migration has its own platform contract and must not define this fixture.
+    let agent = Agent::open(directory.path()).unwrap();
+    agent
+        .store
+        .update(|configuration| {
+            configuration.vm_provider = VmProvider::Multipass;
+            Ok(())
+        })
+        .unwrap();
+    let store = agent.store.clone();
     let before = std::fs::read(directory.path().join("config.json")).unwrap();
     let app = test::mock_builder()
         .manage(Desktop {
-            agent: Agent::open(directory.path()).unwrap(),
+            agent,
             settings: tokio::sync::Mutex::new(()),
         })
         .invoke_handler(tauri::generate_handler![

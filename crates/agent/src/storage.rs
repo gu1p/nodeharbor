@@ -478,6 +478,10 @@ pub fn inventory(
         }
         #[cfg(target_os = "linux")]
         {
+            use std::os::unix::fs::MetadataExt;
+            volume.label = std::fs::metadata(disk.mount_point()).ok()
+                .and_then(|metadata| device_label(Path::new("/dev/disk/by-label"), metadata.dev()))
+                .unwrap_or_default();
             if let Ok(identity) = linux_volume(disk.mount_point()) {
                 volume.id = identity.clone();
                 volume.capacity_pool = identity;
@@ -770,4 +774,74 @@ fn macos_volume(path: &Path) -> Result<MacVolume> {
         pool,
         ownership: stat.f_flags & libc::MNT_IGNORE_OWNERSHIP as u32 == 0,
     })
+}
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn device_label(directory: &Path, device: u64) -> Option<String> {
+    use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+    fn decode(encoded: &[u8]) -> Option<String> {
+        let mut bytes = Vec::with_capacity(encoded.len());
+        let mut index = 0;
+        while index < encoded.len() {
+            if encoded[index] == b'\\' {
+                if encoded.get(index + 1) != Some(&b'x') {
+                    return None;
+                }
+                let digits = std::str::from_utf8(encoded.get(index + 2..index + 4)?).ok()?;
+                bytes.push(u8::from_str_radix(digits, 16).ok()?);
+                index += 4;
+            } else {
+                bytes.push(encoded[index]);
+                index += 1;
+            }
+        }
+        let label = String::from_utf8(bytes).ok()?;
+        (!label.is_empty() && !label.chars().any(char::is_control)).then_some(label)
+    }
+    // Udev's persistent labels refer to block devices; match their device number
+    // to the mounted filesystem instead of treating a /dev name as its label.
+    for entry in std::fs::read_dir(directory).ok()?.flatten() {
+        if std::fs::metadata(entry.path()).is_ok_and(|metadata| metadata.rdev() == device) {
+            if let Some(label) = decode(entry.file_name().as_bytes()) {
+                return Some(label);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(all(test, unix))]
+mod label_tests {
+    use super::*;
+    use std::os::unix::{fs::symlink, fs::MetadataExt};
+
+    #[test]
+    fn mounted_device_labels_decode_udev_escapes_and_ignore_other_devices() {
+        let directory = tempfile::tempdir().unwrap();
+        symlink("/dev/zero", directory.path().join("Other drive")).unwrap();
+        symlink(
+            "/dev/null",
+            directory.path().join(r"Work\x20SSD\x20\xc3\xa9"),
+        )
+        .unwrap();
+        let device = std::fs::metadata("/dev/null").unwrap().rdev();
+        assert_eq!(
+            device_label(directory.path(), device).as_deref(),
+            Some("Work SSD é")
+        );
+        assert!(device_label(directory.path(), u64::MAX).is_none());
+    }
+
+    #[test]
+    fn unavailable_or_invalid_labels_do_not_invent_a_volume_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let device = std::fs::metadata("/dev/null").unwrap().rdev();
+        assert!(device_label(&directory.path().join("missing"), device).is_none());
+        for label in [r"bad\x00label", r"bad\xff", r"bad\xzz", r"bad\x1"] {
+            let path = directory.path().join(label);
+            symlink("/dev/null", &path).unwrap();
+            assert!(device_label(directory.path(), device).is_none(), "{label}");
+            std::fs::remove_file(path).unwrap();
+        }
+    }
 }
