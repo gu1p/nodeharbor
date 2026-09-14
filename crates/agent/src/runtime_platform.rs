@@ -121,8 +121,13 @@ fn kvm_api_version() -> Result<i32> {
         "The host KVM device is invalid"
     );
     // KVM_GET_API_VERSION is the read-only system ioctl documented by Linux.
+    // Its unused argument must be zero. Omitting the variadic argument can
+    // leave a nonzero register value, which KVM rejects with EINVAL.
     // It does not create a VM or change the device configuration.
-    let version = unsafe { libc::ioctl(file.as_raw_fd(), 0xAE00) };
+    let version = unsafe { libc::ioctl(file.as_raw_fd(), 0xAE00, 0 as libc::c_ulong) };
+    if version < 0 {
+        return Err(std::io::Error::last_os_error()).context("Cannot query the host KVM API");
+    }
     Ok(version)
 }
 
