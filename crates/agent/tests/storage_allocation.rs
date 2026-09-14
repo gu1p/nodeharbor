@@ -18,6 +18,8 @@ fn system_disk_capacity_resolves_an_existing_directory_alias() {
 
 fn volume(root: &Path, id: &str, pool: &str, free: u64) -> Volume {
     Volume {
+        drive_type: None,
+        suggested_directory: None,
         id: id.into(),
         capacity_pool: pool.into(),
         label: id.into(),
@@ -31,6 +33,7 @@ fn volume(root: &Path, id: &str, pool: &str, free: u64) -> Volume {
 }
 fn selection(path: &Path, size: u64) -> Selection {
     Selection {
+        expected_volume_id: None,
         id: None,
         directory: path.to_string_lossy().into(),
         allocation_gib: size,
@@ -309,4 +312,29 @@ fn current_lima_system_image_credits_real_blocks_instead_of_its_sparse_size() {
         nodeharbor_agent::storage::allocated_system_bytes(root.path()).unwrap(),
         expected
     );
+}
+
+#[test]
+fn picker_identity_rejects_a_replaced_or_disappeared_mount_before_writing() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("NodeHarbor");
+    let selected: Selection = serde_json::from_value(serde_json::json!({
+        "directory": directory, "allocationGib": 30, "expectedVolumeId": "original"
+    }))
+    .unwrap();
+    for volumes in [
+        vec![],
+        vec![volume(root.path(), "replacement", "pool", 100)],
+    ] {
+        assert!(plan(std::slice::from_ref(&selected), &directory, 30, &volumes).is_err());
+        assert!(!directory.exists());
+    }
+    let result = plan(
+        &[selected],
+        &directory,
+        30,
+        &[volume(root.path(), "original", "pool", 100)],
+    )
+    .unwrap();
+    assert_eq!(result[0].volume_id, "original");
 }

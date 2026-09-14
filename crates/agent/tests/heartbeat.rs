@@ -84,6 +84,8 @@ async fn selected_volume_capacity_controls_permission_without_sending_host_paths
         root.as_path(),
         Arc::new(NoVmCommands),
         vec![nodeharbor_agent::storage::Volume {
+            drive_type: None,
+            suggested_directory: None,
             id: "fixture-volume".into(),
             capacity_pool: "fixture-pool".into(),
             label: "Test volume".into(),

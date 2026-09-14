@@ -77,6 +77,7 @@ impl Agent {
             .locations
             .iter()
             .map(|location| Selection {
+                expected_volume_id: Some(location.volume_id.clone()),
                 id: config
                     .storage_locations
                     .iter()
@@ -399,6 +400,7 @@ impl Agent {
             .storage_locations
             .iter()
             .map(|location| Selection {
+                expected_volume_id: Some(location.volume_id.clone()),
                 id: Some(location.id.clone()),
                 directory: location.directory.clone(),
                 allocation_gib: location.allocation_gib,
@@ -774,6 +776,7 @@ impl Agent {
             .target
             .iter()
             .map(|location| Selection {
+                expected_volume_id: Some(location.volume_id.clone()),
                 id: Some(location.id.clone()),
                 directory: location.directory.clone(),
                 allocation_gib: location.allocation_gib,

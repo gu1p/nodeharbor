@@ -22,6 +22,8 @@ fn fixture(directory: &std::path::Path) -> Agent {
         directory,
         Arc::new(NoRuntimeWrites),
         vec![nodeharbor_agent::storage::Volume {
+            drive_type: None,
+            suggested_directory: None,
             id: "fixture".into(),
             capacity_pool: "fixture".into(),
             label: "Test disk".into(),

@@ -142,7 +142,7 @@ jobs:
           NODEHARBOR_ANDROID_STORE_PASSWORD: ${{ secrets.NODEHARBOR_ANDROID_STORE_PASSWORD }}
           NODEHARBOR_ANDROID_KEY_ALIAS: ${{ secrets.NODEHARBOR_ANDROID_KEY_ALIAS }}
           NODEHARBOR_ANDROID_KEY_PASSWORD: ${{ secrets.NODEHARBOR_ANDROID_KEY_PASSWORD }}
-        run: python scripts/build_android.py "$NODEHARBOR_VERSION" "$NODEHARBOR_COMMIT" --release
+        run: python scripts/build_android.py "$NODEHARBOR_VERSION" "$NODEHARBOR_COMMIT" --release --upgrade-pair
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: native-aarch64-linux-android

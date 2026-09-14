@@ -102,7 +102,7 @@ class ReleaseContract(unittest.TestCase):
             if os_name == 'android':
                 manifest['qualification'] = dict(version='0.1.12', commit='a'*40, apkSha256=assets[0]['sha256'],
                     certificateSha256='c'*64, signedRelease=True, physical=True, apiLevels=[33,36,37],
-                    ownerControlsPassed=True, vpnPreserved=True, ciQualified=True, arm64JobSucceeded=True)
+                    ownerControlsPassed=True, vpnPreserved=True, ciQualified=True, arm64JobSucceeded=True, upgradePassed=True, upgradeFromVersion="0.1.11")
             (folder/f'nodeharbor-v0.1.12-{target}.json').write_text(json.dumps(manifest))
 
     def test_complete_packages_are_accepted_but_tampering_and_wrong_architecture_are_rejected(self):
@@ -142,6 +142,22 @@ class ReleaseContract(unittest.TestCase):
                   {'tag_name':'v0.1.10','target_commitish':'pending','draft':True,'prerelease':False}]
         self.assertEqual(release.latest_release(releases,['pending','new','old']),'v0.1.9')
         self.assertEqual(release.latest_release(list(reversed(releases)),['pending','new','old']),'v0.1.9')
+
+    def test_merged_0_1_72_beats_first_parent_0_1_57_and_invalid_tags(self):
+        releases = [dict(tag_name=tag, target_commitish=sha) for tag, sha in [
+            ('v0.1.57', 'main'), ('v0.1.72', 'merged'), ('v0.1.9', 'main'),
+            ('v0.01.999', 'main'), ('nightly', 'main'), ('v9.0.0', 'unmerged')]]
+        self.assertEqual(release.latest_release(releases, ['main', 'merged']), 'v0.1.72')
+
+    def test_reconcile_uses_all_main_ancestry(self):
+        releases = [[dict(tag_name='v0.1.72', target_commitish='merged')]]
+        def output(command, **kwargs):
+            if command[0] == 'gh': return json.dumps(releases)
+            self.assertEqual(command, ['git', 'rev-list', 'origin/main'])
+            return 'main\nmerged\n'
+        with patch('sys.argv', ['release.py', 'reconcile-latest']), patch.object(release.subprocess, 'check_output', side_effect=output), patch.object(release.subprocess, 'run') as run:
+            release.main()
+        self.assertIn('v0.1.72', run.call_args.args[0])
 
     def test_a_published_release_is_immutable_and_rerunning_the_same_release_is_safe(self):
         asset={'name':'nodeharbor-v0.1.12-x86_64-pc-windows-msvc.exe','sha256':'c'*64}

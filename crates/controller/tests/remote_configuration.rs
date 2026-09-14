@@ -345,6 +345,8 @@ async fn browser_storage_reviews_and_changes_use_the_authenticated_agent_and_pre
     let root = dir.path().canonicalize().unwrap();
     let volume_id = nodeharbor_agent::storage::volume_identity(&root).unwrap();
     let volume = nodeharbor_agent::storage::Volume {
+        drive_type: None,
+        suggested_directory: None,
         id: volume_id.clone(),
         capacity_pool: volume_id,
         label: "Data".into(),

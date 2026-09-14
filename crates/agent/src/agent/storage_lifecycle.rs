@@ -630,7 +630,7 @@ impl Agent {
         let total: u64 = remaining.iter().map(|l| l.allocation_gib).sum();
         match recovery_decision(config.storage_lifecycle.recovery_enabled, config.policy.enabled && !config.application_update_pending, saved.since, now, total, saved.error.is_some()) {
             RecoveryDecision::Rebuild => {
-                let selections = remaining.iter().map(|l| Selection {id:Some(l.id.clone()), directory:l.directory.clone(), allocation_gib:l.allocation_gib}).collect::<Vec<_>>();
+                let selections = remaining.iter().map(|l| Selection {expected_volume_id:Some(l.volume_id.clone()), id:Some(l.id.clone()), directory:l.directory.clone(), allocation_gib:l.allocation_gib}).collect::<Vec<_>>();
                 let mut volumes = inventory; self.reserve_boot_storage(config, &mut volumes)?;
                 crate::storage::plan_change(&selections, &self.store.directory.join("storage"), total, &volumes.volumes, &remaining, &crate::storage::allocated_bytes(&self.store.directory, &config.device_id, &remaining))?;
                 let plan = ChangePlan {revision:config.storage_revision, locations:remaining, total_gib:total, requires_restart:true,
@@ -772,12 +772,14 @@ impl Agent {
                 .storage_locations
                 .iter()
                 .map(|l| Selection {
+                    expected_volume_id: Some(l.volume_id.clone()),
                     id: Some(l.id.clone()),
                     directory: l.directory.clone(),
                     allocation_gib: l.allocation_gib,
                 })
                 .collect();
             selections.push(Selection {
+                expected_volume_id: Some(old.volume_id.clone()),
                 id: None,
                 directory: old.directory.clone(),
                 allocation_gib: old.allocation_gib,
@@ -988,6 +990,7 @@ impl Agent {
             .locations
             .iter()
             .map(|l| Selection {
+                expected_volume_id: Some(l.volume_id.clone()),
                 id: config
                     .storage_locations
                     .iter()

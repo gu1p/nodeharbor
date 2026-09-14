@@ -91,13 +91,35 @@ def build(version, commit, release, allow_dirty=False):
     print('Built and verified ' + destination.name + '; physical and fleet qualification are still required')
 
 
+def previous_version(version):
+    code = android_version_code(version) - 1
+    if code < 1: raise ValueError('Signed upgrade qualification needs a lower installable version')
+    return f'{code // 100_000_000}.{code % 100_000_000 // 1_000_000}.{code % 1_000_000}'
+
+
+def build_upgrade_pair(version, commit):
+    previous = previous_version(version)
+    build(previous, commit, True)
+    output = ROOT / 'dist'
+    baseline = output / 'android-upgrade'
+    baseline.mkdir(exist_ok=True)
+    for path in [*output.glob(f'nodeharbor-v{previous}-{TARGET}*'), output / 'android-tests.apk']:
+        shutil.move(str(path), baseline / path.name)
+    build(version, commit, True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('version'); parser.add_argument('commit')
     parser.add_argument('--release', action='store_true')
     parser.add_argument('--allow-dirty', action='store_true')
+    parser.add_argument('--upgrade-pair', action='store_true')
     args = parser.parse_args()
-    build(args.version, args.commit, args.release, args.allow_dirty)
+    if args.upgrade_pair:
+        if not args.release or args.allow_dirty: raise ValueError('Upgrade qualification requires signed clean release builds')
+        build_upgrade_pair(args.version, args.commit)
+    else:
+        build(args.version, args.commit, args.release, args.allow_dirty)
 
 
 if __name__ == '__main__': main()

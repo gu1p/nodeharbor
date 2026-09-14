@@ -9,8 +9,8 @@ import re
 import subprocess
 import time
 import uuid
-from build_android import certificate
-from release import checksum, validate_android_qualification
+from build_android import certificate, previous_version, sdk_tool, verify_badging
+from release import checksum, validate_android_qualification, android_version_code
 from test_android import AndroidDevice, basic
 
 CI_LABEL = 'nodeharbor.node-restriction.kubernetes.io/ci'
@@ -51,6 +51,18 @@ def verify_job(job, pod, owner, image):
     if not all(checks): raise ValueError('The real CI job did not complete on this owned ARM64 worker')
 
 
+def signed_upgrade(device, previous_apk, previous_tests, apk, tests, version):
+    identities = {certificate(path) for path in [previous_apk, previous_tests, apk, tests]}
+    if len(identities) != 1: raise ValueError('Both signed versions and their instrumentation must use the persistent release certificate')
+    device.install(previous_apk, previous_tests)
+    before = device.vpn()
+    marker = uuid.uuid4().hex
+    device.instrument(['SignedUpdateContract#seed'], {'marker': marker})
+    device.install(apk, tests)
+    device.instrument(['SignedUpdateContract#verify'], {'marker': marker, 'versionCode': str(android_version_code(version))})
+    if device.vpn() != before: raise ValueError('The VPN policy changed during the signed upgrade')
+
+
 def qualify(folder, version, commit, config):
     prefix = f'nodeharbor-v{version}-aarch64-linux-android'
     manifest_path = folder / (prefix + '.json')
@@ -65,6 +77,18 @@ def qualify(folder, version, commit, config):
     devices = [AndroidDevice(serial) for serial in config['devices']]
     if not {33, 36, 37}.issubset({device.api for device in devices}) or not any(device.physical for device in devices):
         raise ValueError('Connect dedicated ARM64 API 33, 36 and 37 devices, including a physical phone')
+    previous = previous_version(version)
+    baseline = folder / 'android-upgrade'
+    previous_apk = baseline / f'nodeharbor-v{previous}-aarch64-linux-android.apk'
+    previous_manifest = json.loads((baseline / f'nodeharbor-v{previous}-aarch64-linux-android.json').read_text())
+    if (previous_manifest.get('version'), previous_manifest.get('commit'), previous_manifest.get('signedRelease'), previous_manifest.get('dirtySource')) != (previous, commit, True, False):
+        raise ValueError('The upgrade baseline must identify the same clean tested source and a lower signed version')
+    if checksum(previous_apk) != next(asset['sha256'] for asset in previous_manifest['assets'] if asset['name'].endswith('.apk')):
+        raise ValueError('The upgrade baseline APK changed after packaging')
+    for package, expected in [(previous_apk, previous), (apk, version)]:
+        verify_badging(subprocess.check_output([sdk_tool('aapt2'), 'dump', 'badging', str(package)], text=True), expected)
+    for device in devices:
+        signed_upgrade(device, previous_apk, baseline / 'android-tests.apk', apk, folder / 'android-tests.apk', version)
     reports = [basic(device, apk, folder / 'android-tests.apk') for device in devices]
     phone = next(device for device in devices if device.physical)
     before = phone.vpn()
@@ -103,7 +127,8 @@ def qualify(folder, version, commit, config):
         if phone.vpn() != before: raise ValueError('The phone VPN policy changed during the real worker test')
         evidence = dict(version=version, commit=commit, apkSha256=checksum(apk), certificateSha256=certificate(apk),
                         signedRelease=True, physical=True, apiLevels=sorted({report['apiLevel'] for report in reports}),
-                        ownerControlsPassed=True, vpnPreserved=True, ciQualified=True, arm64JobSucceeded=True)
+                        ownerControlsPassed=True, vpnPreserved=True, ciQualified=True, arm64JobSucceeded=True,
+                        upgradePassed=True, upgradeFromVersion=previous)
         if evidence['certificateSha256'] != manifest['certificateSha256']: raise ValueError('The tested APK signing identity changed')
         validate_android_qualification(evidence, version, commit, checksum(apk))
         manifest['qualification'] = evidence

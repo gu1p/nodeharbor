@@ -136,6 +136,8 @@ async fn multipass_replacement_verifies_before_deletion_and_resumes_restore_afte
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let volume_id = nodeharbor_agent::storage::volume_identity(directory.path()).unwrap();
     let volumes = vec![nodeharbor_agent::storage::Volume {
+        drive_type: None,
+        suggested_directory: None,
         id: volume_id.clone(),
         capacity_pool: volume_id,
         label: "Fixture".into(),

@@ -207,7 +207,11 @@ impl Agent {
             platform: std::env::consts::OS.into(),
             architecture: crate::observe::architecture().into(),
             state: runtime.state.unwrap_or_else(|| "paused".into()),
-            reason: runtime.reason.unwrap_or(decision.reason),
+            reason: config
+                .setup_notice
+                .clone()
+                .filter(|_| config.device_token.is_none())
+                .unwrap_or_else(|| runtime.reason.unwrap_or(decision.reason)),
             policy: config.policy,
             resources: observation.resources,
             storage,
@@ -1334,4 +1338,27 @@ async fn checked(mut response: reqwest::Response) -> Result<Value> {
             .unwrap_or("The controller could not complete this request")
     );
     Ok(value)
+}
+
+#[cfg(test)]
+mod setup_notice_tests {
+    #[tokio::test]
+    async fn enrollment_notice_remains_visible_after_the_supervisor_reports_paused() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = super::Agent::open(dir.path()).unwrap();
+        agent
+            .store
+            .update(|config| {
+                config.setup_notice = Some("Please enroll again to prepare a Lima worker".into());
+                Ok(())
+            })
+            .unwrap();
+        agent.set_status("paused", "Sharing is switched off").await;
+        assert!(agent
+            .snapshot()
+            .await
+            .unwrap()
+            .reason
+            .contains("enroll again"));
+    }
 }

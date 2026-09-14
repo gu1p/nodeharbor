@@ -36,9 +36,11 @@ def android_version_code(version: str) -> int:
 def validate_android_qualification(evidence: dict, version: str, commit: str, apk_sha256: str):
     if (evidence.get('version'), evidence.get('commit'), evidence.get('apkSha256')) != (version, commit, apk_sha256):
         raise ValueError('Android qualification does not identify this exact APK and source')
-    required = ['signedRelease', 'physical', 'ownerControlsPassed', 'vpnPreserved', 'ciQualified', 'arm64JobSucceeded']
+    required = ['signedRelease', 'physical', 'ownerControlsPassed', 'vpnPreserved', 'ciQualified', 'arm64JobSucceeded', 'upgradePassed']
     if any(evidence.get(field) is not True for field in required):
         raise ValueError('Android requires signed physical-device, owner-control, VPN and real ARM64 CI qualification')
+    if android_version_code(evidence.get('upgradeFromVersion', '')) >= android_version_code(version):
+        raise ValueError('Android qualification must verify an upgrade from a lower signed version')
     if not {33, 36, 37}.issubset(set(evidence.get('apiLevels', []))):
         raise ValueError('Android release testing must cover API 33, 36 and 37')
     if not re.fullmatch('[0-9a-f]{64}', evidence.get('certificateSha256', '')):
@@ -124,9 +126,13 @@ def stamp(root: Path, version: str, commit: str):
     tomllib.loads(cargo.read_text());tomllib.loads(lock.read_text())
 
 def latest_release(releases: list[dict], history: list[str]) -> str | None:
-    ranks={sha:index for index,sha in enumerate(history)}
-    eligible=[r for r in releases if not r.get('draft') and not r.get('prerelease') and r.get('target_commitish') in ranks]
-    return min(eligible,key=lambda r:ranks[r['target_commitish']])['tag_name'] if eligible else None
+    reachable = set(history)
+    eligible = []
+    for candidate in releases:
+        match = re.fullmatch(r'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', candidate.get('tag_name', ''))
+        if match and not candidate.get('draft') and not candidate.get('prerelease') and candidate.get('target_commitish') in reachable:
+            eligible.append((tuple(map(int, match.groups())), candidate['tag_name']))
+    return max(eligible)[1] if eligible else None
 
 def publication_action(existing: dict | None, manifest: dict) -> str:
     if existing is None:return 'create'
@@ -246,7 +252,7 @@ def main():
     elif args.command=='publish':publish(args.folder,args.version,args.commit,args.repo,args.key)
     elif args.command=='reconcile-latest':
         pages=json.loads(subprocess.check_output(['gh','api',f'repos/{args.repo}/releases','--paginate','--slurp'],text=True))
-        history=subprocess.check_output(['git','rev-list','--first-parent','origin/main'],text=True).splitlines()
+        history=subprocess.check_output(['git','rev-list','origin/main'],text=True).splitlines()
         latest=latest_release([r for page in pages for r in page],history)
         if latest:subprocess.run(['gh','release','edit',latest,'--repo',args.repo,'--latest'],check=True)
     else:

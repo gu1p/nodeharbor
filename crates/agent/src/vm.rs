@@ -78,10 +78,7 @@ fn multipass_program() -> PathBuf {
         PathBuf::from("/opt/homebrew/bin/multipass"),
     ];
     #[cfg(target_os = "linux")]
-    let candidates = vec![
-        PathBuf::from("/snap/bin/multipass"),
-        PathBuf::from("/usr/bin/multipass"),
-    ];
+    let candidates: Vec<PathBuf> = Vec::new();
     #[cfg(target_os = "windows")]
     let candidates = vec![PathBuf::from(
         std::env::var_os("ProgramFiles").unwrap_or_else(|| "C:\\Program Files".into()),
@@ -170,6 +167,7 @@ if (!$disk.StartsWith($instance.TrimEnd('\')+'\',[StringComparison]::OrdinalIgno
         output: Option<std::fs::File>,
         limit: u64,
     ) -> Result<()> {
+        require_multipass_host()?;
         let mut command = Command::new(multipass_program());
         command.args(args);
         crate::process::stream_command(command, input, output, limit).await
@@ -192,12 +190,17 @@ if (!$disk.StartsWith($instance.TrimEnd('\')+'\',[StringComparison]::OrdinalIgno
         multipass_command(args, stdin, timeout, Some(progress)).await
     }
 }
+fn require_multipass_host() -> Result<()> {
+    anyhow::ensure!(!cfg!(target_os = "linux"), "Linux workers require the packaged Lima runtime. The previous Multipass setup is obsolete; enroll again to prepare a Lima worker");
+    Ok(())
+}
 async fn multipass_command(
     args: &[String],
     stdin: Option<Vec<u8>>,
     timeout: u64,
     progress: Option<crate::ProgressSink>,
 ) -> Result<CommandOutput> {
+    require_multipass_host()?;
     let program = multipass_program();
     let mut command = Command::new(&program);
     command.args(args);
@@ -375,6 +378,9 @@ impl Vm {
         })
     }
     pub fn local(device_id: &str) -> Result<Self> {
+        if cfg!(target_os = "linux") {
+            return Self::local_in(device_id, &crate::Store::default_directory()?);
+        }
         Self::new(device_id, Arc::new(MultipassRunner))
     }
     pub fn managed(device_id: &str, directory: &Path, runner: Arc<dyn Runner>) -> Result<Self> {
@@ -383,6 +389,13 @@ impl Vm {
         Ok(vm)
     }
     pub fn local_in(device_id: &str, directory: &Path) -> Result<Self> {
+        if cfg!(target_os = "linux") {
+            return Self::managed(
+                device_id,
+                directory,
+                Self::native_runner(crate::VmProvider::Lima, directory)?,
+            );
+        }
         Self::managed(device_id, directory, Arc::new(MultipassRunner))
     }
     pub(crate) fn native_runner(

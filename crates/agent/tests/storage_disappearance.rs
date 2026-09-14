@@ -107,6 +107,8 @@ async fn fixture(root: &Path) -> (Agent, Arc<Host>, Vec<Location>, tokio::task::
         root,
         host.clone(),
         vec![Volume {
+            drive_type: None,
+            suggested_directory: None,
             id: locations[0].volume_id.clone(),
             capacity_pool: "fixture".into(),
             label: "Fixture".into(),

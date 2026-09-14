@@ -22,6 +22,8 @@ impl Runner for Runtime {
 
 fn open(directory: &std::path::Path, runner: Arc<dyn Runner>) -> Agent {
     let volume = nodeharbor_agent::storage::Volume {
+        drive_type: None,
+        suggested_directory: None,
         id: "fixture".into(),
         capacity_pool: "fixture".into(),
         label: "Test disk".into(),

@@ -19,7 +19,7 @@ it('lets the owner review and confirm deletion of the only missing disk, or canc
  const inventory={...snapshot().storage!,activeGib:0,locations:[{...location,available:false,reason:'Reconnect the original volume'}],operation:{phase:'missing',message:'Only 0 GiB remains; at least 15 GiB is required'}};
  render(<StorageEditor inventory={inventory} backend={{previewStorage,applyStorage,retryStorageMaintenance:vi.fn(),setStorageRecovery:vi.fn()} as unknown as Backend} disabled={false}/>);
  expect(screen.getByRole('textbox',{name:'Directory for disk 1'})).toBeDisabled();
- expect(screen.getByRole('button',{name:'Add storage location'})).toBeDisabled();
+ expect(screen.getByRole('button',{name:'Add drive'})).toBeDisabled();
  expect(screen.getByRole('button',{name:'Retry storage maintenance'})).toBeEnabled();
  expect(screen.getByRole('button',{name:'Delete all worker storage'})).toBeEnabled();
  await user.click(screen.getByRole('button',{name:'Delete all worker storage'}));

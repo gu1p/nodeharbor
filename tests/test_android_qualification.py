@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -35,3 +36,18 @@ class AndroidQualificationContract(unittest.TestCase):
                         dict(pod, status=dict(pod['status'], phase='Running')),
                         dict(pod, metadata={'ownerReferences':[]})]:
             with self.assertRaises(ValueError): qa.verify_job(job, invalid, OWNER, IMAGE)
+
+    def test_upgrade_verifies_both_signers_before_installing_and_preserves_data_and_vpn(self):
+        device = Mock()
+        device.vpn.return_value = 'unchanged'
+        with patch.object(qa, 'certificate', return_value='c'*64):
+            qa.signed_upgrade(device, Path('old.apk'), Path('old-tests.apk'), Path('new.apk'), Path('new-tests.apk'), '0.1.12')
+        self.assertEqual(device.install.call_args_list[0].args, (Path('old.apk'), Path('old-tests.apk')))
+        self.assertEqual(device.install.call_args_list[1].args, (Path('new.apk'), Path('new-tests.apk')))
+        self.assertEqual(device.instrument.call_args_list[0].args[0], ['SignedUpdateContract#seed'])
+        self.assertEqual(device.instrument.call_args_list[1].args[0], ['SignedUpdateContract#verify'])
+        device.reset_mock()
+        with patch.object(qa, 'certificate', side_effect=['a'*64, 'b'*64, 'a'*64, 'a'*64]):
+            with self.assertRaises(ValueError):
+                qa.signed_upgrade(device, Path('old.apk'), Path('old-tests.apk'), Path('new.apk'), Path('new-tests.apk'), '0.1.12')
+        device.install.assert_not_called()

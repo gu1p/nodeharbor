@@ -86,7 +86,7 @@ it('reviews additional file-backed disks on the node before sending their exact 
  let requests:unknown[]=[];
  const backend=api(true,{configuration:vi.fn().mockImplementation(async()=>({online:true,report:{...report(),storage,capabilities:{...report().capabilities,storage:true}},requests})),configureDevice:vi.fn().mockImplementation(async(_id,edit)=>{const response={...edit,status:edit.operation.type==='storagePreview'?'applied':'requested',result:edit.operation.type==='storagePreview'?plan:null};requests=[response];return response;})});
  const user=userEvent.setup();render(<App backend={backend}/>);await user.click(await screen.findByRole('button',{name:'Configure Office node'}));
- await user.click(await screen.findByRole('button',{name:'Add storage location'}));await user.type(screen.getByRole('textbox',{name:'Directory for disk 2'}),'/data/extra');
+ await user.click(await screen.findByRole('button',{name:'Add drive'}));await user.selectOptions(screen.getByRole('combobox',{name:'Drive for disk 2'}),'data');await user.type(screen.getByRole('textbox',{name:'Directory for disk 2'}),'/data/extra');
  await user.click(screen.getByRole('button',{name:'Review storage changes'}));
  const review=await screen.findByRole('region',{name:'Storage change review'});expect(review).toHaveTextContent(/drains work and restarts/);
  expect(backend.configureDevice).toHaveBeenCalledWith('worker',expect.objectContaining({expectedRevision:4,operation:{type:'storagePreview',selections:expect.arrayContaining([expect.objectContaining({directory:'/data/extra',allocationGib:30})]),options:{}}}));

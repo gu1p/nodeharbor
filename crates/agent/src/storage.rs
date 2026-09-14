@@ -11,6 +11,10 @@ use std::{
 pub struct Volume {
     pub id: String,
     pub capacity_pool: String,
+    #[serde(default)]
+    pub drive_type: Option<String>,
+    #[serde(default)]
+    pub suggested_directory: Option<String>,
     pub label: String,
     pub mount_point: String,
     pub filesystem: String,
@@ -25,6 +29,8 @@ pub struct Volume {
 pub struct Selection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_volume_id: Option<String>,
     pub directory: String,
     pub allocation_gib: u64,
 }
@@ -244,6 +250,7 @@ pub fn plan_change(
     let defaults;
     let selections = if selections.is_empty() {
         defaults = [Selection {
+            expected_volume_id: None,
             id: None,
             directory: default_directory.to_string_lossy().into(),
             allocation_gib: default_gib,
@@ -271,6 +278,13 @@ pub fn plan_change(
             "Storage directories must not duplicate or overlap"
         );
         let volume = volume_for(&path, volumes).context("Storage volume is unavailable")?;
+        anyhow::ensure!(
+            selection
+                .expected_volume_id
+                .as_ref()
+                .is_none_or(|expected| !expected.is_empty() && expected == &volume.id),
+            "The selected storage volume disappeared or was replaced; select the drive again"
+        );
         anyhow::ensure!(volume.eligible, "{}: {}", volume.label, volume.reason);
         anyhow::ensure!(
             matches!(
@@ -444,6 +458,8 @@ pub fn inventory(
     let mut volumes: Vec<_> = disks.iter().map(|disk| {
         let filesystem = disk.file_system().to_string_lossy().to_lowercase();
         let mut volume = Volume {
+            drive_type: match disk.kind() { sysinfo::DiskKind::HDD => Some("hdd".into()), sysinfo::DiskKind::SSD => Some("ssd".into()), _ => None },
+            suggested_directory: Some(disk.mount_point().join("NodeHarbor").to_string_lossy().into()),
             id: String::new(), capacity_pool: String::new(), label: disk.name().to_string_lossy().into(),
             mount_point: disk.mount_point().to_string_lossy().into(), filesystem,
             available_gib: disk.available_space() / (1024 * 1024 * 1024), configured_gib: 0,
@@ -491,6 +507,7 @@ pub fn inventory(
                     .find(|volume| volume.mount_point == mount)
                 {
                     volume.configured_gib = volume.configured_gib.saturating_add(boot_gib);
+                    volume.suggested_directory = default_directory.clone();
                 }
             }
         }

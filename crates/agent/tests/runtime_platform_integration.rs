@@ -34,3 +34,38 @@ async fn native_linux_runtime_preflight_uses_the_hosts_actual_qemu_and_kvm_capab
         .await
         .unwrap();
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn linux_never_executes_the_obsolete_multipass_provider() {
+    use nodeharbor_agent::{MultipassRunner, Runner};
+    let error = MultipassRunner
+        .run(&["version".into()], None, 1)
+        .await
+        .err()
+        .unwrap();
+    assert!(error
+        .to_string()
+        .contains("Linux workers require the packaged Lima"));
+    let error = MultipassRunner
+        .stream(&["version".into()], None, None, 1024)
+        .await
+        .err()
+        .unwrap();
+    assert!(error
+        .to_string()
+        .contains("Linux workers require the packaged Lima"));
+}
+
+#[tokio::test]
+async fn missing_lima_is_reported_before_preparation_can_start() {
+    use nodeharbor_agent::{LimaRunner, Runner};
+    let directory = tempfile::tempdir().unwrap();
+    let runner = LimaRunner::new(
+        directory.path().join("missing-limactl"),
+        directory.path().join("lima"),
+    );
+    let error = runner.run(&["start".into()], None, 1).await.err().unwrap();
+    assert!(error.to_string().contains("bundled VM runtime is missing"));
+    assert!(!directory.path().join("lima").exists());
+}

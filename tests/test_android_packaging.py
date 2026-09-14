@@ -27,3 +27,9 @@ class AndroidPackagingContract(unittest.TestCase):
         for bad in [good.replace('1000012', '1'), good.replace('0.1.12', '0.1.11'),
                     good.replace("'arm64-v8a'", "'arm64-v8a' 'x86_64'"), good.replace('nodeharbor', 'another')]:
             with self.assertRaises(ValueError): build.verify_badging(bad, '0.1.12')
+
+    def test_upgrade_baseline_has_a_strictly_lower_installable_version(self):
+        for current in ['0.1.12', '0.2.0', '1.0.0']:
+            previous = build.previous_version(current)
+            self.assertEqual(build.android_version_code(previous), build.android_version_code(current)-1)
+        with self.assertRaises(ValueError): build.previous_version('0.0.1')

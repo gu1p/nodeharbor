@@ -207,6 +207,8 @@ async fn fixture(
         &directory,
         host.clone(),
         vec![Volume {
+            drive_type: None,
+            suggested_directory: None,
             id: volume.clone(),
             capacity_pool: volume,
             label: "Fixture".into(),

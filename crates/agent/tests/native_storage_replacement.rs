@@ -67,6 +67,7 @@ async fn native_shrink_preserves_linux_metadata_and_confirms_kubernetes_capacity
             .context("Native Lima proof requires a prepared pool")?;
         agent
             .preview_storage(vec![Selection {
+                expected_volume_id: None,
                 id: Some(first.id.clone()),
                 directory: first.directory.clone(),
                 allocation_gib: target,

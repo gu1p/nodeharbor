@@ -10,8 +10,8 @@ const inventory = {
  defaultDirectory:'/Users/owner/Library/Application Support/NodeHarbor/storage',
  supported:true, reason:'',
  volumes:[
-  {id:'system',label:'Macintosh HD',mountPoint:'/',filesystem:'apfs',availableGib:100,configuredGib:0,eligible:true,reason:''},
-  {id:'external',label:'Work SSD',mountPoint:'/Volumes/Work SSD',filesystem:'apfs',availableGib:400,configuredGib:40,eligible:true,reason:''},
+  {id:'system',label:'Macintosh HD',mountPoint:'/',filesystem:'apfs',availableGib:100,configuredGib:0,eligible:true,reason:'',driveType:'ssd',suggestedDirectory:'/Users/owner/Library/Application Support/NodeHarbor/storage'},
+  {id:'external',label:'Work SSD',mountPoint:'/Volumes/Work SSD',filesystem:'apfs',availableGib:400,configuredGib:40,eligible:true,reason:'',driveType:'ssd',suggestedDirectory:'/Volumes/Work SSD/NodeHarbor'},
  ],
  locations:[],
 };
@@ -36,11 +36,15 @@ it('shows the resolved default and understandable volume capacities before setup
 
 it('lets an owner enter separate directories and allocations using labeled controls',async()=>{
  const user=userEvent.setup();render(<Editor/>);
- await user.click(screen.getByRole('button',{name:'Add storage location'}));
+ await user.click(screen.getByRole('button',{name:'Add drive'}));
+ await user.selectOptions(screen.getByRole('combobox',{name:'Drive for disk 1'}),'external');
+ await user.clear(screen.getByRole('textbox',{name:'Directory for disk 1'}));
  await user.type(screen.getByRole('textbox',{name:'Directory for disk 1'}),'/Volumes/Work SSD/nodeharbor');
  const first=screen.getByRole('spinbutton',{name:'Allocation for disk 1 (GiB)'});
  await user.clear(first);await user.type(first,'80');
- await user.click(screen.getByRole('button',{name:'Add storage location'}));
+ await user.click(screen.getByRole('button',{name:'Add drive'}));
+ await user.selectOptions(screen.getByRole('combobox',{name:'Drive for disk 2'}),'system');
+ await user.clear(screen.getByRole('textbox',{name:'Directory for disk 2'}));
  await user.type(screen.getByRole('textbox',{name:'Directory for disk 2'}),'/Users/owner/worker-data');
  expect(first).toHaveValue(80);
  expect(screen.getByRole('textbox',{name:'Directory for disk 1'})).toHaveValue('/Volumes/Work SSD/nodeharbor');
@@ -54,7 +58,7 @@ it('keeps unavailable configured storage visible and explains unsupported runtim
  expect(screen.getByRole('alert')).toHaveTextContent('Volume unavailable; reconnect Work SSD.');
  expect(screen.getByText('/Volumes/Work SSD/nodeharbor')).toBeVisible();
  expect(screen.getByText('This runtime does not support selectable disk locations.')).toBeVisible();
- expect(screen.getByRole('button',{name:'Add storage location'})).toBeDisabled();
+ expect(screen.getByRole('button',{name:'Add drive'})).toBeDisabled();
  expect(onChange).not.toHaveBeenCalled();
 });
 
@@ -64,7 +68,7 @@ it('exposes host inventory from the desktop snapshot on the sharing rules page',
  const user=userEvent.setup();render(<App backend={backend}/>);
  await user.click(await screen.findByRole('button',{name:'Sharing rules'}));
  expect(screen.getByRole('region',{name:'Storage locations'})).toHaveTextContent('Work SSD');
- expect(screen.getByRole('button',{name:'Add storage location'})).toBeDisabled();
+ expect(screen.getByRole('button',{name:'Add drive'})).toBeDisabled();
  expect(screen.getByRole('button',{name:'Save sharing rules'})).toBeEnabled();
 });
 
@@ -143,13 +147,50 @@ it('offers review before applying a storage change from sharing rules',async()=>
  const backend:Backend & {previewStorage:typeof previewStorage;applyStorage:typeof applyStorage}={snapshot:vi.fn().mockResolvedValue(snapshot),savePolicy:vi.fn().mockResolvedValue(snapshot),action:vi.fn().mockResolvedValue(snapshot),enroll:vi.fn().mockResolvedValue(snapshot),fleet:vi.fn().mockResolvedValue([]),previewStorage,applyStorage};
  const user=userEvent.setup();render(<App backend={backend}/>);
  await user.click(await screen.findByRole('button',{name:'Sharing rules'}));
- await user.click(screen.getByRole('button',{name:'Add storage location'}));
+ await user.click(screen.getByRole('button',{name:'Add drive'}));
+ await user.selectOptions(screen.getByRole('combobox',{name:'Drive for disk 1'}),'external');
+ await user.clear(screen.getByRole('textbox',{name:'Directory for disk 1'}));
  await user.type(screen.getByRole('textbox',{name:'Directory for disk 1'}),'/Volumes/Work SSD/nodeharbor');
  const allocation=screen.getByRole('spinbutton',{name:'Allocation for disk 1 (GiB)'});
  await user.clear(allocation);await user.type(allocation,'40');
  await user.click(screen.getByRole('button',{name:'Review storage changes'}));
- expect(previewStorage).toHaveBeenCalledWith([{directory:'/Volumes/Work SSD/nodeharbor',allocationGib:40}]);
+ expect(previewStorage).toHaveBeenCalledWith([{directory:'/Volumes/Work SSD/nodeharbor',allocationGib:40,expectedVolumeId:'external'}]);
  expect(applyStorage).not.toHaveBeenCalled();
  await user.click(await screen.findByRole('button',{name:'Apply storage changes'}));
  expect(applyStorage).toHaveBeenCalledOnce();
+});
+
+it('selects mounted drives with suggested folders and independent allocations in tab order',async()=>{
+ const user=userEvent.setup();render(<Editor/>);
+ await user.tab();expect(screen.getByRole('button',{name:'Add drive'})).toHaveFocus();
+ await user.keyboard('{Enter}');
+ const first=screen.getByRole('combobox',{name:'Drive for disk 1'});
+ expect(first).toHaveFocus();
+ await user.selectOptions(first,'system');
+ expect(screen.getByRole('textbox',{name:'Directory for disk 1'})).toHaveValue(inventory.defaultDirectory);
+ await user.tab();expect(screen.getByRole('spinbutton',{name:'Allocation for disk 1 (GiB)'})).toHaveFocus();
+ await user.keyboard('{ControlOrMeta>}a{/ControlOrMeta}45');
+ await user.tab();expect(screen.getByRole('textbox',{name:'Directory for disk 1'})).toHaveFocus();
+ await user.tab();await user.tab();expect(screen.getByRole('button',{name:'Add drive'})).toHaveFocus();
+ await user.keyboard('{Enter}');
+ const second=screen.getByRole('combobox',{name:'Drive for disk 2'});expect(second).toHaveFocus();
+ await user.selectOptions(second,'external');
+ expect(screen.getByRole('textbox',{name:'Directory for disk 2'})).toHaveValue('/Volumes/Work SSD/NodeHarbor');
+ expect(screen.getByRole('spinbutton',{name:'Allocation for disk 1 (GiB)'})).toHaveValue(45);
+ expect(screen.getByRole('spinbutton',{name:'Allocation for disk 2 (GiB)'})).toHaveValue(30);
+});
+
+it('requires a drive identity before review and keeps saved identities after reopening',async()=>{
+ const user=userEvent.setup();const previewStorage=vi.fn();
+ const saved={id:'one',volumeId:'external',directory:'/Volumes/Work SSD/custom',allocationGib:50,available:true,reason:''};
+ const {unmount}=render(<StorageEditor inventory={{...inventory,locations:[saved]}} backend={{previewStorage,applyStorage:vi.fn()} as unknown as Backend} disabled={false}/>);
+ expect(screen.getByRole('combobox',{name:'Drive for disk 1'})).toHaveValue('external');
+ await user.click(screen.getByRole('button',{name:'Review storage changes'}));
+ expect(previewStorage).toHaveBeenCalledWith([{id:'one',directory:saved.directory,allocationGib:50,expectedVolumeId:'external'}]);
+ unmount();previewStorage.mockClear();
+ render(<StorageEditor inventory={inventory} backend={{previewStorage,applyStorage:vi.fn()} as unknown as Backend} disabled={false}/>);
+ await user.click(screen.getByRole('button',{name:'Add drive'}));
+ await user.click(screen.getByRole('button',{name:'Review storage changes'}));
+ expect(previewStorage).not.toHaveBeenCalled();
+ expect(screen.getByRole('alert')).toHaveTextContent(/select a drive/i);
 });

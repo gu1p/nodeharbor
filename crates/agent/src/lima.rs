@@ -33,10 +33,25 @@ impl VmProvider {
 pub struct LimaRunner {
     program: PathBuf,
     home: PathBuf,
+    #[cfg(test)]
+    simulated_process: bool,
 }
 impl LimaRunner {
     pub fn new(program: PathBuf, home: PathBuf) -> Self {
-        Self { program, home }
+        Self {
+            program,
+            home,
+            #[cfg(test)]
+            simulated_process: false,
+        }
+    }
+    #[cfg(all(test, target_os = "macos"))]
+    fn for_process_test(program: PathBuf, home: PathBuf) -> Self {
+        Self {
+            program,
+            home,
+            simulated_process: true,
+        }
     }
     pub fn bundled(directory: &Path) -> Result<Self> {
         let executable = std::env::current_exe()?;
@@ -60,7 +75,13 @@ impl LimaRunner {
             .first()
             .is_some_and(|argument| matches!(argument.as_str(), "start" | "create"))
         {
-            crate::runtime_platform::preflight().await?;
+            #[cfg(test)]
+            let real_preflight = !self.simulated_process;
+            #[cfg(not(test))]
+            let real_preflight = true;
+            if real_preflight {
+                crate::runtime_platform::preflight().await?;
+            }
         }
         let mut command = tokio::process::Command::new(&self.program);
         command
@@ -521,3 +542,7 @@ mod storage_tests {
             .any(|p| p["path"] == "/etc/nodeharbor/device-id" && p["overwrite"] == false));
     }
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "lima_process_tests.rs"]
+mod process_tests;

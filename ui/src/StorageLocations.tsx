@@ -1,11 +1,12 @@
-import { useId, useState } from 'react';
+import { useId, useState, useRef, useEffect } from 'react';
 import type { Backend, Snapshot, StorageInventory, StoragePlan, StorageSelection, StorageReviewOptions } from './model';
 
 export function StorageLocations({inventory,locations,onChange,onChoose,onDeleteAll,disabled=false,deleteDisabled=disabled}:{
  inventory:StorageInventory; locations:StorageSelection[];
  onChange?:(locations:StorageSelection[])=>void; onChoose?:(index:number)=>void; disabled?:boolean; deleteDisabled?:boolean; onDeleteAll?:()=>void;
 }) {
- const title=useId();const impact=useId();
+ const title=useId();const impact=useId();const focusNew=useRef(false);const drives=useRef<(HTMLSelectElement|null)[]>([]);
+ useEffect(()=>{if(focusNew.current){drives.current[locations.length-1]?.focus();focusNew.current=false;}},[locations.length]);
  const editable=inventory.supported&&!!onChange&&!disabled;
  const change=(index:number,patch:Partial<StorageSelection>)=>onChange?.(locations.map((location,i)=>i===index?{...location,...patch}:location));
  return <section className="panel" aria-labelledby={title}>
@@ -16,7 +17,7 @@ export function StorageLocations({inventory,locations,onChange,onChoose,onDelete
   {inventory.volumes.length===0?<p>No host volumes could be inspected.</p>:<ul>
    {inventory.volumes.map((volume,index)=><li key={`${volume.id}:${volume.mountPoint}:${index}`}>
     <strong>{volume.label||'Unnamed volume'}</strong> · <code>{volume.mountPoint}</code>
-    <p>{volume.filesystem||'Unknown filesystem'} · {volume.availableGib} GiB available · {volume.configuredGib} GiB configured</p>
+    <p>{volume.filesystem||'Unknown filesystem'} · {volume.driveType?volume.driveType.toUpperCase():'Drive type unknown'} · {volume.availableGib} GiB available · {volume.configuredGib} GiB configured</p>
     {!volume.eligible&&<p>{volume.reason}</p>}
    </li>)}
   </ul>}
@@ -32,20 +33,26 @@ export function StorageLocations({inventory,locations,onChange,onChoose,onDelete
   <fieldset disabled={!editable} className="rules-fields" aria-describedby={impact}>
    {locations.map((location,index)=><fieldset key={index}>
     <legend>Disk {index+1}</legend>
-    <label>Directory for disk {index+1}<input type="text" required value={location.directory} onChange={event=>change(index,{directory:event.target.value})}/></label>
-    {onChoose&&<button type="button" onClick={()=>onChoose(index)}>Choose folder for disk {index+1}</button>}
+    <label>Drive for disk {index+1}<select required ref={element=>{drives.current[index]=element;}} value={location.expectedVolumeId??inventory.locations.find(saved=>saved.id===location.id)?.volumeId??''} onChange={event=>{const volume=inventory.volumes.find(volume=>volume.id===event.target.value);change(index,{expectedVolumeId:event.target.value,directory:volume?.suggestedDirectory??''});}}>
+     <option value="">Select a drive</option>
+     {inventory.volumes.filter(volume=>volume.id).map((volume,i)=><option key={`${volume.id}:${i}`} value={volume.id} disabled={!volume.eligible}>{volume.label||'Unnamed volume'} · {volume.mountPoint} · {volume.filesystem} · {volume.availableGib} GiB available</option>)}
+     {location.expectedVolumeId&&!inventory.volumes.some(volume=>volume.id===location.expectedVolumeId)&&<option value={location.expectedVolumeId}>Unavailable saved drive</option>}
+    </select></label>
     <label>Allocation for disk {index+1} (GiB)<input type="number" id={`${title}-allocation-${index}`} min={1} max={1048576} step={1} required value={location.allocationGib||''} onChange={event=>change(index,{allocationGib:Number(event.target.value)})}/></label>
+    <label>Directory for disk {index+1}<input type="text" required value={location.directory} onChange={event=>change(index,{directory:event.target.value})}/></label>
+    <p>Customize the folder within the selected drive. If no folder is suggested, choose a writable folder before reviewing.</p>
+    {onChoose&&<button type="button" onClick={()=>onChoose(index)}>Choose folder for disk {index+1}</button>}
     {inventory.locations.some(saved=>saved.id===location.id)&&<button type="button" onClick={()=>document.getElementById(`${title}-allocation-${index}`)?.focus()}>Shrink allocation for disk {index+1}</button>}
     {(locations.length>1||!inventory.locations.some(saved=>saved.id===location.id))&&<button type="button" onClick={()=>onChange?.(locations.filter((_,i)=>i!==index))}>Remove disk {index+1}</button>}
    </fieldset>)}
-   <button type="button" disabled={locations.length>=16} onClick={()=>onChange?.([...locations,{directory:'',allocationGib:30}])}>Add storage location</button>
+   <button type="button" disabled={locations.length>=16} onClick={()=>{focusNew.current=true;onChange?.([...locations,{directory:'',allocationGib:30}]);}}>Add drive</button>
   </fieldset>
   {!!(inventory.locations.length||inventory.retainedCopies?.length)&&<button type="button" disabled={deleteDisabled||(!onDeleteAll&&!editable)} onClick={onDeleteAll??(()=>onChange?.([]))}>Delete all worker storage</button>}
  </section>;
 }
 
 export function StorageEditor({inventory,backend,onSaved,disabled}:{inventory:StorageInventory;backend?:Backend;onSaved?:(snapshot:Snapshot)=>void;disabled:boolean}) {
- const [locations,setLocations]=useState<StorageSelection[]>(()=>inventory.locations.map(({id,directory,allocationGib})=>({id,directory,allocationGib})));
+ const [locations,setLocations]=useState<StorageSelection[]>(()=>inventory.locations.map(({id,directory,allocationGib,volumeId})=>({id,directory,allocationGib,expectedVolumeId:volumeId})));
  const [plan,setPlan]=useState<StoragePlan|null>(null);const [busy,setBusy]=useState(false);const [error,setError]=useState('');
  const [confirmed,setConfirmed]=useState(false);const [temporaryDirectory,setTemporaryDirectory]=useState('');const [singleDiskGib,setSingleDiskGib]=useState(inventory.configuredGib||30);
  const available=!!backend?.previewStorage&&!!backend?.applyStorage;
@@ -55,6 +62,7 @@ export function StorageEditor({inventory,backend,onSaved,disabled}:{inventory:St
  const change=(next:StorageSelection[])=>{setLocations(next);setPlan(null);setError('');setConfirmed(false);};
  async function review(options?:StorageReviewOptions){setBusy(true);setError('');setPlan(null);setConfirmed(false);try{
   const selected=options?.deleteAll?[]:locations;
+  if(inventory.supported&&!options?.deleteAll&&!options?.restoreDisk&&selected.some(location=>!location.expectedVolumeId||!location.directory.trim()))throw new Error('Select a drive and a writable folder for every disk before review.');
   const request={...(temporaryDirectory?{temporaryDirectory}:{}),...options};
   setPlan(await (Object.keys(request).length?backend!.previewStorage!(selected,request):backend!.previewStorage!(selected)));
  }catch(error){setError(String(error instanceof Error?error.message:error));}finally{setBusy(false);}}

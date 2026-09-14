@@ -1,6 +1,6 @@
 #![cfg(target_os = "macos")]
 
-use nodeharbor_agent::{Agent, LimaRunner, Runner};
+use crate::{Agent, LimaRunner, Runner};
 use std::{os::unix::fs::PermissionsExt, sync::Arc};
 
 #[tokio::test]
@@ -31,7 +31,7 @@ esac
     )
     .unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let runner = Arc::new(LimaRunner::new(program, home.clone()));
+    let runner = Arc::new(LimaRunner::for_process_test(program, home.clone()));
     let agent = Agent::open_with_runner(directory.path(), runner.clone()).unwrap();
     let config = agent.store.load().unwrap();
     std::fs::write(home.join("owner"), &config.device_id).unwrap();

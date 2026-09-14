@@ -16,6 +16,7 @@ fn native_inventory_resolves_two_volumes_and_preserves_the_runtime_support_bound
     let selections: Vec<_> = paths
         .iter()
         .map(|path| storage::Selection {
+            expected_volume_id: None,
             id: None,
             directory: path.to_string_lossy().into(),
             allocation_gib: 8,
@@ -44,6 +45,7 @@ fn native_primary_volume_preflight_resolves_firmlinks_and_reports_its_allocation
     let inventory = storage::inventory(VmProvider::Lima, &path, &[], 30);
     let locations = storage::plan(
         &[storage::Selection {
+            expected_volume_id: None,
             id: None,
             directory: path.to_string_lossy().into(),
             allocation_gib: 15,
@@ -86,6 +88,7 @@ fn native_volume_with_disabled_ownership_is_rejected_without_changing_it() {
     let inventory = storage::inventory(VmProvider::Lima, &path, &[], 0);
     let error = storage::plan(
         &[storage::Selection {
+            expected_volume_id: None,
             id: None,
             directory: path.to_string_lossy().into(),
             allocation_gib: 1,

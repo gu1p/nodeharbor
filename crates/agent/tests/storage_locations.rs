@@ -25,6 +25,8 @@ fn saved_locations_survive_reopen_and_a_missing_volume_is_not_rebound_by_path() 
     let saved = Store::open(directory.path()).unwrap().load().unwrap();
     assert_eq!(saved.storage_locations, vec![location]);
     let replacement = Volume {
+        drive_type: None,
+        suggested_directory: None,
         id: "replacement-volume".into(),
         capacity_pool: "new-pool".into(),
         label: "Replacement".into(),
@@ -68,6 +70,7 @@ async fn unsupported_runtime_preflight_does_not_write_settings_create_images_or_
         let target = directory.path().join("selected");
         let result = agent
             .preview_storage(vec![Selection {
+                expected_volume_id: None,
                 id: None,
                 directory: target.to_string_lossy().into(),
                 allocation_gib: 30,

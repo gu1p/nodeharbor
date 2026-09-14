@@ -22,6 +22,8 @@ pub struct WorkerRecreation {
 #[serde(rename_all = "camelCase")]
 pub struct Configuration {
     pub format_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_notice: Option<String>,
     #[serde(default)]
     pub remote: nodeharbor_core::configuration::RemoteConfiguration,
     #[serde(default = "updates_enabled")]
@@ -67,11 +69,16 @@ pub struct Configuration {
 impl Default for Configuration {
     fn default() -> Self {
         Self {
-            format_version: 1,
+            format_version: if cfg!(target_os = "linux") { 2 } else { 1 },
+            setup_notice: None,
             remote: Default::default(),
             automatic_updates: true,
             application_update_pending: false,
-            vm_provider: crate::VmProvider::Multipass,
+            vm_provider: if cfg!(target_os = "linux") {
+                crate::VmProvider::Lima
+            } else {
+                crate::VmProvider::Multipass
+            },
             device_id: Uuid::new_v4().to_string(),
             name: sysinfo::System::host_name().unwrap_or_else(|| "My computer".into()),
             policy: Policy::default(),
@@ -109,6 +116,9 @@ impl Store {
             .join("nodeharbor"))
     }
     pub fn open(directory: &Path) -> Result<Self> {
+        Self::open_for_platform(directory, std::env::consts::OS)
+    }
+    fn open_for_platform(directory: &Path, platform: &str) -> Result<Self> {
         fs::create_dir_all(directory).context("Cannot create the NodeHarbor settings directory")?;
         #[cfg(unix)]
         {
@@ -121,9 +131,37 @@ impl Store {
         };
         let _lock = store.lock()?;
         if !store.path().exists() {
-            store.write(&Configuration::default())?;
+            let mut config = Configuration::default();
+            if platform == "linux" {
+                config.vm_provider = crate::VmProvider::Lima;
+                config.format_version = 2;
+            }
+            store.write(&config)?;
         }
-        store.load()?;
+        let config = store.load()?;
+        if platform == "linux" && config.vm_provider == crate::VmProvider::Multipass {
+            // Never replace the active supervisor's identity or touch its VM.
+            let _supervisor = store.supervisor_lock()?;
+            let mut archive = tempfile::NamedTempFile::new_in(directory)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                archive
+                    .as_file()
+                    .set_permissions(fs::Permissions::from_mode(0o600))?;
+            }
+            std::io::copy(&mut File::open(store.path())?, &mut archive)?;
+            archive.as_file().sync_all()?;
+            archive.persist_noclobber(
+                directory.join(format!("obsolete-multipass-{}.json", Uuid::new_v4())),
+            )?;
+            store.write(&Configuration {
+                vm_provider: crate::VmProvider::Lima,
+                format_version: 2,
+                setup_notice: Some("The previous Linux Multipass setup is obsolete and its settings were archived privately. Please enroll again and select drives to prepare a new Lima worker. Sharing is disabled.".into()),
+                ..Configuration::default()
+            })?;
+        }
         Ok(store)
     }
     fn path(&self) -> PathBuf {
@@ -333,5 +371,85 @@ impl Store {
         file.try_lock_exclusive()
             .context("NodeHarbor’s background worker is already running")?;
         Ok(file)
+    }
+}
+
+#[cfg(test)]
+mod linux_setup_tests {
+    use super::*;
+
+    #[test]
+    fn linux_store_starts_with_lima_and_sharing_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_for_platform(dir.path(), "linux").unwrap();
+        let config = store.load().unwrap();
+        assert_eq!(config.vm_provider, crate::VmProvider::Lima);
+        assert!(config.format_version >= 2);
+        assert!(!config.policy.enabled);
+        assert!(config.device_token.is_none());
+        assert_eq!(
+            Store::open_for_platform(dir.path(), "linux")
+                .unwrap()
+                .load()
+                .unwrap()
+                .device_id,
+            config.device_id
+        );
+    }
+
+    #[test]
+    fn obsolete_linux_configuration_is_archived_once_and_requires_enrollment() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut old = Configuration {
+            vm_provider: crate::VmProvider::Multipass,
+            ..Configuration::default()
+        };
+        old.policy.enabled = true;
+        old.device_token = Some("fixture-token".into());
+        let original = serde_json::to_vec(&old).unwrap();
+        fs::write(dir.path().join("config.json"), &original).unwrap();
+        let store = Store::open_for_platform(dir.path(), "linux").unwrap();
+        let config = store.load().unwrap();
+        assert_eq!(config.vm_provider, crate::VmProvider::Lima);
+        assert!(!config.policy.enabled);
+        assert!(config.device_token.is_none());
+        assert_ne!(config.device_id, old.device_id);
+        assert!(config
+            .setup_notice
+            .as_deref()
+            .unwrap()
+            .contains("enroll again"));
+        let archives: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("obsolete-multipass-")
+            })
+            .collect();
+        assert_eq!(archives.len(), 1);
+        assert_eq!(fs::read(archives[0].path()).unwrap(), original);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(archives[0].path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        assert_eq!(
+            Store::open_for_platform(dir.path(), "linux")
+                .unwrap()
+                .load()
+                .unwrap()
+                .device_id,
+            config.device_id
+        );
     }
 }

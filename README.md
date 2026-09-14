@@ -82,8 +82,11 @@ without changing your VPN configuration. Linux also requires QEMU 6.2 or newer,
 [Multipass](https://canonical.com/multipass/install) before preparing a worker.
 Open NodeHarbor, enroll using the code supplied by your fleet administrator,
 choose resource limits and sharing rules, and prepare the worker. On macOS and
-Linux, Storage locations lets you select folders and allocations, then review
-and apply them. An empty selection uses the displayed application-managed folder.
+Linux, Storage locations offers Drive, Allocation (GiB), and Add drive controls.
+Select mounted drives, customize their suggested folders if needed, then review
+and apply each allocation. An empty selection uses the displayed application-managed folder.
+Obsolete Linux Multipass settings are archived privately; enroll again to prepare
+a fresh Lima worker with sharing disabled. No VM data is migrated.
 Existing disks can be moved, grown, shrunk, or removed, and more disks can be added.
 Shrink and removal use a verified private backup and replacement images, with
 temporary space and downtime reviewed before applying. **Delete all worker storage**
