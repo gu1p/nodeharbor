@@ -27,6 +27,7 @@ opentelemetry_sdk = { version = "0.32", default-features = false, features = ["t
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client", "reqwest-rustls-webpki-roots"] }
 prometheus = { version = "0.14", default-features = false }
 [dev-dependencies]
+nodeharbor-agent = { path = "../agent" }
 tower.workspace = true
 tempfile.workspace = true
 opentelemetry = { version = "0.32", default-features = false, features = ["trace", "futures"] }

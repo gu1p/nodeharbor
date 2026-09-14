@@ -17,6 +17,11 @@ struct Args {
 #[derive(Subcommand)]
 enum Command {
     Status,
+    /// Locally grant or revoke fleet administrators permission to edit node settings.
+    RemoteConfiguration {
+        #[arg(value_parser = ["allow", "revoke"])]
+        permission: String,
+    },
     Run,
     Pause,
     Resume,
@@ -153,6 +158,10 @@ async fn main() -> Result<()> {
     let agent = Agent::open(&directory)?;
     match args.command {
         Command::WaitForAppExit { .. } => unreachable!(),
+        Command::RemoteConfiguration { permission } => {
+            agent.set_remote_consent(permission == "allow").await?;
+            println!("Remote configuration permission: {permission}");
+        }
         Command::Status => {
             let mut snapshot = agent.snapshot().await?;
             if agent.store.load()?.vm_created {

@@ -47,6 +47,7 @@ pub fn worker_transition(input: &WorkerInput) -> WorkerAction {
         Some(_) => WorkerAction::Wait,
     }
 }
+pub mod configuration;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -64,15 +65,15 @@ impl Default for Resources {
         }
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScheduleWindow {
     pub days: Vec<u8>,
     pub start_minute: u16,
     pub end_minute: u16,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Policy {
     pub enabled: bool,
     pub resources: Resources,

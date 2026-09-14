@@ -7,6 +7,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
+#[path = "remote.rs"]
+mod remote;
 
 #[derive(Clone, Copy)]
 enum Starting {
@@ -39,6 +41,7 @@ pub struct Agent {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
+    pub configuration: nodeharbor_core::configuration::ConfigurationReport,
     pub device_id: String,
     pub name: String,
     pub platform: String,
@@ -189,6 +192,7 @@ impl Agent {
         runtime.worker.installed = config.vm_configured;
         let storage = self.storage_snapshot(&config, storage);
         Ok(Snapshot {
+            configuration: self.configuration_report_for(&config, observation.resources.clone()),
             device_id: config.device_id,
             name: config.name,
             platform: std::env::consts::OS.into(),
@@ -209,6 +213,13 @@ impl Agent {
         })
     }
     pub async fn save_policy(&self, policy: Policy) -> Result<Snapshot> {
+        self.save_policy_versioned(policy, None).await
+    }
+    pub async fn save_policy_versioned(
+        &self,
+        policy: Policy,
+        expected_revision: Option<u64>,
+    ) -> Result<Snapshot> {
         let current = self.store.load()?;
         anyhow::ensure!(
             current.storage_operation.is_none() && current.storage_lifecycle.maintenance.is_none(),
@@ -245,6 +256,10 @@ impl Agent {
                 );
             }
             anyhow::ensure!(
+                expected_revision.is_none_or(|r| r == config.remote.revision),
+                "Settings changed locally or remotely; reload current settings before saving"
+            );
+            anyhow::ensure!(
                 config.recreation.is_none(),
                 "Wait for worker replacement to finish before changing sharing rules"
             );
@@ -276,7 +291,14 @@ impl Agent {
     }
     /// Called only by the explicit disk-deletion confirmation. The supervisor
     /// performs cleanup from the durable request; the UI never deletes a VM.
-    pub async fn recreate_worker(&self, mut policy: Policy) -> Result<Snapshot> {
+    pub async fn recreate_worker(&self, policy: Policy) -> Result<Snapshot> {
+        self.recreate_worker_versioned(policy, None).await
+    }
+    pub async fn recreate_worker_versioned(
+        &self,
+        mut policy: Policy,
+        expected_revision: Option<u64>,
+    ) -> Result<Snapshot> {
         let current = self.store.load()?;
         anyhow::ensure!(current.storage_locations.is_empty() && current.storage_operation.is_none() && current.storage_lifecycle.maintenance.is_none(), "Replacing a worker with configured storage disks is unavailable; existing files have been preserved");
         let host = self.snapshot().await?.resources;
@@ -286,6 +308,10 @@ impl Agent {
             if !config.storage_locations.is_empty() {
                 crate::storage::require_location_support(config.vm_provider)?;
             }
+            anyhow::ensure!(
+                expected_revision.is_none_or(|r| r == config.remote.revision),
+                "Settings changed locally or remotely; reload current settings before replacement"
+            );
             anyhow::ensure!(
                 !config.application_update_pending,
                 "Cancel the application update before replacing the worker"
@@ -305,6 +331,8 @@ impl Agent {
             );
             config.policy = policy;
             config.prepare_requested = false;
+            config.remote.repair_required = false;
+            config.remote.applying = false;
             config.recreation = Some(crate::store::WorkerRecreation {
                 request_id: uuid::Uuid::new_v4(),
                 access_removed: false,
@@ -322,6 +350,11 @@ impl Agent {
             "Unknown worker action"
         );
         self.store.update(|config| {
+            config.remote.revision = config
+                .remote
+                .revision
+                .checked_add(1)
+                .context("Configuration revision exhausted")?;
             anyhow::ensure!(
                 action != "prepare" || !config.application_update_pending,
                 "Cancel the application update before preparing the worker"
@@ -632,6 +665,7 @@ impl Agent {
         }
     }
     async fn tick_inner(&self) -> Result<()> {
+        self.recover_configuration()?;
         let config = self.store.load()?;
         self.runtime.lock().await.application_update_ready = false;
         if config.device_token.is_none() {
@@ -683,6 +717,10 @@ impl Agent {
         }
         if config.recreation.is_some() {
             return self.recreate_inner(&config, &vm).await;
+        }
+        if config.remote.repair_required {
+            let _ = self.heartbeat(&config).await;
+            anyhow::bail!("Worker allocation is unverified. Inspect the stopped worker locally or replace it before sharing");
         }
         if config.prepare_requested && config.vm_configured {
             // An already prepared worker uses the normal policy and drain flow,
@@ -809,6 +847,11 @@ impl Agent {
             .await;
             return Ok(());
         }
+        if config.remote.pending.is_some() && !info.running {
+            self.apply_configuration(&vm).await?;
+            let _ = self.heartbeat(&self.store.load()?).await;
+            return Ok(());
+        }
         if !config.vm_created {
             self.set_status(
                 "paused",
@@ -866,6 +909,7 @@ impl Agent {
         let observation = self.observe_storage(&config);
         let decision = evaluate(&config.policy, &observation);
         let allowed = decision.allowed
+            && config.remote.pending.is_none()
             && !resize_pending
             && heartbeat_error.is_none()
             && !self.runtime.lock().await.remote_paused;
@@ -1184,9 +1228,23 @@ impl Agent {
         let permitted = permitted
             && !config.storage_lifecycle.disabled
             && config.storage_lifecycle.missing.is_none();
-        let value=self.request(config,"/heartbeat",Some(json!({"storageGeneration":config.storage_generation,"state":runtime.state.unwrap_or_else(||"paused".into()),"reason":reason,"resources":resources,
-            "allowCi":config.policy.allow_ci,"allowServices":config.policy.allow_services,"permitted":permitted}))).await?;
+        let mut report = self.configuration_report_for(config, observation.resources.clone());
+        if !report.consent {
+            report.policy = None;
+            report.hardware = None;
+            report.storage_inventory.clear();
+        }
+        let value=self.request(config,"/heartbeat",Some(json!({"configuration":report,"storageGeneration":config.storage_generation,"state":runtime.state.unwrap_or_else(||"paused".into()),"reason":reason,"resources":resources,
+            "allowCi":config.policy.allow_ci,"allowServices":config.policy.allow_services,"permitted":permitted && config.remote.pending.is_none() && !config.remote.repair_required}))).await?;
         self.runtime.lock().await.remote_paused = value["remotePaused"].as_bool().unwrap_or(false);
+        if let Some(request) = value.get("configurationRequest").filter(|v| !v.is_null()) {
+            let command: nodeharbor_core::configuration::ConfigurationCommand =
+                serde_json::from_value(request.clone())
+                    .context("Invalid configuration request from controller")?;
+            if let Err(error) = self.receive_configuration(command.clone()) {
+                self.reject_configuration(&command, &error.to_string())?;
+            }
+        }
         Ok(())
     }
 }

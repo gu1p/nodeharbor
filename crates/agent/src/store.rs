@@ -22,6 +22,8 @@ pub struct WorkerRecreation {
 #[serde(rename_all = "camelCase")]
 pub struct Configuration {
     pub format_version: u32,
+    #[serde(default)]
+    pub remote: nodeharbor_core::configuration::RemoteConfiguration,
     #[serde(default = "updates_enabled")]
     pub automatic_updates: bool,
     #[serde(default)]
@@ -66,6 +68,7 @@ impl Default for Configuration {
     fn default() -> Self {
         Self {
             format_version: 1,
+            remote: Default::default(),
             automatic_updates: true,
             application_update_pending: false,
             vm_provider: crate::VmProvider::Multipass,
@@ -168,7 +171,42 @@ impl Store {
     ) -> Result<Configuration> {
         let _lock = self.lock()?;
         let mut config = self.load()?;
+        let before = config.clone();
         change(&mut config)?;
+        // All local entry points, including CLI and another app process, advance
+        // the same revision under the existing cross-process settings lock.
+        if before.policy != config.policy
+            || before.remote.consent != config.remote.consent
+            || before.device_id != config.device_id
+            || before.remote.revision != config.remote.revision
+            || before.recreation.is_some() != config.recreation.is_some()
+            || before.application_update_pending != config.application_update_pending
+        {
+            config.remote.revision = before
+                .remote
+                .revision
+                .checked_add(1)
+                .context("Configuration revision exhausted; local recovery required")?;
+            if let Some(command) = config.remote.pending.take() {
+                config
+                    .remote
+                    .record(nodeharbor_core::configuration::ConfigurationReceipt {
+                        request_id: command.edit.request_id,
+                        status: "rejected".into(),
+                        revision: config.remote.revision,
+                        at: chrono::Utc::now().to_rfc3339(),
+                        effective_policy: Some(config.policy.clone()),
+                        effective_resources: if config.remote.applying {
+                            None
+                        } else {
+                            config.allocated_resources.clone()
+                        },
+                        error: Some(
+                            "The owner changed settings or consent; reload current settings".into(),
+                        ),
+                    });
+            }
+        }
         self.write(&config)?;
         Ok(config)
     }

@@ -91,6 +91,32 @@ sharing stays off until you prepare the replacement and enable it again.
 Installing NodeHarbor alone does not contribute resources. Pilot packages are
 unsigned by Apple or Microsoft; NodeHarbor does not disable OS security checks.
 
+## Owner-approved remote configuration
+
+Remote configuration is off by default. In the desktop **Sharing rules**, the
+local owner can enable **Allow fleet administrators to configure this node**.
+The owner can revoke it independently at any time; pending requests are canceled.
+The local CLI also supports `nodeharbor-agent remote-configuration allow` and
+`nodeharbor-agent remote-configuration revoke`.
+
+Authorized administrators use **Fleet → Configure node** to inspect reported
+capacity and edit contribution rules. Requests require confirmation of the drain,
+restart and possible interruption. The page shows requested, pending, applied,
+rejected and offline states, plus who requested each change and its effective
+values. Concurrent edits require reloading current settings.
+
+CPU and memory changes use the existing owned-VM runtime. Existing-disk growth
+is remotely available for the application-managed Lima disk after capacity checks.
+Multipass disk changes require local approval because its supported API does not
+report the host storage directory. Start at login and disk replacement also remain
+local operations. An interrupted or failed runtime change leaves sharing blocked
+when allocation is unverified; the local **Replace worker** flow can recover it.
+
+**Task #726 is not complete for additional disks or selectable storage locations.**
+Those controls depend on task #724's supported storage model and runtime; this
+worktree reports them as unavailable. Host and VPN settings are preserved. See
+[the implementation and validation notes](docs/remote-configuration-726.md).
+
 ## Architecture
 
 ```mermaid

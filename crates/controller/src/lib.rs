@@ -30,6 +30,7 @@ mod provision;
 pub use provision::{ApiClient, ClusterConfig, Provisioner};
 mod telemetry;
 pub use telemetry::{metrics_router, Operation, Peer, Telemetry};
+mod configuration;
 mod reset;
 
 #[derive(Clone)]
@@ -104,6 +105,7 @@ impl State {
             CREATE TABLE IF NOT EXISTS worker_resets (device_id TEXT NOT NULL,request_id TEXT NOT NULL,complete INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(device_id,request_id));
             CREATE UNIQUE INDEX IF NOT EXISTS one_pending_worker_reset ON worker_resets(device_id) WHERE complete=0;")
             .execute(&db).await?;
+        configuration::initialize(&db).await?;
         Ok(Self {
             db,
             telemetry: Telemetry::new(None)?,
@@ -410,6 +412,7 @@ async fn enroll(
 struct Heartbeat {
     #[serde(default)]
     storage_generation: u64,
+    configuration: Option<nodeharbor_core::configuration::ConfigurationReport>,
     state: String,
     #[serde(default)]
     reason: String,
@@ -512,8 +515,9 @@ async fn heartbeat(
             .fetch_one(&state.db)
             .await
             .map_err(ApiError::internal)?;
+    let configuration_request = configuration::exchange(&state, &id, input.configuration).await?;
     Ok(Json(
-        json!({"remotePaused":row.get::<bool,_>("remote_paused"),"eligibleCi":row.get::<bool,_>("eligible_ci"),"eligibleServices":row.get::<bool,_>("eligible_services")}),
+        json!({"configurationRequest":configuration_request,"remotePaused":row.get::<bool,_>("remote_paused"),"eligibleCi":row.get::<bool,_>("eligible_ci"),"eligibleServices":row.get::<bool,_>("eligible_services")}),
     ))
 }
 async fn revoke(
@@ -701,6 +705,10 @@ pub fn router(state: State) -> Router {
         .route("/api/v1/enrollment-codes", post(create_code))
         .route("/api/v1/enroll", post(enroll))
         .route("/api/v1/heartbeat", post(heartbeat))
+        .route(
+            "/api/v1/devices/{id}/configuration",
+            get(configuration::inspect).post(configuration::request),
+        )
         .route("/api/v1/devices/{id}/revoke", post(revoke))
         .route("/api/v1/devices/{id}/{action}", post(admin_control))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))

@@ -73,12 +73,13 @@ async fn save_policy(
     app: AppHandle,
     state: State<'_, Desktop>,
     policy: Policy,
+    expected_revision: Option<u64>,
 ) -> Result<Snapshot, String> {
     let _settings = state.settings.lock().await;
     settings::save_with_startup(&NativeStartup(&app), policy.start_at_login, || async {
         state
             .agent
-            .save_policy(policy)
+            .save_policy_versioned(policy, expected_revision)
             .await
             .map_err(|error| error.to_string())
     })
@@ -86,16 +87,26 @@ async fn save_policy(
 }
 
 #[tauri::command]
+async fn set_remote_consent(state: State<'_, Desktop>, enabled: bool) -> Result<Snapshot, String> {
+    state
+        .agent
+        .set_remote_consent(enabled)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn recreate_worker(
     app: AppHandle,
     state: State<'_, Desktop>,
     policy: Policy,
+    expected_revision: Option<u64>,
 ) -> Result<Snapshot, String> {
     let _settings = state.settings.lock().await;
     settings::save_with_startup(&NativeStartup(&app), policy.start_at_login, || async {
         state
             .agent
-            .recreate_worker(policy)
+            .recreate_worker_versioned(policy, expected_revision)
             .await
             .map_err(|error| error.to_string())
     })
@@ -223,6 +234,7 @@ fn main() {
             snapshot,
             activity,
             save_policy,
+            set_remote_consent,
             recreate_worker,
             storage_commands::preview_storage,
             storage_commands::apply_storage,

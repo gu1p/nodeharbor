@@ -338,7 +338,8 @@ impl Agent {
     }
 
     pub(super) fn local_drain_required(&self, config: &Configuration) -> bool {
-        !evaluate(&config.policy, &self.observe_storage(config)).allowed
+        config.remote.pending.is_some()
+            || !evaluate(&config.policy, &self.observe_storage(config)).allowed
             || (config.vm_configured
                 && config.allocated_resources.as_ref() != Some(&config.policy.resources))
     }
