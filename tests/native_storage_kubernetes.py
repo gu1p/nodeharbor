@@ -133,6 +133,13 @@ def wait_ready(fixture):
     raise RuntimeError('The isolated Kubernetes node did not become Ready')
 
 
+def payload_size(fixture):
+    # BusyBox wc streams stdin, adding another full disk read to this check.
+    # The separate SHA-256 checks verify contents before and after VM restart.
+    return int(fixture.kubectl('exec', '-n', NAMESPACE, POD, '--',
+                              'stat', '-c', '%s', '/scratch/payload').strip())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--lima', required=True); parser.add_argument('--home', required=True)
@@ -196,7 +203,7 @@ def main():
         fixture.kubectl('apply', '-f', '-', input=json.dumps(pod))
         fixture.kubectl('wait', '--for=condition=Ready', f'pod/{POD}', '-n', NAMESPACE, '--timeout=600s', timeout=630)
         expected = fixture.kubectl('exec', '-n', NAMESPACE, POD, '--', 'cat', '/scratch/payload.sha256').split()[0]
-        actual_size = int(fixture.kubectl('exec', '-n', NAMESPACE, POD, '--', 'sh', '-c', 'wc -c < /scratch/payload').strip())
+        actual_size = payload_size(fixture)
         if actual_size != write_bytes:raise ValueError('The Pod did not write the complete cross-disk file')
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
