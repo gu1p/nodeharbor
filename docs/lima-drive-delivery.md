@@ -31,7 +31,9 @@ share one certificate. Qualification installs the lower version, seeds private
 settings, an encrypted token fixture, and a file, then updates in place and
 verifies the installed version and persisted data. VPN fingerprints must remain
 unchanged. The unified release gate requires this evidence in addition to the
-existing API 33/36/37, physical-phone, owner-control, and real fleet-job checks.
+existing API 33/36/37, physical-phone, owner-control, and reproducible controller
+and agent checks. Optional external qualification also exercises a real qualified
+ARM64 workload in an explicitly selected deployment.
 
 ## Recorded checks
 
@@ -46,12 +48,13 @@ The Android runtime was built from its pinned sources and verified. Persistent
 Android signing material is kept outside the repository; the four existing CI
 signing secrets have been populated.
 
-## Acceptance still required
+## Release evidence
 
-Native desktop matrix results, the exact packaged Linux worker on two supported
-volumes, persistence and missing-drive behavior, signed Android device updates,
-API 36/37 coverage, and trusted-main qualification remain required. The release
-gate now uses [reproducible acceptance scenarios](reproducible-acceptance.md)
-with explicit infrastructure simulators; private deployment access is optional. No new
-release has been published by this change. Native qualification must identify the
-exact tested source commit and version before release delivery can be complete.
+Publication requires the native desktop matrix, signed Android device updates,
+API 33/36/37 coverage, controller checks, signing, and trusted-main qualification.
+The release gate uses [reproducible acceptance scenarios](reproducible-acceptance.md)
+with explicit infrastructure simulators; private deployment access is optional.
+That guide also describes the optional two-volume Lima and local Kubernetes proof.
+Native qualification and package manifests identify the exact tested source commit
+and version. CI retains the qualification reports and signed verification records;
+published downloads and the update channel must match them.

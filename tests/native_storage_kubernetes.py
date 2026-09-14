@@ -122,13 +122,18 @@ print('Pinned K3s installed; isolated test configuration prepared')
 
 
 def wait_ready(fixture):
+    boot = fixture.shell('cat', '/proc/sys/kernel/random/boot_id').strip()
     deadline = time.monotonic() + 180
     while time.monotonic() < deadline:
         try:
             value = json.loads(fixture.kubectl('get', 'node', NODE, '-o', 'json', timeout=15))
-            if any(condition['type'] == 'Ready' and condition['status'] == 'True' for condition in value['status'].get('conditions', [])):
-                return value
-        except (RuntimeError, json.JSONDecodeError, KeyError):pass
+            current_boot = value['status'].get('nodeInfo', {}).get('bootID') == boot
+            if current_boot and any(condition['type'] == 'Ready' and condition['status'] == 'True' for condition in value['status'].get('conditions', [])):
+                # Ready is persisted across restarts; verify the current kubelet
+                # can serve requests before using its Pod execution endpoint.
+                if fixture.kubectl('get', '--raw', f'/api/v1/nodes/{NODE}/proxy/healthz', timeout=15).strip() == 'ok':
+                    return value
+        except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError):pass
         time.sleep(3)
     raise RuntimeError('The isolated Kubernetes node did not become Ready')
 
@@ -138,6 +143,19 @@ def payload_size(fixture):
     # The separate SHA-256 checks verify contents before and after VM restart.
     return int(fixture.kubectl('exec', '-n', NAMESPACE, POD, '--',
                               'stat', '-c', '%s', '/scratch/payload').strip())
+
+
+def payload_timeout(size):
+    # Allow a full verification read on a 16 MiB/s volume, plus command overhead.
+    throughput = 16 * 1024 ** 2
+    return max(180, (size + throughput - 1) // throughput + 60)
+
+
+def workload_script(size):
+    return ('set -eu; rm -f /scratch/ready; if [ -f /scratch/payload.sha256 ]; then sha256sum -c /scratch/payload.sha256; '
+            f'else dd if=/dev/urandom of=/scratch/payload bs=4M count={size // (4 * 1024 ** 2)}; '
+            'sync; sha256sum /scratch/payload > /scratch/payload.sha256; sync; fi; '
+            'touch /scratch/ready; echo nodeharbor-cross-disk-ready; sleep 7200')
 
 
 def main():
@@ -157,6 +175,7 @@ def main():
     largest = max(disk['allocationBytes'] for disk in pool['disks'])
     total = sum(disk['allocationBytes'] for disk in pool['disks'])
     write_bytes = (largest // GIB + 1) * GIB
+    verification_timeout = payload_timeout(write_bytes)
     existing_proof = fixture.python(
         "from pathlib import Path; p=Path('/etc/nodeharbor/storage-proof/owner'); print(p.read_text().strip() if p.exists() else '')").strip()
     if existing_proof and existing_proof != fixture.owner:raise ValueError('Existing native proof belongs to another owner')
@@ -178,10 +197,7 @@ def main():
         if not largest < allocatable <= capacity <= total or abs(capacity - pool['capacityBytes']) > 4096:
             raise ValueError(f'Kubernetes does not advertise the real combined pool: capacity={capacity}, allocatable={allocatable}, filesystem={pool["capacityBytes"]}')
         progress(f'Kubernetes advertises {capacity} bytes capacity and {allocatable} bytes allocatable; writing {write_bytes} random bytes')
-        script = ('set -eu; if [ -f /scratch/payload.sha256 ]; then sha256sum -c /scratch/payload.sha256; '
-                  f'else dd if=/dev/urandom of=/scratch/payload bs=4M count={write_bytes // (4 * 1024 ** 2)}; '
-                  'sync; sha256sum /scratch/payload > /scratch/payload.sha256; sync; fi; '
-                  'touch /scratch/ready; echo nodeharbor-cross-disk-ready; sleep 7200')
+        script = workload_script(write_bytes)
         pod = {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': POD, 'namespace': NAMESPACE},
                'spec': {'restartPolicy': 'Always', 'containers': [{'name': 'write', 'image': IMAGE,
                         'command': ['sh', '-c', script],
@@ -201,7 +217,9 @@ def main():
         else:raise RuntimeError('The isolated namespace default service account did not become available')
         fixture.kubectl('delete', 'pod', POD, '-n', NAMESPACE, '--ignore-not-found', '--wait=true')
         fixture.kubectl('apply', '-f', '-', input=json.dumps(pod))
-        fixture.kubectl('wait', '--for=condition=Ready', f'pod/{POD}', '-n', NAMESPACE, '--timeout=600s', timeout=630)
+        initial_timeout = 2 * verification_timeout + 180
+        fixture.kubectl('wait', '--for=condition=Ready', f'pod/{POD}', '-n', NAMESPACE,
+                        f'--timeout={initial_timeout}s', timeout=initial_timeout + 30)
         expected = fixture.kubectl('exec', '-n', NAMESPACE, POD, '--', 'cat', '/scratch/payload.sha256').split()[0]
         actual_size = payload_size(fixture)
         if actual_size != write_bytes:raise ValueError('The Pod did not write the complete cross-disk file')
@@ -220,9 +238,10 @@ def main():
         fixture.verify_owner(); after = fixture.pool()
         if after['filesystemUuid'] != pool['filesystemUuid']:raise ValueError('Pool identity changed after VM restart')
         node_after = wait_ready(fixture)
-        fixture.kubectl('wait', '--for=condition=Ready', f'pod/{POD}', '-n', NAMESPACE, '--timeout=300s', timeout=330)
-        fixture.kubectl('exec', '-n', NAMESPACE, POD, '--', 'sha256sum', '-c', '/scratch/payload.sha256', timeout=180)
-        actual = fixture.kubectl('exec', '-n', NAMESPACE, POD, '--', 'sha256sum', '/scratch/payload', timeout=180).split()[0]
+        restart_timeout = verification_timeout + 180
+        fixture.kubectl('wait', '--for=condition=Ready', f'pod/{POD}', '-n', NAMESPACE,
+                        f'--timeout={restart_timeout}s', timeout=restart_timeout + 30)
+        actual = fixture.kubectl('exec', '-n', NAMESPACE, POD, '--', 'sha256sum', '/scratch/payload', timeout=verification_timeout).split()[0]
         if actual != expected:raise ValueError('Cross-disk file bytes changed after VM restart')
         if quantity(node_after['status']['capacity']['ephemeral-storage']) != capacity:
             raise ValueError('Kubernetes capacity changed after VM restart')

@@ -37,6 +37,45 @@ an existing output file is never overwritten. Reports identify the full source
 commit, version, dirty-source status, test counts, and simulated infrastructure.
 They do not claim that a physical VM joined a live cluster or ran a Kubernetes job.
 
+## Optional native Lima storage proof
+
+The public native fixture can create its own unenrolled Lima VM and temporary
+Kubernetes cluster. It needs a supported Linux or macOS virtualization host, the
+pinned Lima runtime, and two writable folders on distinct supported volumes.
+It creates owned disk images inside those folders. It does not format host devices
+or use a private deployment. Allow at least 25 GiB free on the primary volume and
+40 GiB on the secondary volume for the test and its retained data.
+
+```sh
+export NODEHARBOR_TEST_LIMA=/absolute/path/to/verified/limactl
+export NODEHARBOR_TEST_STORAGE_PRIMARY=/folder/on/first-volume
+export NODEHARBOR_TEST_STORAGE_SECONDARY=/folder/on/second-volume
+NODEHARBOR_NATIVE_KEEP=1 cargo test --locked -p nodeharbor-agent \
+  --test native_lima_storage \
+  native_plain_vm_uses_a_persistent_ext4_pool_across_host_volumes \
+  -- --ignored --exact --nocapture
+```
+
+The `NATIVE_STORAGE_FIXTURE` output reports the private fixture's `home` directory.
+Keep that output local. Pass its exact `home` value to the workload proof:
+
+```sh
+NODEHARBOR_NATIVE_KUBERNETES=1 python tests/native_storage_kubernetes.py \
+  --lima "$NODEHARBOR_TEST_LIMA" --home /the/reported/lima/home
+```
+
+The proof validates the guest's ownership receipt, installs pinned K3s in that
+guest, writes a file larger than any member disk, checks Kubernetes capacity and
+usage, restarts the VM, and verifies the file's checksum and filesystem identity.
+It waits for the current guest boot and a responding kubelet after restart.
+Verification timeouts scale with file size for slower drives. A failed check
+produces no passing evidence. The temporary cluster is stopped on exit; the owned
+VM and its files remain for inspection. Stop that specific fixture afterward:
+
+```sh
+LIMA_HOME=/the/reported/lima/home "$NODEHARBOR_TEST_LIMA" stop worker
+```
+
 ## Native Android qualification
 
 Build the signed APK and upgrade baseline with the persistent signing identity,
