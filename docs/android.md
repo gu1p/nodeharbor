@@ -141,8 +141,9 @@ lifecycle, isolated-process restrictions, Linux boot, broker networking and
 unchanged VPN state. A full Ubuntu boot with HTTPS also passed. These are
 development-build results, not sustained fleet acceptance.
 
-Android 16/17 emulator networking currently cannot resolve public DNS under the
-existing host policy. Android 17's test-framework input API failure was corrected;
+Earlier Android 16/17 emulator runs could not resolve public DNS under the
+existing host policy. Later API 36/37 native contract runs passed using the
+existing default resolver without changing the host VPN. Android 17's test-framework input API failure was corrected;
 its UI and background-service contracts now pass. Neither platform is qualified.
 Host VPN and routing settings have been preserved. The physical phone's available
 RAM also prevented the larger production preparation test at its last attempt.
@@ -150,7 +151,9 @@ An emulator retry completed both private-channel boots, but its second graceful
 poweroff exceeded the test deadline; forced owner teardown succeeded. That full
 lifecycle contract remains failed.
 
-Production signing secrets, dedicated release-runner configuration, a real fleet
-enrollment and successful ARM64 CI execution are still required. No Android APK has
-been published as a qualified GitHub release. See `android-contracts.md` for the
+Current release qualification uses persistent signing, the API 33/36/37 native
+device checks and reproducible acceptance reports described above. Historical
+development results do not qualify a newer APK. Existing-deployment tests are
+optional additional coverage. No Android APK has been published as a qualified
+GitHub release. See `android-contracts.md` for the
 acceptance contracts and `android-verification.md` for the local check record.

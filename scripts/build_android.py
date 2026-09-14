@@ -88,7 +88,7 @@ def build(version, commit, release, allow_dirty=False):
                     signedRelease=release, dirtySource=dirty, certificateSha256=cert,
                     assets=[dict(name=p.name, sha256=checksum(p)) for p in [destination, sources]])
     (output / (prefix + '.json')).write_text(json.dumps(manifest, indent=2) + '\n')
-    print('Built and verified ' + destination.name + '; physical and fleet qualification are still required')
+    print('Built and verified ' + destination.name + '; native device and acceptance qualification are still required')
 
 
 def previous_version(version):

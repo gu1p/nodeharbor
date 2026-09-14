@@ -15,6 +15,21 @@ IMAGE = 'registry.example/ci@sha256:' + 'a' * 64
 
 
 class AndroidQualificationContract(unittest.TestCase):
+    def test_repeating_qualification_resets_only_an_explicitly_disposable_newer_installation(self):
+        device = Mock()
+        device.installed_version.return_value = qa.android_version_code('0.2.76')
+        device.vpn.return_value = 'unchanged'
+        with patch.object(qa, 'certificate', return_value='c' * 64):
+            qa.signed_upgrade(device, Path('old.apk'), Path('old-tests.apk'), Path('new.apk'),
+                              Path('new-tests.apk'), '0.2.76', reset_test_installation=True)
+        device.reset_test_installation.assert_called_once_with('c' * 64)
+        device.reset_mock()
+        device.installed_version.return_value = qa.android_version_code('0.2.75')
+        with patch.object(qa, 'certificate', return_value='c' * 64):
+            qa.signed_upgrade(device, Path('old.apk'), Path('old-tests.apk'), Path('new.apk'),
+                              Path('new-tests.apk'), '0.2.76', reset_test_installation=True)
+        device.reset_test_installation.assert_not_called()
+
     def test_real_job_requires_normal_scheduler_qualification_and_only_contributed_toleration(self):
         job = qa.ci_job('nodeharbor-test-123', 'workers', OWNER, IMAGE)
         pod = job['spec']['template']['spec']

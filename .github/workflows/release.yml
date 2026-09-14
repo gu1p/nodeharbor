@@ -203,7 +203,7 @@ jobs:
           name: reproducible-acceptance
           path: dist
       - name: Test the exact APK, owner controls, upgrades, and reproducible scenarios
-        run: python scripts/qualify_android.py dist "$NODEHARBOR_VERSION" "$NODEHARBOR_COMMIT" --acceptance-report dist/reproducible-acceptance.json
+        run: python scripts/qualify_android.py dist "$NODEHARBOR_VERSION" "$NODEHARBOR_COMMIT" --acceptance-report dist/reproducible-acceptance.json --reset-test-installation
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: android-qualification

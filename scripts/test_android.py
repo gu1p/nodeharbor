@@ -8,6 +8,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import uuid
 from release import checksum
 
@@ -59,6 +60,28 @@ class AndroidDevice:
         for file in [apk, tests]:
             if 'Success' not in self.command(['install', '-r', '-t', str(file)], timeout=300):
                 raise ValueError('APK installation failed. Existing app data and signing identities were preserved.')
+
+    def installed_version(self):
+        listing = self.command(['shell', 'dumpsys', 'package', PACKAGE])
+        match = re.search(r'\bversionCode=(\d+)\b', listing)
+        return int(match[1]) if match else None
+
+    def reset_test_installation(self, expected_certificate):
+        """Explicitly opted-in reset of this signed test app, after owner shutdown."""
+        from build_android import certificate
+        paths = [line.removeprefix('package:') for line in self.command(['shell', 'pm', 'path', PACKAGE]).splitlines()
+                 if line.startswith('package:')]
+        if not paths: return
+        if len(paths) != 1: raise ValueError('The disposable installation must be the standalone qualification APK')
+        with tempfile.TemporaryDirectory(prefix='nodeharbor-installed-apk-') as directory:
+            apk = Path(directory) / 'installed.apk'
+            self.command(['pull', paths[0], str(apk)], timeout=120)
+            if certificate(apk) != expected_certificate:
+                raise ValueError('The installed signing identity differs; its app and data were preserved')
+        self.instrument(['FleetStopContract'], timeout=180)
+        for package in [PACKAGE + '.test', PACKAGE]:
+            if 'Success' not in self.command(['uninstall', package], timeout=120):
+                raise ValueError('The disposable test installation could not be removed')
 
     def instrument(self, classes, arguments=None, timeout=1800):
         names = ','.join(PACKAGE + '.' + name for name in classes)

@@ -54,11 +54,19 @@ def verify_job(job, pod, owner, image):
     if not all(checks): raise ValueError('The real CI job did not complete on this owned ARM64 worker')
 
 
-def signed_upgrade(device, previous_apk, previous_tests, apk, tests, version):
+def signed_upgrade(device, previous_apk, previous_tests, apk, tests, version, reset_test_installation=False):
     identities = {certificate(path) for path in [previous_apk, previous_tests, apk, tests]}
     if len(identities) != 1: raise ValueError('Both signed versions and their instrumentation must use the persistent release certificate')
+    before_reset = None
+    if reset_test_installation:
+        installed = device.installed_version()
+        if installed is not None and installed > android_version_code(previous_version(version)):
+            before_reset = device.vpn()
+            device.reset_test_installation(next(iter(identities)))
     device.install(previous_apk, previous_tests)
     before = device.vpn()
+    if before_reset is not None and before != before_reset:
+        raise ValueError('The VPN policy changed while resetting the disposable test installation')
     marker = uuid.uuid4().hex
     device.instrument(['SignedUpdateContract#seed'], {'marker': marker})
     device.install(apk, tests)
@@ -66,7 +74,7 @@ def signed_upgrade(device, previous_apk, previous_tests, apk, tests, version):
     if device.vpn() != before: raise ValueError('The VPN policy changed during the signed upgrade')
 
 
-def native_qualification(folder, version, commit, serials):
+def native_qualification(folder, version, commit, serials, reset_test_installation=False):
     prefix = f'nodeharbor-v{version}-aarch64-linux-android'
     manifest_path = folder / (prefix + '.json')
     manifest = json.loads(manifest_path.read_text())
@@ -91,7 +99,8 @@ def native_qualification(folder, version, commit, serials):
     for package, expected in [(previous_apk, previous), (apk, version)]:
         verify_badging(subprocess.check_output([sdk_tool('aapt2'), 'dump', 'badging', str(package)], text=True), expected)
     for device in devices:
-        signed_upgrade(device, previous_apk, baseline / 'android-tests.apk', apk, folder / 'android-tests.apk', version)
+        print('Verifying signed upgrade on Android API ' + str(device.api), flush=True)
+        signed_upgrade(device, previous_apk, baseline / 'android-tests.apk', apk, folder / 'android-tests.apk', version, reset_test_installation)
     reports = [basic(device, apk, folder / 'android-tests.apk') for device in devices]
     return manifest_path, manifest, apk, devices, reports, previous
 
@@ -153,11 +162,11 @@ def qualify(folder, version, commit, config):
 
 
 
-def qualify_reproducible(folder, version, commit, serials, acceptance_path):
+def qualify_reproducible(folder, version, commit, serials, acceptance_path, reset_test_installation=False):
     acceptance = json.loads(acceptance_path.read_text())
     # Reject incomplete, stale or dirty-source scenarios before any device install.
     validate_reproducible_acceptance(acceptance, version, commit)
-    manifest_path, manifest, apk, devices, reports, previous = native_qualification(folder, version, commit, serials)
+    manifest_path, manifest, apk, devices, reports, previous = native_qualification(folder, version, commit, serials, reset_test_installation)
     evidence = dict(qualificationMode='reproducible', version=version, commit=commit,
                     apkSha256=checksum(apk), certificateSha256=certificate(apk), signedRelease=True,
                     physical=any(device.physical for device in devices),
@@ -181,9 +190,10 @@ def main():
     parser.add_argument('--serial', action='append', help='Authorized test device; repeat for API 33/36/37 coverage')
     parser.add_argument('--acceptance-report', type=Path, help='Report from scripts/acceptance.py for this exact source')
     parser.add_argument('--external-config', type=Path, help='Optional private deployment configuration for additional live qualification')
+    parser.add_argument('--reset-test-installation', action='store_true', help='For disposable test devices only: stop and clear a newer matching signed app before testing the lower version')
     args = parser.parse_args()
     if args.external_config:
-        if args.serial or args.acceptance_report: parser.error('--external-config cannot be combined with local scenario arguments')
+        if args.serial or args.acceptance_report or args.reset_test_installation: parser.error('--external-config cannot be combined with local scenario arguments')
         qualify(args.folder, args.version, args.commit, json.loads(args.external_config.read_text()))
     else:
         serials = args.serial
@@ -192,7 +202,7 @@ def main():
             serials = json.loads(Path(device_file).read_text())['devices']
         if not serials: parser.error('Select devices with --serial or NODEHARBOR_ANDROID_DEVICES_FILE; no deployment credentials are needed')
         if not args.acceptance_report: parser.error('--acceptance-report is required; run scripts/acceptance.py first')
-        qualify_reproducible(args.folder, args.version, args.commit, serials, args.acceptance_report)
+        qualify_reproducible(args.folder, args.version, args.commit, serials, args.acceptance_report, args.reset_test_installation)
 
 
 if __name__ == '__main__': main()

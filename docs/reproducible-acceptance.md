@@ -55,6 +55,14 @@ versions. Upgrade, private-data persistence, native runtime, owner-control and
 VPN-preservation checks execute on those devices. Approve normal Android install
 prompts when required. Device serials belong in local configuration, never Git.
 
+To repeat the same candidate on disposable test devices, add
+`--reset-test-installation`. Only when a newer version prevents baseline installation,
+the tool verifies the installed signing certificate, stops the app through owner
+controls, and removes that app and its instrumentation before installing the baseline.
+This explicitly deletes NodeHarbor's test data; it preserves other apps and phone
+settings. The dedicated CI runner uses this option. Normal runs preserve installed
+app data and refuse an incompatible update.
+
 For the trusted-main runner, set `NODEHARBOR_ANDROID_DEVICES_FILE` to a private
 JSON file containing only `{"devices": ["selected-device", "selected-emulator"]}`
 with the full required API coverage. CI supplies the exact-commit scenario
