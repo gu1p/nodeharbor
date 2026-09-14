@@ -73,6 +73,17 @@ def bundle_files(directory):
     visit(root,set())
     return files
 
+def materialize_bundle(directory):
+    source=Path(directory)
+    bundle_files(source)  # Validate aliases before following them during copying.
+    destination=source.with_name(source.name+'-package')
+    with tempfile.TemporaryDirectory(prefix='.package-',dir=source.parent) as temporary:
+        stage=Path(temporary)/'lima'
+        shutil.copytree(source,stage,symlinks=False)
+        if destination.exists():shutil.rmtree(destination)
+        stage.rename(destination)
+    return destination
+
 def bundle_configuration(target):
     bundle={'externalBin':['binaries/nodeharbor-agent']}
     if 'apple-darwin' in target:
@@ -81,9 +92,9 @@ def bundle_configuration(target):
         emulator='qemu-system-arm' if target.startswith('aarch64-') else 'qemu-system-x86'
         firmware='qemu-efi-aarch64' if target.startswith('aarch64-') else 'ovmf'
         # Keep the separately verified tools outside linuxdeploy's usr/lib ELF
-        # rewriting. File mappings materialize aliases: Tauri's Debian tar writer
-        # cannot archive directory symlinks copied through a directory mapping.
-        files=bundle_files(bundle_lima(target))
+        # rewriting. Materialize aliases before Debian's tar writer sees them.
+        # One directory mapping also keeps TAURI_CONFIG below Linux's env limit.
+        files={'/usr/libexec/nodeharbor/lima':str(materialize_bundle(bundle_lima(target)))}
         bundle['linux']={'deb':{'files':files,'depends':['libwebkit2gtk-4.1-0','libayatana-appindicator3-1','libxss1',emulator,firmware,'qemu-utils','openssh-client','gzip']},'appimage':{'files':files}}
     return bundle
 

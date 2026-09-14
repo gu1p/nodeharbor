@@ -334,3 +334,13 @@ and the alias-boundary unit fails before the file mapper exists
 files, including internal alias contents, through supported package mappings.
 Reject aliases outside the verified root and directory cycles; retain original
 runtime bytes, executable modes, inventory, license, and template paths.
+
+Run 34819791269 (`a5f384b`) reaches native packaging on Linux x64, then Tauri
+cannot launch Cargo: `Argument list too long (os error 7)`
+(`/tmp/nodeharbor-726-a5f-linux-x64.log`). Tauri exports its merged JSON in
+`TAURI_CONFIG`; duplicating the full per-file inventory for two package types
+exceeds Linux's per-environment-string limit. The large-inventory contract
+reproduces an oversized configuration
+(`/tmp/nodeharbor-726-compact-runtime-config-red.log`). Keep the same validated
+aliases and file contents in a generated staging directory, replacing it only
+after copying succeeds, and pass one compact directory mapping per package.
