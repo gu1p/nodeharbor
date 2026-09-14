@@ -1,9 +1,10 @@
 import type { Ref } from 'react';
-import type { Policy, Resources } from './model';
+import type { Backend, Policy, Resources, Snapshot, StorageInventory } from './model';
+import { StorageEditor } from './StorageLocations';
 const days=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 const time=(n:number)=>`${String(Math.floor(n/60)).padStart(2,'0')}:${String(n%60).padStart(2,'0')}`;
 const minutes=(value:string)=>{const [h,m]=value.split(':').map(Number);return h*60+m;};
-export function SharingRules({policy,host,onChange,onSave,busy,locked=false,saveButtonRef}:{policy:Policy;host:Resources;onChange:(policy:Policy)=>void;onSave:()=>void;busy:boolean;locked?:boolean;saveButtonRef?:Ref<HTMLButtonElement>}) {
+export function SharingRules({policy,host,storage,storageBackend,onStorageSaved,onChange,onSave,busy,locked=false,saveButtonRef}:{policy:Policy;host:Resources;storage?:StorageInventory;storageBackend?:Backend;onStorageSaved?:(snapshot:Snapshot)=>void;onChange:(policy:Policy)=>void;onSave:()=>void;busy:boolean;locked?:boolean;saveButtonRef?:Ref<HTMLButtonElement>}) {
  const set=<K extends keyof Policy>(key:K,value:Policy[K])=>onChange({...policy,[key]:value});
  const number=(label:string,value:number,update:(n:number)=>void,min:number,max:number,suffix?:string)=><label className="number-field"><span>{label}</span><div><input aria-label={label} type="number" value={value||''} min={min} max={max} onChange={e=>update(Number(e.target.value))}/><small>{suffix}</small></div></label>;
  const toggle=(label:string,description:string,key:'idleOnly'|'allowBattery'|'scheduleEnabled'|'startAtLogin'|'background'|'allowCi'|'allowServices')=><label className="toggle-row"><span><strong>{label}</strong><small>{description}</small></span><input type="checkbox" aria-label={label} checked={policy[key]} onChange={e=>set(key,e.target.checked)}/></label>;
@@ -12,8 +13,9 @@ export function SharingRules({policy,host,onChange,onSave,busy,locked=false,save
  <fieldset disabled={busy||locked} className="rules-fields"><section className="panel"><h2>Your resource budget</h2><p>This allowance includes the Linux worker and its running containers.</p><div className="resource-inputs">
  {number('CPU cores',policy.resources.cpus,n=>set('resources',{...policy.resources,cpus:n}),1,Math.max(1,host.cpus-1),`of ${host.cpus} available`)}
  {number('RAM (GiB)',policy.resources.memoryMib/1024,n=>set('resources',{...policy.resources,memoryMib:Math.round(n*1024)}),2,Math.max(2,Math.floor(host.memoryMib/1024)-2),`of ${Math.round(host.memoryMib/1024)} GiB total`)}
- {number('Disk (GiB)',policy.resources.diskGib,n=>set('resources',{...policy.resources,diskGib:n}),15,Math.max(15,host.diskGib-10),'for the worker VM')}
- </div><p className="hint">Changing CPU or RAM drains work before restarting the worker. Disk shrinking requires recreating it.</p></section>
+ {!storage?.supported&&!storageBackend?.previewStorage&&number('Disk (GiB)',policy.resources.diskGib,n=>set('resources',{...policy.resources,diskGib:n}),15,Math.max(15,host.diskGib-10),'for the worker VM')}
+ </div><p className="hint">Changing CPU or RAM drains work before restarting the worker. Use the storage review below to shrink its allocation with verified backup and restore.</p></section>
+ {storage&&<StorageEditor key={storage.revision??0} inventory={storage} backend={storageBackend} onSaved={onStorageSaved} disabled={busy||locked}/>}
  <div className="two-columns"><section className="panel"><h2>When to share</h2>
  {toggle('Only while idle','Pause new work when you return to your computer.','idleOnly')}
  {number('Idle time (minutes)',policy.idleAfterMinutes,n=>set('idleAfterMinutes',n),1,1440)}

@@ -11,10 +11,10 @@ import plistlib
 from contextlib import contextmanager
 
 
-def check_vm_runtime(application):
+def check_vm_runtime(application,platform='macos'):
     spec=importlib.util.spec_from_file_location('vm_runtime',Path(__file__).with_name('vm_runtime.py'))
     runtime=importlib.util.module_from_spec(spec);spec.loader.exec_module(runtime)
-    runtime.check_vm_runtime(application)
+    runtime.check_vm_runtime(application,platform=platform)
 
 
 def check_executable(binary, version, commit):
@@ -63,11 +63,13 @@ def smoke_packages(folder, target, version, commit):
             run(['dpkg-deb', '--extract', str(folder / (prefix + '.deb')), str(deb)])
             for binary in ['nodeharbor', 'nodeharbor-agent']:
                 check_executable(deb / 'usr/bin' / binary, version, commit)
+            check_vm_runtime(deb,platform='linux')
             appimage = folder / (prefix + '.AppImage')
             appimage.chmod(appimage.stat().st_mode | 0o111)
             run([str(appimage), '--appimage-extract'], cwd=root, stdout=subprocess.DEVNULL)
             check_executable(root / 'squashfs-root/AppRun', version, commit)
             check_executable(root / 'squashfs-root/usr/bin/nodeharbor-agent', version, commit)
+            check_vm_runtime(root/'squashfs-root',platform='linux')
         elif target == 'x86_64-pc-windows-msvc' and os.name == 'nt':
             install = root / 'NodeHarbor'
             package = folder / (prefix + '.exe')

@@ -98,6 +98,7 @@ impl State {
             CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, device_id TEXT, action TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS health_samples (device_id TEXT NOT NULL, at TEXT NOT NULL, ready INTEGER NOT NULL, rtt_ms REAL, PRIMARY KEY(device_id, at));
             CREATE TABLE IF NOT EXISTS device_policy (device_id TEXT PRIMARY KEY, allow_ci INTEGER NOT NULL DEFAULT 0, allow_services INTEGER NOT NULL DEFAULT 0, permitted INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS device_storage (device_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, drain_pending INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS device_health (device_id TEXT PRIMARY KEY, reason TEXT NOT NULL, observed_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS pending_revocations (device_id TEXT PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS worker_resets (device_id TEXT NOT NULL,request_id TEXT NOT NULL,complete INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(device_id,request_id));
@@ -406,6 +407,8 @@ async fn enroll(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Heartbeat {
+    #[serde(default)]
+    storage_generation: u64,
     state: String,
     #[serde(default)]
     reason: String,
@@ -422,7 +425,10 @@ async fn heartbeat(
     headers: HeaderMap,
     Json(input): Json<Heartbeat>,
 ) -> ApiResult<Json<Value>> {
+    let _operation = state.operations.lock().await;
     let id = device_id(&state, &headers).await?;
+    let generation = i64::try_from(input.storage_generation)
+        .map_err(|_| ApiError::bad("Invalid storage generation"))?;
     if ![
         "paused",
         "preparing",
@@ -437,6 +443,32 @@ async fn heartbeat(
         return Err(ApiError::bad("Invalid worker status"));
     }
     let mut transaction = state.db.begin().await.map_err(ApiError::internal)?;
+    let previous: Option<i64> =
+        sqlx::query_scalar("SELECT generation FROM device_storage WHERE device_id=?")
+            .bind(&id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(ApiError::internal)?;
+    if previous.is_some_and(|old| generation < old) {
+        return Err(ApiError::bad(
+            "Storage generation is older than the active worker",
+        ));
+    }
+    let changed = generation != previous.unwrap_or(0);
+    if changed {
+        sqlx::query("DELETE FROM health_samples WHERE device_id=?")
+            .bind(&id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(ApiError::internal)?;
+        sqlx::query("UPDATE devices SET eligible_ci=0,eligible_services=0 WHERE id=?")
+            .bind(&id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(ApiError::internal)?;
+        sqlx::query("INSERT INTO device_health(device_id,reason,observed_at) VALUES(?,'Storage changed; fresh health qualification is required',?) ON CONFLICT(device_id) DO UPDATE SET reason=excluded.reason,observed_at=excluded.observed_at").bind(&id).bind(Utc::now().to_rfc3339()).execute(&mut *transaction).await.map_err(ApiError::internal)?;
+    }
+    sqlx::query("INSERT INTO device_storage(device_id,generation,drain_pending) VALUES(?,?,?) ON CONFLICT(device_id) DO UPDATE SET generation=excluded.generation,drain_pending=MAX(device_storage.drain_pending,excluded.drain_pending)").bind(&id).bind(generation).bind(changed).execute(&mut *transaction).await.map_err(ApiError::internal)?;
     sqlx::query("UPDATE devices SET state=?,reason=?,last_seen=?,resources=? WHERE id=?")
         .bind(input.state)
         .bind(input.reason)
@@ -454,6 +486,25 @@ async fn heartbeat(
         .bind(&id).bind(input.allow_ci).bind(input.allow_services).bind(input.permitted)
         .execute(&mut *transaction).await.map_err(ApiError::internal)?;
     transaction.commit().await.map_err(ApiError::internal)?;
+    let pending: bool =
+        sqlx::query_scalar("SELECT drain_pending FROM device_storage WHERE device_id=?")
+            .bind(&id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(ApiError::internal)?;
+    if pending {
+        if let Some(cluster) = &state.cluster {
+            cluster
+                .drain(&identity(&state, &id).await?)
+                .await
+                .map_err(cluster_error)?;
+        }
+        sqlx::query("UPDATE device_storage SET drain_pending=0 WHERE device_id=?")
+            .bind(&id)
+            .execute(&state.db)
+            .await
+            .map_err(ApiError::internal)?;
+    }
     let row =
         sqlx::query("SELECT remote_paused,eligible_ci,eligible_services FROM devices WHERE id=?")
             .bind(&id)
@@ -564,12 +615,20 @@ async fn device_control(
             cluster.maintenance(&device).await.map_err(cluster_error)?
         }
         "drain" => {
+            let mut transaction = state.db.begin().await.map_err(ApiError::internal)?;
+            sqlx::query(
+                "UPDATE devices SET state='draining',eligible_ci=0,eligible_services=0 WHERE id=?",
+            )
+            .bind(&id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(ApiError::internal)?;
+            sqlx::query("INSERT INTO device_policy(device_id,permitted) VALUES(?,0) ON CONFLICT(device_id) DO UPDATE SET permitted=0")
+                .bind(&id).execute(&mut *transaction).await.map_err(ApiError::internal)?;
+            transaction.commit().await.map_err(ApiError::internal)?;
+            // Reconciliation must retain the cordon even if cluster work fails
+            // or the owner cannot send another heartbeat during maintenance.
             cluster.drain(&device).await.map_err(cluster_error)?;
-            sqlx::query("UPDATE devices SET eligible_ci=0,eligible_services=0 WHERE id=?")
-                .bind(&id)
-                .execute(&state.db)
-                .await
-                .map_err(ApiError::internal)?;
             let system_pods = cluster
                 .probe_pod_uids(&device)
                 .await

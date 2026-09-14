@@ -14,7 +14,7 @@ pub enum VmProvider {
 }
 impl VmProvider {
     pub fn native() -> Self {
-        if cfg!(target_os = "macos") {
+        if cfg!(any(target_os = "macos", target_os = "linux")) {
             Self::Lima
         } else {
             Self::Multipass
@@ -39,17 +39,9 @@ impl LimaRunner {
         Self { program, home }
     }
     pub fn bundled(directory: &Path) -> Result<Self> {
-        anyhow::ensure!(
-            cfg!(target_os = "macos"),
-            "This worker runtime requires macOS"
-        );
         let executable = std::env::current_exe()?;
-        let contents = executable
-            .parent()
-            .and_then(Path::parent)
-            .context("Cannot locate application resources")?;
         Ok(Self::new(
-            contents.join("Resources/lima/bin/limactl"),
+            crate::runtime_platform::bundled_program(std::env::consts::OS, &executable)?,
             directory.join("lima"),
         ))
     }
@@ -64,13 +56,33 @@ impl LimaRunner {
             self.program.is_file(),
             "The bundled VM runtime is missing. Reinstall the complete NodeHarbor application"
         );
+        if args
+            .first()
+            .is_some_and(|argument| matches!(argument.as_str(), "start" | "create"))
+        {
+            crate::runtime_platform::preflight().await?;
+        }
         let mut command = tokio::process::Command::new(&self.program);
         command
             .arg("--tty=false")
             .args(args)
             .env("LIMA_HOME", &self.home);
         #[cfg(target_os = "macos")]
-        command.env("SSH", "/usr/bin/ssh");
+        {
+            command.env("SSH", "/usr/bin/ssh");
+            let bin = self
+                .program
+                .parent()
+                .context("Cannot locate bundled Lima tools")?;
+            let paths = [
+                bin,
+                Path::new("/usr/bin"),
+                Path::new("/bin"),
+                Path::new("/usr/sbin"),
+                Path::new("/sbin"),
+            ];
+            command.env("PATH", std::env::join_paths(paths)?);
+        }
         crate::process::run_command(
             command,
             input,
@@ -83,6 +95,22 @@ impl LimaRunner {
 }
 #[async_trait]
 impl Runner for LimaRunner {
+    async fn stream(
+        &self,
+        args: &[String],
+        input: Option<std::fs::File>,
+        output: Option<std::fs::File>,
+        limit: u64,
+    ) -> Result<()> {
+        let mut command = tokio::process::Command::new(&self.program);
+        command
+            .arg("--tty=false")
+            .args(args)
+            .env("LIMA_HOME", &self.home);
+        #[cfg(target_os = "macos")]
+        command.env("SSH", "/usr/bin/ssh");
+        crate::process::stream_command(command, input, output, limit).await
+    }
     fn provider(&self) -> VmProvider {
         VmProvider::Lima
     }
@@ -146,12 +174,198 @@ pub(crate) fn configuration(
         data.push(json!({"mode":"data","path":file["path"],"content":file["content"],"owner":file["owner"],"permissions":file["permissions"],"overwrite":false}));
     }
     Ok(json!({
-        "minimumLimaVersion":runtime["version"],"vmType":"vz","arch":std::env::consts::ARCH,
+        "minimumLimaVersion":runtime["version"],"vmType":crate::runtime_platform::vm_type(std::env::consts::OS,std::env::consts::ARCH)?,"arch":std::env::consts::ARCH,
         "cpus":resources.cpus,"memory":format!("{}MiB",resources.memory_mib),"disk":format!("{}GiB",resources.disk_gib),
         "images":[image],"networks":[{"lima":"user-v2"}],"mounts":[],
         "containerd":{"user":false,"system":false},
-        "ssh":{"loadDotSSHPubKeys":false,"forwardAgent":false,"forwardX11":false},
+        "plain":true,"ssh":{"overVsock":false,"loadDotSSHPubKeys":false,"forwardAgent":false,"forwardX11":false},
         "portForwards":[{"guestIP":"0.0.0.0","guestIPMustBeZero":false,"guestPortRange":[1,65535],"proto":"any","ignore":true}],
         "hostResolver":{"enabled":true},"propagateProxyEnv":false,"provision":data
     }))
+}
+
+pub(crate) fn storage_request(
+    device: &str,
+    pool_id: &str,
+    locations: &[crate::storage::Location],
+    previous: &[crate::storage::Location],
+    generation: u64,
+) -> Value {
+    json!({"format":1,"deviceId":device,"poolId":pool_id,"generation":generation,
+        "disks":locations.iter().enumerate().map(|(index,location)|json!({
+            "id":location.id,"device":format!("/dev/vd{}",char::from(b'b'+index as u8)),
+            "allocationBytes":location.allocation_gib*1024*1024*1024,
+            "initialize":!previous.iter().any(|old|old.id==location.id)
+        })).collect::<Vec<_>>()})
+}
+
+pub(crate) fn configuration_with_storage(
+    device: &str,
+    resources: &nodeharbor_core::Resources,
+    files: &Value,
+    locations: &[crate::storage::Location],
+    pool_id: &str,
+    generation: u64,
+) -> Result<Value> {
+    let mut configuration = configuration(device, resources, files)?;
+    configuration["disk"] = json!("16GiB");
+    update_storage_configuration(
+        &mut configuration,
+        device,
+        pool_id,
+        locations,
+        &[],
+        generation,
+        true,
+    )?;
+    Ok(configuration)
+}
+
+/// The same durable contract is used by first boot and retained-VM replacement.
+/// Only NodeHarbor's storage entries are replaced; owner identity, guest files,
+/// compute resources, and unrelated provisioning remain intact.
+pub(crate) fn update_storage_configuration(
+    configuration: &mut Value,
+    device: &str,
+    pool_id: &str,
+    locations: &[crate::storage::Location],
+    previous: &[crate::storage::Location],
+    generation: u64,
+    migrate: bool,
+) -> Result<()> {
+    uuid::Uuid::parse_str(device)?;
+    uuid::Uuid::parse_str(pool_id)?;
+    anyhow::ensure!(
+        !locations.is_empty() && locations.len() <= 16,
+        "Choose one to sixteen storage disks"
+    );
+    configuration["plain"] = json!(true);
+    configuration["ssh"]["overVsock"] = json!(false);
+    configuration["additionalDisks"] = json!(locations
+        .iter()
+        .map(|location| json!({"name":location.id,"format":false}))
+        .collect::<Vec<_>>());
+    let mut provision = configuration["provision"]
+        .as_array()
+        .context("Missing worker provisioning")?
+        .clone();
+    provision.retain(|entry| {
+        entry["path"] != "/etc/nodeharbor/storage-request.json"
+            && !entry["script"]
+                .as_str()
+                .is_some_and(|script| script.contains("/usr/local/lib/nodeharbor/storage_pool.py"))
+    });
+    provision.push(json!({"mode":"data","path":"/etc/nodeharbor/storage-request.json","owner":"root:root","permissions":"0600","overwrite":true,"content":serde_json::to_string(&storage_request(device,pool_id,locations,previous,generation))?}));
+    let mut script = String::from(
+        r#"#!/bin/sh
+set -eu
+if ! command -v pvs >/dev/null || ! command -v rsync >/dev/null || ! command -v growpart >/dev/null; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y lvm2 e2fsprogs util-linux cloud-guest-utils rsync
+fi
+if [ -f /etc/nodeharbor/storage-state.json ] || [ -f /etc/nodeharbor/storage-pending.json ]; then
+  python3 /usr/local/lib/nodeharbor/storage_pool.py activate
+else
+  python3 /usr/local/lib/nodeharbor/storage_pool.py apply < /etc/nodeharbor/storage-request.json
+fi
+"#,
+    );
+    if migrate {
+        script.push_str("python3 /usr/local/lib/nodeharbor/storage_pool.py migrate\n");
+    }
+    script.push_str("python3 /usr/local/lib/nodeharbor/storage_pool.py check\n");
+    provision.push(json!({"mode":"system","script":script}));
+    configuration["provision"] = json!(provision);
+    let mut probes = if configuration["probes"].is_null() {
+        vec![]
+    } else {
+        configuration["probes"]
+            .as_array()
+            .context("Invalid worker readiness probes")?
+            .clone()
+    };
+    probes.retain(|probe| {
+        !probe["script"]
+            .as_str()
+            .is_some_and(|script| script.contains("/usr/local/lib/nodeharbor/storage_pool.py"))
+    });
+    probes.push(json!({"mode":"readiness","description":"The complete configured worker storage must be mounted","script":"#!/bin/sh\nsudo python3 /usr/local/lib/nodeharbor/storage_pool.py check\n"}));
+    configuration["probes"] = json!(probes);
+    Ok(())
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+    const OWNER: &str = "9511182e-9c48-4d20-a15b-1da8bb441386";
+    const POOL: &str = "40423e6c-1de0-46dc-a634-144671b655cd";
+    fn disk(id: &str, gib: u64) -> crate::storage::Location {
+        crate::storage::Location {
+            id: id.into(),
+            volume_id: "fixture".into(),
+            directory: format!("/fixture/{id}"),
+            allocation_gib: gib,
+        }
+    }
+    #[test]
+    fn storage_request_uses_the_durable_pool_and_marks_only_new_members_for_initialization() {
+        let old = disk("nhold", 15);
+        let new = disk("nhnew", 15);
+        let request = storage_request(OWNER, POOL, &[old.clone(), new], &[old], 7);
+        assert_eq!(request["deviceId"], OWNER);
+        assert_eq!(request["poolId"], POOL);
+        assert_eq!(request["generation"], 7);
+        assert_eq!(request["disks"][0]["initialize"], false);
+        assert_eq!(request["disks"][1]["initialize"], true);
+        assert_eq!(request["disks"][1]["device"], "/dev/vdc");
+    }
+    #[test]
+    fn replacement_configuration_is_idempotent_and_preserves_unrelated_provisioning() {
+        let mut config = configuration_with_storage(
+            OWNER,
+            &nodeharbor_core::Resources::default(),
+            &json!([]),
+            &[disk("nhold", 30)],
+            OWNER,
+            1,
+        )
+        .unwrap();
+        let unrelated = json!({"mode":"system","script":"echo unrelated"});
+        config["provision"]
+            .as_array_mut()
+            .unwrap()
+            .push(unrelated.clone());
+        config["probes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"mode":"readiness","script":"true"}));
+        let target = [disk("nhnew", 15)];
+        update_storage_configuration(&mut config, OWNER, POOL, &target, &[], 2, false).unwrap();
+        let once = config.clone();
+        update_storage_configuration(&mut config, OWNER, POOL, &target, &[], 2, false).unwrap();
+        assert_eq!(
+            config, once,
+            "Retry must not duplicate provisioning or probes"
+        );
+        assert_eq!(config["disk"], "16GiB");
+        assert_eq!(config["mounts"], json!([]));
+        let provision = config["provision"].as_array().unwrap();
+        assert!(provision.contains(&unrelated));
+        let entries: Vec<_> = provision
+            .iter()
+            .filter(|p| p["path"] == "/etc/nodeharbor/storage-request.json")
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["overwrite"], true);
+        let request: Value = serde_json::from_str(entries[0]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(request, storage_request(OWNER, POOL, &target, &[], 2));
+        assert!(!provision.iter().any(|p| p["script"]
+            .as_str()
+            .is_some_and(|s| s.contains("storage_pool.py migrate"))));
+        assert_eq!(config["probes"].as_array().unwrap().len(), 2);
+        assert!(provision
+            .iter()
+            .any(|p| p["path"] == "/etc/nodeharbor/device-id" && p["overwrite"] == false));
+    }
 }

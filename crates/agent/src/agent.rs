@@ -1,3 +1,5 @@
+mod storage_lifecycle;
+mod storage_operations;
 use crate::{worker_transition, Configuration, Store, Vm, VmInfo, WorkerAction, WorkerInput};
 use anyhow::{Context, Result};
 use nodeharbor_core::{evaluate, validate_policy, Policy, Resources};
@@ -32,6 +34,7 @@ pub struct Agent {
     client: reqwest::Client,
     runner: Option<Arc<dyn crate::Runner>>,
     activity: crate::activity::ActivityLog,
+    storage_volumes: Option<Vec<crate::storage::Volume>>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,6 +47,7 @@ pub struct Snapshot {
     pub reason: String,
     pub policy: Policy,
     pub resources: Resources,
+    pub storage: crate::storage::Inventory,
     pub allocated_resources: Option<Resources>,
     pub recreation_pending: bool,
     pub worker_replacement_available: bool,
@@ -59,7 +63,11 @@ impl Agent {
         let _operation = self.operation.lock().await;
         self.store.update(|config| {
             anyhow::ensure!(
-                config.recreation.is_none() && !config.prepare_requested && !config.stop_requested,
+                config.recreation.is_none()
+                    && config.storage_operation.is_none()
+                    && config.storage_lifecycle.maintenance.is_none()
+                    && !config.prepare_requested
+                    && !config.stop_requested,
                 "Waiting for the current worker operation before updating"
             );
             config.application_update_pending = true;
@@ -108,7 +116,7 @@ impl Agent {
         if new_settings && crate::VmProvider::native() == crate::VmProvider::Lima {
             agent.store.update(|config| {
                 config.vm_provider = crate::VmProvider::Lima;
-                config.format_version = 2;
+                config.format_version = config.format_version.max(2);
                 Ok(())
             })?;
         }
@@ -117,10 +125,22 @@ impl Agent {
     pub fn open_with_runner(directory: &Path, runner: Arc<dyn crate::Runner>) -> Result<Self> {
         Self::open_inner(directory, Some(runner))
     }
+    /// Inject both the VM and discovered volumes for deterministic integration tests.
+    #[doc(hidden)]
+    pub fn open_with_runner_and_volumes(
+        directory: &Path,
+        runner: Arc<dyn crate::Runner>,
+        volumes: Vec<crate::storage::Volume>,
+    ) -> Result<Self> {
+        let mut agent = Self::open_inner(directory, Some(runner))?;
+        agent.storage_volumes = Some(volumes);
+        Ok(agent)
+    }
     fn open_inner(directory: &Path, runner: Option<Arc<dyn crate::Runner>>) -> Result<Self> {
         let activity = crate::activity::ActivityLog::default();
         Ok(Self {
             runner,
+            storage_volumes: None,
             activity,
             store: Store::open(directory)?,
             runtime: Arc::new(Mutex::new(Runtime::default())),
@@ -153,17 +173,21 @@ impl Agent {
     }
     pub async fn snapshot(&self) -> Result<Snapshot> {
         let config = self.store.load()?;
-        let worker_replacement_available = config.device_token.is_some()
+        let worker_replacement_available = config.storage_locations.is_empty()
+            && config.storage_operation.is_none()
+            && config.storage_lifecycle.maintenance.is_none()
+            && config.device_token.is_some()
             && (config.vm_created || self.vm(&config)?.has_receipt()?);
-        let allocated = config
-            .allocated_resources
-            .as_ref()
-            .map(|r| r.disk_gib)
-            .unwrap_or(0);
-        let observation = crate::observe::observation(&self.store.directory, allocated);
+        let observation = self.observe_storage(&config);
+        let storage_agent = self.clone();
+        let storage_config = config.clone();
+        let storage =
+            tokio::task::spawn_blocking(move || storage_agent.discover_storage(&storage_config))
+                .await?;
         let decision = evaluate(&config.policy, &observation);
         let mut runtime = self.runtime.lock().await.clone();
         runtime.worker.installed = config.vm_configured;
+        let storage = self.storage_snapshot(&config, storage);
         Ok(Snapshot {
             device_id: config.device_id,
             name: config.name,
@@ -173,6 +197,7 @@ impl Agent {
             reason: runtime.reason.unwrap_or(decision.reason),
             policy: config.policy,
             resources: observation.resources,
+            storage,
             allocated_resources: config.allocated_resources,
             recreation_pending: config.recreation.is_some(),
             worker_replacement_available,
@@ -184,9 +209,41 @@ impl Agent {
         })
     }
     pub async fn save_policy(&self, policy: Policy) -> Result<Snapshot> {
+        let current = self.store.load()?;
+        anyhow::ensure!(
+            current.storage_operation.is_none() && current.storage_lifecycle.maintenance.is_none(),
+            "Wait for the storage change to finish before editing sharing rules"
+        );
+        if !current.storage_locations.is_empty() {
+            anyhow::ensure!(
+                policy.resources.disk_gib
+                    == current
+                        .storage_locations
+                        .iter()
+                        .map(|location| location.allocation_gib)
+                        .sum::<u64>(),
+                "Use Storage locations to change the worker storage allowance"
+            );
+        }
         let host = self.snapshot().await?.resources;
         validate_policy(&policy, &host).map_err(anyhow::Error::msg)?;
         self.store.update(|config| {
+            anyhow::ensure!(
+                config.storage_operation.is_none()
+                    && config.storage_lifecycle.maintenance.is_none(),
+                "Wait for the storage change to finish before editing sharing rules"
+            );
+            if !config.storage_locations.is_empty() {
+                anyhow::ensure!(
+                    policy.resources.disk_gib
+                        == config
+                            .storage_locations
+                            .iter()
+                            .map(|location| location.allocation_gib)
+                            .sum::<u64>(),
+                    "Storage choices changed; reload sharing rules"
+                );
+            }
             anyhow::ensure!(
                 config.recreation.is_none(),
                 "Wait for worker replacement to finish before changing sharing rules"
@@ -198,13 +255,19 @@ impl Agent {
                 );
             }
             if policy.enabled {
+                if !config.storage_locations.is_empty()
+                    && config.storage_operation.is_none()
+                    && config.storage_lifecycle.maintenance.is_none()
+                {
+                    self.validate_storage(config)?;
+                }
                 anyhow::ensure!(
                     config.device_token.is_some(),
                     "Connect this computer to a fleet before enabling sharing"
                 );
             }
             config.policy = policy;
-            if config.vm_configured && local_drain_required(config, &self.store.directory) {
+            if config.vm_configured && self.local_drain_required(config) {
                 config.draining_since.get_or_insert_with(now_seconds);
             }
             Ok(())
@@ -214,10 +277,15 @@ impl Agent {
     /// Called only by the explicit disk-deletion confirmation. The supervisor
     /// performs cleanup from the durable request; the UI never deletes a VM.
     pub async fn recreate_worker(&self, mut policy: Policy) -> Result<Snapshot> {
+        let current = self.store.load()?;
+        anyhow::ensure!(current.storage_locations.is_empty() && current.storage_operation.is_none() && current.storage_lifecycle.maintenance.is_none(), "Replacing a worker with configured storage disks is unavailable; existing files have been preserved");
         let host = self.snapshot().await?.resources;
         policy.enabled = false;
         validate_policy(&policy, &host).map_err(anyhow::Error::msg)?;
         self.store.update(|config| {
+            if !config.storage_locations.is_empty() {
+                crate::storage::require_location_support(config.vm_provider)?;
+            }
             anyhow::ensure!(
                 !config.application_update_pending,
                 "Cancel the application update before replacing the worker"
@@ -242,7 +310,7 @@ impl Agent {
                 access_removed: false,
                 target_provider: Some(crate::VmProvider::native()),
             });
-            config.format_version = 2;
+            config.format_version = config.format_version.max(2);
             config.draining_since.get_or_insert_with(now_seconds);
             Ok(())
         })?;
@@ -259,6 +327,12 @@ impl Agent {
                 "Cancel the application update before preparing the worker"
             );
             if action == "prepare" || action == "resume" {
+                if !config.storage_locations.is_empty()
+                    && config.storage_operation.is_none()
+                    && config.storage_lifecycle.maintenance.is_none()
+                {
+                    self.validate_storage(config)?;
+                }
                 anyhow::ensure!(
                     config.recreation.is_none(),
                     "Wait for worker replacement to finish before preparing or sharing"
@@ -267,6 +341,19 @@ impl Agent {
                     config.device_token.is_some(),
                     "Connect this computer to a fleet first"
                 );
+            }
+            if matches!(action, "prepare" | "resume") {
+                anyhow::ensure!(
+                    !config.storage_lifecycle.disabled,
+                    "Worker storage is disabled; configure storage before preparing the worker"
+                );
+                if let Some(operation) = &mut config.storage_lifecycle.maintenance {
+                    operation.paused = false;
+                }
+
+                if let Some(operation) = &mut config.storage_operation {
+                    operation.paused = false;
+                }
             }
             match action {
                 "prepare" => {
@@ -283,6 +370,12 @@ impl Agent {
                     config.draining_since = None;
                 }
                 "pause" => {
+                    if let Some(operation) = &mut config.storage_lifecycle.maintenance {
+                        operation.paused = true;
+                    }
+                    if let Some(operation) = &mut config.storage_operation {
+                        operation.paused = true;
+                    }
                     config.policy.enabled = false;
                     config.prepare_requested = false;
                     if config.vm_created {
@@ -290,6 +383,9 @@ impl Agent {
                     }
                 }
                 "stop" => {
+                    if let Some(operation) = &mut config.storage_lifecycle.maintenance {
+                        operation.paused = true;
+                    }
                     config.policy.enabled = false;
                     config.prepare_requested = false;
                     config.stop_requested = true;
@@ -446,7 +542,7 @@ impl Agent {
     }
     async fn tick_operation(&self) -> Result<()> {
         let config = self.store.load()?;
-        if config.stop_requested || deadline_expired(&config) {
+        if config.stop_requested || deadline_interrupts(&config) {
             // Shutdown itself must finish before another shutdown is issued.
             return self.finish_immediate_stop().await;
         }
@@ -463,6 +559,7 @@ impl Agent {
         self.finish_immediate_stop().await
     }
     async fn finish_immediate_stop(&self) -> Result<()> {
+        let explicit_stop = self.store.load()?.stop_requested;
         self.runtime.lock().await.stopping_now = true;
         let result = async {
             let config = self.store.update(|current| {
@@ -481,6 +578,11 @@ impl Agent {
             self.store.update(|current| {
                 current.stop_requested = false;
                 current.draining_since = None;
+                if explicit_stop {
+                    if let Some(operation) = &mut current.storage_operation {
+                        operation.paused = true;
+                    }
+                }
                 Ok(())
             })?;
             {
@@ -510,7 +612,21 @@ impl Agent {
                 Some(Starting::Resume) => !config.policy.enabled,
                 None => false,
             };
-            if config.stop_requested || pause || deadline_expired(&config) {
+            let lifecycle_pause = config
+                .storage_lifecycle
+                .maintenance
+                .as_ref()
+                .is_some_and(|op| op.paused);
+            let storage_pause = config
+                .storage_operation
+                .as_ref()
+                .is_some_and(|operation| operation.paused && operation.phase != "pending");
+            if config.stop_requested
+                || pause
+                || storage_pause
+                || lifecycle_pause
+                || deadline_interrupts(&config)
+            {
                 return Ok(());
             }
         }
@@ -532,10 +648,38 @@ impl Agent {
             .await;
             return Ok(());
         }
+        let config = self.resolve_initial_storage(&config).await?;
         let vm = self.vm(&config)?;
         let owned = config.vm_created || vm.has_receipt()?;
         if config.stop_requested {
             return self.finish_immediate_stop().await;
+        }
+        if config.storage_lifecycle.maintenance.is_some() {
+            return self.maintenance_tick(&config, &vm).await;
+        }
+        self.cleanup_backups().await?;
+        if config.storage_lifecycle.disabled {
+            self.set_status(
+                "paused",
+                "Worker storage is disabled; host enrollment remains",
+            )
+            .await;
+            let _ = self.heartbeat(&config).await;
+            return Ok(());
+        }
+        if config.storage_operation.is_some() {
+            return self.storage_operation_inner(&config, &vm).await;
+        }
+        if config.recreation.is_none() && self.missing_storage_tick(&config, &vm).await? {
+            return Ok(());
+        }
+        if let Err(error) = self.validate_storage(&config) {
+            if vm.has_receipt()? && vm.info().await?.running {
+                vm.stop_now().await?;
+            }
+            self.set_status("error", error.to_string()).await;
+            let _ = self.heartbeat(&config).await;
+            return Err(error);
         }
         if config.recreation.is_some() {
             return self.recreate_inner(&config, &vm).await;
@@ -559,7 +703,7 @@ impl Agent {
             if info.running && !info.reachable {
                 self.set_status(
                     "error",
-                    "The worker is powered on but Multipass cannot reach it. Use Stop now, then Prepare worker to retry. If this repeats, check the host's VM networking.",
+                    "The worker is powered on but the VM runtime cannot reach it. Use Stop now, then Prepare worker to retry. If this repeats, check the host's VM networking.",
                 )
                 .await;
                 return Ok(());
@@ -571,22 +715,30 @@ impl Agent {
             .await;
             let exists = info.installed;
             if !exists {
-                let observation = crate::observe::observation(&self.store.directory, 0);
+                let observation = self.observe_storage(&config);
                 validate_policy(&config.policy, &observation.resources)
                     .map_err(anyhow::Error::msg)?;
-                vm.create(
-                    &config.policy.resources,
-                    &self.store.directory,
-                    crate::guest_files(),
-                )
-                .await?;
+                if config.storage_locations.is_empty() {
+                    vm.create(
+                        &config.policy.resources,
+                        &self.store.directory,
+                        crate::guest_files(),
+                    )
+                    .await?;
+                } else {
+                    self.create_storage_worker(&config, &vm).await?;
+                }
             } else if config.allocated_resources.as_ref() != Some(&config.policy.resources) {
                 // A retry may follow a failed launch or changed settings. Apply
                 // the budget to the existing VM before recording it as allocated.
                 if info.running {
                     vm.stop().await?;
                 }
-                vm.resize(&config.policy.resources).await?;
+                if config.storage_locations.is_empty() {
+                    vm.resize(&config.policy.resources).await?;
+                } else {
+                    vm.resize_compute(&config.policy.resources).await?;
+                }
             }
             self.store.update(|c| {
                 c.vm_created = true;
@@ -606,6 +758,7 @@ impl Agent {
                 vm.stop().await?;
                 return Ok(());
             }
+            self.finish_initial_storage(&config, &vm).await?;
             // Bootstrap credentials must be fresh after a potentially slow first image download.
             self.activity
                 .begin_step("Requesting access to the fleet", Some(20));
@@ -616,6 +769,14 @@ impl Agent {
             self.store.update(|c| {
                 c.prepare_requested = false;
                 c.vm_configured = true;
+                if c.vm_provider == crate::VmProvider::Multipass && c.storage_lifecycle.initializing
+                {
+                    c.storage_generation = c
+                        .storage_generation
+                        .checked_add(1)
+                        .context("Storage generation overflow")?;
+                    c.storage_lifecycle.initializing = false;
+                }
                 Ok(())
             })?;
             self.runtime.lock().await.starting = None;
@@ -627,6 +788,9 @@ impl Agent {
             VmInfo::default()
         };
         self.runtime.lock().await.worker = info.clone();
+        if info.stopped {
+            self.cleanup_storage_copies(&config, &vm).await;
+        }
         if config.application_update_pending && !info.running {
             self.runtime.lock().await.application_update_ready = true;
             self.set_status("paused", "Worker stopped for an application update")
@@ -660,7 +824,11 @@ impl Agent {
         let resize_pending = config.vm_configured
             && config.allocated_resources.as_ref() != Some(&config.policy.resources);
         if resize_pending && !info.running {
-            vm.resize(&config.policy.resources).await?;
+            if config.storage_locations.is_empty() {
+                vm.resize(&config.policy.resources).await?;
+            } else {
+                vm.resize_compute(&config.policy.resources).await?;
+            }
             self.store.update(|current| {
                 // Record exactly what was applied, even if the owner edits settings again.
                 current.allocated_resources = Some(config.policy.resources.clone());
@@ -675,7 +843,7 @@ impl Agent {
         }
         let was_draining = config.draining_since.is_some();
         // Record local restrictions before HTTP or guest inspection can stall.
-        if info.running && local_drain_required(&config, &self.store.directory) {
+        if info.running && self.local_drain_required(&config) {
             let current = self.begin_drain()?;
             if deadline_expired(&current) {
                 return self.finish_immediate_stop().await;
@@ -695,14 +863,7 @@ impl Agent {
         let config = self.store.load()?;
         let resize_pending = config.vm_configured
             && config.allocated_resources.as_ref() != Some(&config.policy.resources);
-        let observation = crate::observe::observation(
-            &self.store.directory,
-            config
-                .allocated_resources
-                .as_ref()
-                .map(|r| r.disk_gib)
-                .unwrap_or(0),
-        );
+        let observation = self.observe_storage(&config);
         let decision = evaluate(&config.policy, &observation);
         let allowed = decision.allowed
             && !resize_pending
@@ -948,7 +1109,7 @@ impl Agent {
         self.store.update(|current| {
             current.vm_provider = request.target_provider.unwrap_or(config.vm_provider);
             if current.vm_provider == crate::VmProvider::Lima {
-                current.format_version = 2;
+                current.format_version = current.format_version.max(2);
             }
             current.vm_created = false;
             current.vm_configured = false;
@@ -986,7 +1147,7 @@ impl Agent {
     }
     fn clear_drain_if_permitted(&self) -> Result<()> {
         self.store.update(|config| {
-            if !config.stop_requested && !local_drain_required(config, &self.store.directory) {
+            if !config.stop_requested && !self.local_drain_required(config) {
                 config.draining_since = None;
             }
             Ok(())
@@ -995,17 +1156,35 @@ impl Agent {
     }
     async fn heartbeat(&self, config: &Configuration) -> Result<()> {
         let runtime = self.runtime.lock().await.clone();
-        let observation = crate::observe::observation(
-            &self.store.directory,
-            config
-                .allocated_resources
-                .as_ref()
-                .map(|r| r.disk_gib)
-                .unwrap_or(0),
-        );
-        let permitted =
-            evaluate(&config.policy, &observation).allowed && !config.application_update_pending;
-        let value=self.request(config,"/heartbeat",Some(json!({"state":runtime.state.unwrap_or_else(||"paused".into()),"reason":runtime.reason.unwrap_or_default(),"resources":config.policy.resources,
+        let observation = self.observe_storage(config);
+        let permitted = evaluate(&config.policy, &observation).allowed
+            && !config.application_update_pending
+            && config.storage_operation.is_none()
+            && config.storage_lifecycle.maintenance.is_none();
+        let mut resources = config.policy.resources.clone();
+        if config.storage_lifecycle.disabled
+            || config.storage_lifecycle.missing.is_some()
+            || config.storage_lifecycle.maintenance.is_some()
+        {
+            resources.disk_gib = 0;
+        } else if !config.storage_locations.is_empty() {
+            resources.disk_gib = config
+                .storage_locations
+                .iter()
+                .map(|l| l.allocation_gib)
+                .sum();
+        }
+        let reason = if config.storage_lifecycle.missing.is_some()
+            || config.storage_lifecycle.maintenance.is_some()
+        {
+            "Storage maintenance; see this computer for details".to_owned()
+        } else {
+            runtime.reason.unwrap_or_default()
+        };
+        let permitted = permitted
+            && !config.storage_lifecycle.disabled
+            && config.storage_lifecycle.missing.is_none();
+        let value=self.request(config,"/heartbeat",Some(json!({"storageGeneration":config.storage_generation,"state":runtime.state.unwrap_or_else(||"paused".into()),"reason":reason,"resources":resources,
             "allowCi":config.policy.allow_ci,"allowServices":config.policy.allow_services,"permitted":permitted}))).await?;
         self.runtime.lock().await.remote_paused = value["remotePaused"].as_bool().unwrap_or(false);
         Ok(())
@@ -1039,11 +1218,12 @@ fn deadline_expired(config: &Configuration) -> bool {
         now_seconds().saturating_sub(since) >= u64::from(config.policy.drain_seconds)
     })
 }
-fn local_drain_required(config: &Configuration, directory: &Path) -> bool {
-    let allocated = config.allocated_resources.as_ref();
-    let observation = crate::observe::observation(directory, allocated.map_or(0, |r| r.disk_gib));
-    !evaluate(&config.policy, &observation).allowed
-        || (config.vm_configured && allocated != Some(&config.policy.resources))
+fn deadline_interrupts(config: &Configuration) -> bool {
+    // Storage drains coordinate admission before honoring their own deadline.
+    // Do not interrupt that coordination or discard the durable maintenance phase.
+    config.storage_operation.is_none()
+        && config.storage_lifecycle.maintenance.is_none()
+        && deadline_expired(config)
 }
 async fn checked(mut response: reqwest::Response) -> Result<Value> {
     let status = response.status();

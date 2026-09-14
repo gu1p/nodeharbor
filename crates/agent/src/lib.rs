@@ -1,5 +1,6 @@
 //! Local contribution supervision. VM names are owned by enrolled device IDs.
 use serde::{Deserialize, Serialize};
+pub mod storage_lifecycle;
 
 pub fn managed_vm_name(device_id: &str) -> anyhow::Result<String> {
     let id = uuid::Uuid::parse_str(device_id)?;
@@ -47,9 +48,12 @@ pub fn worker_transition(input: &WorkerInput) -> WorkerAction {
 
 mod store;
 pub use store::{Configuration, Store};
+pub mod lima_storage;
+pub mod runtime_platform;
+pub mod storage;
 
 mod vm;
-pub use vm::{CommandOutput, Runner, Vm, VmInfo, WorkloadInventory};
+pub use vm::{CommandOutput, MultipassRunner, Runner, Vm, VmInfo, WorkloadInventory};
 mod lima;
 pub use lima::{LimaRunner, VmProvider};
 pub mod activity;

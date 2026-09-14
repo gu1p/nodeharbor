@@ -60,11 +60,27 @@ elapsed time, live command output, and errors. It updates every second. Turn off
 diagnostics. The latest 500 entries are kept for the current app session;
 credentials and command input are excluded from the log.
 
-The macOS app includes its Lima VM runtime and uses application-managed networking
-without changing your VPN configuration. On Windows and Ubuntu, install
+The macOS and Linux apps include Lima and use application-managed networking
+without changing your VPN configuration. Linux also requires QEMU 6.2 or newer,
+`qemu-img`, and permission to use KVM. On Windows, install
 [Multipass](https://canonical.com/multipass/install) before preparing a worker.
 Open NodeHarbor, enroll using the code supplied by your fleet administrator,
-choose resource limits and sharing rules, and prepare the worker.
+choose resource limits and sharing rules, and prepare the worker. On macOS and
+Linux, Storage locations lets you select folders and allocations, then review
+and apply them. An empty selection uses the displayed application-managed folder.
+Existing disks can be moved, grown, shrunk, or removed, and more disks can be added.
+Shrink and removal use a verified private backup and replacement images, with
+temporary space and downtime reviewed before applying. **Delete all worker storage**
+requires explicit confirmation and keeps storage disabled while retaining enrollment.
+Optional automatic recovery waits two minutes for a missing disk, then can discard
+the entire old pool and rebuild on remaining selected disks. Existing installations
+keep waiting until the owner enables recovery; Pause and Stop override recovery.
+Windows supports the single-disk replacement flow with Multipass Hyper-V and
+readable Hyper-V storage metadata; other Multipass drivers cannot yet be verified
+for shrinking. Host configuration and VPN settings are preserved.
+See [storage lifecycle behavior and validation](docs/storage-lifecycle-validation.md)
+for coverage and native tests still required, and [storage support](docs/storage-724.md)
+for filesystem requirements and platforms that still need native testing.
 For an existing macOS worker, use **Your machine → Replace worker** to move to the
 bundled runtime. Replacement drains work, removes the previous worker's access,
 and deletes its owned disk after confirmation. Enrollment and sharing rules remain;
@@ -89,8 +105,8 @@ flowchart LR
 ```
 
 The desktop uses Tauri, React, TypeScript, and Rust. The controller uses Axum and
-SQLite through SQLx. The macOS app bundles Lima with its `user-v2` network; Windows
-and Ubuntu use Multipass. Each VM remains subject to ownership receipts and the
+SQLite through SQLx. The macOS and Linux apps bundle Lima with its `user-v2` network; Windows
+uses Multipass. Each VM remains subject to ownership receipts and the
 same contribution lifecycle. NetBird supplies
 private connectivity; it does not create Kubernetes workers. NodeHarbor owns worker
 enrollment, local sharing policy, VM lifecycle, and fleet eligibility.
@@ -110,8 +126,8 @@ cd desktop
 
 On Windows use `python scripts/check.py` in place of `make check`. Local tests
 do not require access to a fleet or launch a VM. Real sharing needs an enrollment
-code from your fleet administrator and a packaged app (or Multipass on Windows
-and Ubuntu).
+code from your fleet administrator and a packaged app, plus Multipass on Windows
+or the QEMU/KVM dependencies on Linux.
 
 Environment-specific configuration and credentials belong in your private
 infrastructure repository. This public repository must never contain device

@@ -97,10 +97,14 @@ class RuntimeInstallation(unittest.TestCase):
             for name in ['netbird','k3s']:self.assertEqual((binary/name).read_bytes(),b'old '+name.encode())
 
 class GuestNetworkConfiguration(unittest.TestCase):
-    def prepare(self, resolver_text, install=None, fail_command=None, command_handler=None):
+    def prepare(self, resolver_text, install=None, fail_command=None, command_handler=None, storage_state=None, storage_request=False, storage_service=False):
         config=GuestContract().config()
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);(root/'device-id').write_text(config['deviceId'])
+            if storage_state is not None:(root/'storage-state.json').write_text(json.dumps(storage_state))
+            if storage_request:(root/'storage-request.json').write_text('{}')
+            service_marker=root/'storage.service'
+            if storage_service:service_marker.write_text('[Service]\n')
             resolver=root/'resolv.conf';resolver.write_text(resolver_text)
             writes={};commands=[]
             def run(*args, **kwargs):
@@ -108,10 +112,47 @@ class GuestNetworkConfiguration(unittest.TestCase):
                 if args==fail_command:raise RuntimeError('Guest service restart failed')
                 if command_handler is not None:command_handler(args)
                 return json.dumps({'netbirdIp':'100.75.1.2/16'}) if 'status' in args else ''
-            with patch.object(configure,'ROOT',root), patch.object(configure,'RESOLV_CONF',resolver,create=True), patch.object(configure.sys,'platform','linux'), patch.object(configure.os,'geteuid',return_value=0,create=True), patch.object(configure.sys,'stdin',io.StringIO(json.dumps(config))), patch.object(configure,'install_runtime',new=install if install is not None else Mock()), patch.object(configure,'run',side_effect=run), patch.object(configure,'write',side_effect=lambda path,content,mode=0o600:writes.update({str(path):content})):
+            with patch.object(configure,'ROOT',root), patch.object(configure,'STORAGE_SERVICE',service_marker,create=True), patch.object(configure,'RESOLV_CONF',resolver,create=True), patch.object(configure.sys,'platform','linux'), patch.object(configure.os,'geteuid',return_value=0,create=True), patch.object(configure.sys,'stdin',io.StringIO(json.dumps(config))), patch.object(configure,'install_runtime',new=install if install is not None else Mock()), patch.object(configure,'run',side_effect=run), patch.object(configure,'write',side_effect=lambda path,content,mode=0o600:writes.update({str(path):content})):
                 configure.main()
             self.assertEqual(resolver.read_text(),resolver_text)
             return commands,writes,str(resolver)
+
+    def test_pooled_worker_puts_every_ephemeral_storage_consumer_on_the_same_filesystem(self):
+        state={'format':1,'deviceId':GuestContract().config()['deviceId'],'poolId':GuestContract().config()['deviceId'],'migrationComplete':True}
+        commands,writes,_=self.prepare('nameserver 192.168.64.1\n',storage_state=state)
+        k3s=json.loads(writes['/etc/rancher/k3s/config.yaml'])
+        pool='/var/lib/nodeharbor/storage'
+        self.assertEqual(k3s.get('data-dir'),pool+'/k3s')
+        self.assertIn('root-dir='+pool+'/kubelet',k3s['kubelet-arg'])
+        dropin=json.loads(writes[pool+'/k3s/agent/etc/kubelet.conf.d/10-nodeharbor.conf'])
+        self.assertEqual(dropin['podLogsDir'],pool+'/pods')
+        service=writes['/etc/systemd/system/k3s-agent.service']
+        self.assertIn('Requires=netbird.service nodeharbor-storage.service',service)
+        self.assertIn('After=network-online.target netbird.service nodeharbor-storage.service',service)
+        self.assertIn('ExecStartPre=/usr/bin/python3 /usr/local/lib/nodeharbor/storage_pool.py check',service)
+        self.assertIn(('/usr/bin/python3','/usr/local/lib/nodeharbor/storage_pool.py','check'),commands)
+
+    def test_missing_pool_cannot_fall_back_to_the_legacy_root_disk_or_start_network_services(self):
+        state={'format':1,'deviceId':GuestContract().config()['deviceId'],'poolId':GuestContract().config()['deviceId'],'migrationComplete':True}
+        install=Mock()
+        with self.assertRaisesRegex(RuntimeError,'restart failed'):
+            self.prepare('nameserver 192.168.64.1\n',storage_state=state,install=install,
+                         fail_command=('/usr/bin/python3','/usr/local/lib/nodeharbor/storage_pool.py','check'))
+        install.assert_not_called()
+
+    def test_missing_pool_state_cannot_turn_a_configured_worker_back_into_legacy_storage(self):
+        for markers in [{'storage_request':True}, {'storage_service':True}]:
+            install=Mock()
+            with self.subTest(markers=markers), self.assertRaisesRegex(ValueError,'storage|Storage'):
+                self.prepare('nameserver 192.168.64.1\n',install=install,**markers)
+            install.assert_not_called()
+
+    def test_existing_worker_data_requires_completed_explicit_migration_before_switching_paths(self):
+        state={'format':1,'deviceId':GuestContract().config()['deviceId'],'poolId':GuestContract().config()['deviceId'],'migrationComplete':False}
+        install=Mock()
+        with self.assertRaisesRegex(ValueError,'migration'):
+            self.prepare('nameserver 192.168.64.1\n',storage_state=state,install=install)
+        install.assert_not_called()
 
     def test_slow_k3s_startup_waits_for_real_readiness_under_the_owners_deadline(self):
         import configparser

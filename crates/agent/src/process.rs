@@ -14,6 +14,69 @@ pub enum OutputFormat {
     Terminal,
 }
 
+/// Stream an opaque archive without text conversion, host extraction or an
+/// unbounded in-memory buffer. Dropping the operation kills its runtime child.
+pub async fn stream_command(
+    mut command: Command,
+    input: Option<std::fs::File>,
+    output: Option<std::fs::File>,
+    limit: u64,
+) -> Result<()> {
+    command
+        .stdin(input.map_or(Stdio::null(), Stdio::from))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    let mut child = command
+        .spawn()
+        .context("Cannot start the worker backup stream")?;
+    let mut stdout = child.stdout.take().context("No backup output")?;
+    let stderr = child.stderr.take().context("No backup error output")?;
+    let work = async {
+        let copy = async {
+            let mut output = output.map(tokio::fs::File::from_std);
+            let mut bytes = 0u64;
+            let mut buffer = [0u8; 65536];
+            loop {
+                let count = stdout.read(&mut buffer).await?;
+                if count == 0 {
+                    break;
+                }
+                bytes = bytes
+                    .checked_add(count as u64)
+                    .context("Backup size overflow")?;
+                anyhow::ensure!(
+                    bytes <= limit,
+                    "Backup exceeded its reviewed temporary space; source images preserved"
+                );
+                if let Some(file) = &mut output {
+                    file.write_all(&buffer[..count]).await?;
+                }
+            }
+            if let Some(file) = &mut output {
+                file.sync_all().await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        let (status, errors, ()) = tokio::try_join!(
+            async { Ok::<_, anyhow::Error>(child.wait().await?) },
+            read_output(stderr, OutputStream::Stderr, None, OutputFormat::Lines),
+            copy
+        )?;
+        anyhow::ensure!(
+            status.success(),
+            "Worker backup operation failed: {}",
+            errors.chars().take(1200).collect::<String>()
+        );
+        Ok(())
+    };
+    tokio::time::timeout(Duration::from_secs(24 * 3600), work)
+        .await
+        .context("Worker backup operation timed out")?
+}
+
 async fn read_output(
     mut reader: impl AsyncRead + Unpin,
     stream: OutputStream,

@@ -49,6 +49,12 @@ impl Reconciler {
                     (0..=90).contains(&now.signed_duration_since(seen).num_seconds())
                 });
             let accepting = fresh
+                && !sqlx::query_scalar::<_, bool>(
+                    "SELECT COALESCE(MAX(drain_pending),0) FROM device_storage WHERE device_id=?",
+                )
+                .bind(&device.id)
+                .fetch_one(&self.state.db)
+                .await?
                 && !row.get::<bool, _>("remote_paused")
                 && row.get::<bool, _>("permitted")
                 && row.get::<String, _>("state") == "sharing";

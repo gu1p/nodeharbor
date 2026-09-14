@@ -10,6 +10,7 @@ ROOT=Path(__file__).resolve().parents[1]
 ID='9511182e-9c48-4d20-a15b-1da8bb441386'
 FILES={
     '/usr/local/lib/nodeharbor/configure_worker.py':'0700',
+    '/usr/local/lib/nodeharbor/storage_pool.py':'0700',
     '/usr/local/lib/nodeharbor/watchdog.py':'0700',
     '/etc/systemd/system/nodeharbor-watchdog.service':'0644',
     '/etc/systemd/system/nodeharbor-watchdog.timer':'0644',

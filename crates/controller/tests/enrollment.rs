@@ -34,6 +34,62 @@ async fn request(
 async fn app() -> Router {
     router(State::open("sqlite::memory:", "test-admin").await.unwrap())
 }
+
+#[tokio::test]
+async fn a_storage_generation_change_invalidates_all_previous_health_evidence() {
+    let state = State::open("sqlite::memory:", "test-admin").await.unwrap();
+    let app = router(state.clone());
+    let (_, code) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/enrollment-codes",
+        Some("test-admin"),
+        json!({}),
+    )
+    .await;
+    let (_, device) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/enroll",
+        None,
+        json!({"code":code["code"],"name":"Test worker","platform":"linux","architecture":"amd64"}),
+    )
+    .await;
+    let token = device["token"].as_str().unwrap();
+    let id = device["deviceId"].as_str().unwrap();
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/heartbeat",
+        Some(token),
+        json!({"state":"sharing","storageGeneration":1}),
+    )
+    .await;
+    sqlx::query("INSERT INTO health_samples(device_id,at,ready,rtt_ms) VALUES(?,'2026-09-13T00:00:00Z',1,20)").bind(id).execute(&state.db).await.unwrap();
+    sqlx::query("UPDATE devices SET eligible_ci=1,eligible_services=1 WHERE id=?")
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let (status, _) = request(app, "POST", "/api/v1/heartbeat", Some(token), json!({"state":"paused","storageGeneration":2,"resources":{"cpus":2,"memoryMib":4096,"diskGib":15}})).await;
+    assert_eq!(status, StatusCode::OK);
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM health_samples WHERE device_id=?")
+        .bind(id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "Old pool qualification must not qualify its replacement"
+    );
+    let eligible: bool =
+        sqlx::query_scalar("SELECT eligible_ci OR eligible_services FROM devices WHERE id=?")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert!(!eligible);
+}
 #[tokio::test]
 async fn strangers_cannot_list_devices_or_create_enrollment_codes() {
     let app = app().await;

@@ -20,6 +20,7 @@ const NAME: &str = "nodeharbor-9511182e9c484d20a15b1da8bb441386";
 struct Fixture {
     writes: Arc<Mutex<Vec<Value>>>,
     probe_override: Arc<Mutex<Option<Value>>>,
+    storage_override: Arc<Mutex<Option<Value>>>,
 }
 async fn upstream(
     Extract(f): Extract<Fixture>,
@@ -34,7 +35,12 @@ async fn upstream(
         }
         ("GET", "/api/peers/my-peer") => json!({"id":"my-peer","ip":"100.90.1.2","connected":true}),
         ("GET", p) if p.starts_with("/api/v1/nodes/") => {
-            json!({"metadata":{"name":NAME,"resourceVersion":"123","labels":{"nodeharbor.sikalio.dev/device":ID,"kubernetes.io/arch":"arm64"}},"spec":{"podCIDR":"127.0.0.0/24","taints":[{"key":"example.org/custom","value":"keep","effect":"NoSchedule"},{"key":"nodeharbor.sikalio.dev/quarantine","effect":"NoSchedule"}]},"status":{"addresses":[{"type":"InternalIP","address":"100.90.1.2"}],"capacity":{"cpu":"2","memory":"3900000Ki","ephemeral-storage":"29000000Ki"},"conditions":[{"type":"Ready","status":"True"},{"type":"MemoryPressure","status":"False"},{"type":"DiskPressure","status":"False"},{"type":"PIDPressure","status":"False"}]}})
+            let mut node = json!({"metadata":{"name":NAME,"resourceVersion":"123","labels":{"nodeharbor.sikalio.dev/device":ID,"kubernetes.io/arch":"arm64"}},"spec":{"podCIDR":"127.0.0.0/24","taints":[{"key":"example.org/custom","value":"keep","effect":"NoSchedule"},{"key":"nodeharbor.sikalio.dev/quarantine","effect":"NoSchedule"}]},"status":{"addresses":[{"type":"InternalIP","address":"100.90.1.2"}],"capacity":{"cpu":"2","memory":"3900000Ki","ephemeral-storage":"29000000Ki"},"allocatable":{"ephemeral-storage":"27000000Ki"},"conditions":[{"type":"Ready","status":"True"},{"type":"MemoryPressure","status":"False"},{"type":"DiskPressure","status":"False"},{"type":"PIDPressure","status":"False"}]}});
+            if let Some(storage) = f.storage_override.lock().unwrap().as_ref() {
+                node["status"]["capacity"]["ephemeral-storage"] = storage["capacity"].clone();
+                node["status"]["allocatable"]["ephemeral-storage"] = storage["allocatable"].clone();
+            }
+            node
         }
         ("GET", "/api/v1/namespaces/nodeharbor-system/pods") => {
             json!({"items":[f.probe_override.lock().unwrap().clone().unwrap_or_else(valid_probe)]})
@@ -122,6 +128,26 @@ async fn admission_requires_a_real_probe_on_the_enrolled_nodes_pod_network() {
         cluster.probe_pod_uids(&device).await.unwrap(),
         vec!["a8b219f7-a1a0-44a8-a876-bd06a64d91cb"]
     );
+    for storage in [
+        json!({"capacity":"15Gi","allocatable":"12Gi"}),
+        json!({"capacity":"27Gi","allocatable":"0"}),
+        json!({"capacity":"27Gi","allocatable":"28Gi"}),
+        json!({"capacity":"27Gi","allocatable":null}),
+    ] {
+        *fixture.storage_override.lock().unwrap() = Some(storage.clone());
+        assert!(
+            cluster
+                .observe(&device, &nodeharbor_core::Resources::default())
+                .await
+                .is_err(),
+            "A reachable probe cannot override invalid Kubernetes storage evidence: {storage}"
+        );
+    }
+    *fixture.storage_override.lock().unwrap() = None;
+    cluster
+        .observe(&device, &nodeharbor_core::Resources::default())
+        .await
+        .unwrap();
     for pointer in [
         "/metadata/ownerReferences/0/uid",
         "/metadata/ownerReferences/0/apiVersion",

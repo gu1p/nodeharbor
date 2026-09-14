@@ -14,6 +14,8 @@ use tauri_plugin_autostart::ManagerExt;
 #[cfg(target_os = "macos")]
 mod macos_update;
 mod settings;
+mod storage_commands;
+mod storage_dialog;
 mod update_flow;
 mod updates;
 
@@ -208,6 +210,7 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_autostart::Builder::new()
                 .app_name("NodeHarbor")
@@ -221,6 +224,11 @@ fn main() {
             activity,
             save_policy,
             recreate_worker,
+            storage_commands::preview_storage,
+            storage_commands::apply_storage,
+            storage_commands::set_storage_recovery,
+            storage_commands::retry_storage_maintenance,
+            storage_commands::choose_storage_directory,
             worker_action,
             enroll,
             fleet

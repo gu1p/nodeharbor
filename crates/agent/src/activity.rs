@@ -209,6 +209,25 @@ fn input_secrets(input: Option<&[u8]>) -> Vec<String> {
 }
 #[async_trait]
 impl Runner for ActivityRunner {
+    async fn replacement_space(
+        &self,
+        name: &str,
+    ) -> anyhow::Result<crate::storage_lifecycle::ReplacementSpace> {
+        self.inner.replacement_space(name).await
+    }
+    async fn stream(
+        &self,
+        args: &[String],
+        input: Option<std::fs::File>,
+        output: Option<std::fs::File>,
+        limit: u64,
+    ) -> anyhow::Result<()> {
+        self.log
+            .begin_step("Streaming and verifying worker storage", None);
+        let result = self.inner.stream(args, input, output, limit).await;
+        self.log.finish_step();
+        result
+    }
     fn provider(&self) -> crate::VmProvider {
         self.inner.provider()
     }

@@ -175,13 +175,21 @@ pub fn verify_worker_evidence(
     let cpu = quantity(&capacity["cpu"])?;
     let memory = quantity(&capacity["memory"])? / 1048576.0;
     let disk = quantity(&capacity["ephemeral-storage"])? / 1073741824.0;
+    let allocatable_disk = quantity(&node["status"]["allocatable"]["ephemeral-storage"])
+        .context("Worker allocatable storage is missing or invalid")?
+        / 1073741824.0;
     anyhow::ensure!(
         cpu == f64::from(budget.cpus)
             && memory >= budget.memory_mib as f64 * 0.85
             && memory <= budget.memory_mib as f64
+            && disk >= budget.disk_gib as f64 * 0.85
             && disk <= budget.disk_gib as f64
             && disk >= 10.0,
         "Actual worker capacity differs from its owner’s resource budget"
+    );
+    anyhow::ensure!(
+        allocatable_disk <= disk,
+        "Worker allocatable storage exceeds its reported capacity"
     );
     Ok(())
 }
