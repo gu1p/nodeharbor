@@ -27,7 +27,7 @@ pub fn bundled_program(platform: &str, executable: &Path) -> Result<PathBuf> {
         .context("Cannot locate application resources")?;
     match platform {
         "macos" => Ok(prefix.join("Resources/lima/bin/limactl")),
-        "linux" => Ok(prefix.join("lib/NodeHarbor/lima/bin/limactl")),
+        "linux" => Ok(prefix.join("libexec/nodeharbor/lima/bin/limactl")),
         _ => anyhow::bail!("This bundled worker runtime requires macOS or Linux"),
     }
 }

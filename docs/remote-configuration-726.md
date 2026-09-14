@@ -301,3 +301,10 @@ manifest requirement for Common Controls v6 (upstream API example build.rs and
 issue tauri-apps/tauri#13419). Add a standard asInvoker/v6 manifest to the test
 executables through MSVC's supported manifest linker options. The application's
 existing Tauri manifest and native permission requests remain unchanged.
+
+Run 34816587599 still rejects the AppImage's Lima checksum with `NO_STRIP`:
+linuxdeploy also rewrites RPATH in ELF resources below `usr/lib`. Use Tauri's
+supported Debian/AppImage file mappings to place this independently verified
+runtime under `usr/libexec/nodeharbor/lima`, the standard private-executable
+layout. Both packaged launchers resolve that same directory. Preserve the
+upstream archive inventory and byte checks instead of accepting rewritten tools.

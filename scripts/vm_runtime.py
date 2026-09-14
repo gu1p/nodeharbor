@@ -60,12 +60,15 @@ def bundle_lima(target):
 
 def bundle_configuration(target):
     bundle={'externalBin':['binaries/nodeharbor-agent']}
-    if 'apple-darwin' in target or 'linux' in target:
+    if 'apple-darwin' in target:
         bundle['resources']={str(bundle_lima(target)):'lima/'}
     if 'linux' in target:
         emulator='qemu-system-arm' if target.startswith('aarch64-') else 'qemu-system-x86'
         firmware='qemu-efi-aarch64' if target.startswith('aarch64-') else 'ovmf'
-        bundle['linux']={'deb':{'depends':['libwebkit2gtk-4.1-0','libayatana-appindicator3-1','libxss1',emulator,firmware,'qemu-utils','openssh-client','gzip']}}
+        # Keep the separately verified tools outside linuxdeploy's usr/lib ELF
+        # rewriting. Tauri's package mappings preserve this private tool layout.
+        files={'/usr/libexec/nodeharbor/lima':str(bundle_lima(target))}
+        bundle['linux']={'deb':{'files':files,'depends':['libwebkit2gtk-4.1-0','libayatana-appindicator3-1','libxss1',emulator,firmware,'qemu-utils','openssh-client','gzip']},'appimage':{'files':files}}
     return bundle
 
 def bundle_environment(target,environ):
@@ -77,7 +80,7 @@ def bundle_environment(target,environ):
 
 def check_vm_runtime(application,platform='macos'):
     if platform=='macos':directory=Path(application)/'Contents/Resources/lima'
-    elif platform=='linux':directory=Path(application)/'usr/lib/NodeHarbor/lima'
+    elif platform=='linux':directory=Path(application)/'usr/libexec/nodeharbor/lima'
     else:raise ValueError('This platform has no bundled Lima runtime')
     verify_bundle(directory)
     output=subprocess.check_output([str(directory/'bin/limactl'),'--version'],text=True,timeout=30).strip()

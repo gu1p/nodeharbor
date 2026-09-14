@@ -15,7 +15,7 @@ fn bundled_runtime_is_shared_by_desktop_and_cli_in_each_package_layout() {
             let linux = format!("{prefix}/usr/bin/{executable}");
             assert_eq!(
                 runtime_platform::bundled_program("linux", Path::new(&linux)).unwrap(),
-                Path::new(&format!("{prefix}/usr/lib/NodeHarbor/lima/bin/limactl"))
+                Path::new(&format!("{prefix}/usr/libexec/nodeharbor/lima/bin/limactl"))
             );
         }
     }
