@@ -5,10 +5,29 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConfigurationEdit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<ConfigurationOperation>,
     pub request_id: String,
     pub expected_revision: u64,
     pub policy: Policy,
     pub acknowledge_interruption: bool,
+}
+/// Storage payloads use the node's local storage schema. The node deserializes
+/// them strictly and repeats its local preview before accepting an application.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ConfigurationOperation {
+    StoragePreview {
+        selections: Vec<serde_json::Value>,
+        options: serde_json::Value,
+    },
+    StorageApply {
+        plan: serde_json::Value,
+    },
+    StorageRecovery {
+        enabled: bool,
+    },
+    StorageRetry {},
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,6 +40,10 @@ pub struct ConfigurationCommand {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigurationReceipt {
+    #[serde(default)]
+    pub result: Option<serde_json::Value>,
+    #[serde(default)]
+    pub effective_storage: Option<serde_json::Value>,
     pub request_id: String,
     pub status: String,
     pub revision: u64,
@@ -39,6 +62,9 @@ pub struct RemoteConfiguration {
     /// A failed or interrupted runtime mutation cannot qualify as effective.
     pub repair_required: bool,
     pub applying: bool,
+    /// Internal revisions made by the currently authorized storage lifecycle.
+    pub execution_revision: Option<u64>,
+    pub storage_started: bool,
 }
 impl RemoteConfiguration {
     pub fn record(&mut self, receipt: ConfigurationReceipt) {
@@ -63,6 +89,8 @@ pub struct ConfigurationCapabilities {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigurationReport {
+    #[serde(default)]
+    pub storage: Option<serde_json::Value>,
     #[serde(default)]
     pub worker_disk_location: Option<String>,
     pub consent: bool,
@@ -98,7 +126,12 @@ pub fn validate_edit(
             "Use a unique request ID of at most 128 letters, digits, dashes or underscores".into(),
         );
     }
-    if !edit.acknowledge_interruption {
+    if !edit.acknowledge_interruption
+        && !matches!(
+            edit.operation,
+            Some(ConfigurationOperation::StoragePreview { .. })
+        )
+    {
         return Err(
             "Acknowledge the worker drain, restart and possible interruption before applying"
                 .into(),
@@ -107,5 +140,15 @@ pub fn validate_edit(
     if edit.policy.start_at_login != current.start_at_login {
         return Err("Start at login requires local approval in the desktop application".into());
     }
-    validate_policy(&edit.policy, hardware)
+    if edit.operation.is_some() {
+        if &edit.policy != current {
+            return Err(
+                "Storage operations cannot also change sharing rules; reload current settings"
+                    .into(),
+            );
+        }
+        Ok(())
+    } else {
+        validate_policy(&edit.policy, hardware)
+    }
 }

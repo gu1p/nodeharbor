@@ -11,3 +11,5 @@
 .updates-panel p {line-height: 1.6;}
 .update-message {padding: 16px; background: #142e30; border-radius: 10px; overflow-wrap: anywhere;}
 .updates-panel progress {width: 100%; accent-color: #75dfc4;}
+
+.configuration-editor table{width:100%;table-layout:fixed;border-collapse:collapse;margin:16px 0;font-size:13px}.configuration-editor th,.configuration-editor td{text-align:left;vertical-align:top;padding:12px 10px;border-bottom:1px solid #343b4b;overflow-wrap:anywhere;line-height:1.5}.configuration-editor thead th{color:#9ea9bb;font-weight:500}.configuration-editor details>summary{cursor:pointer;padding:8px 0}.configuration-editor li{margin-bottom:8px}

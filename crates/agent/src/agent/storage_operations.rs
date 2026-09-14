@@ -53,10 +53,14 @@ impl Agent {
     /// Save setup choices or enqueue a durable maintenance operation. The
     /// supervisor owns VM changes; this method never starts or stops a worker.
     pub async fn apply_storage(&self, plan: ChangePlan) -> Result<Snapshot> {
+        let _operation = self.operation.lock().await;
+        self.apply_storage_inner(plan).await
+    }
+
+    pub(super) async fn apply_storage_inner(&self, plan: ChangePlan) -> Result<Snapshot> {
         if plan.maintenance.is_some() {
             return self.apply_storage_maintenance(plan).await;
         }
-        let _operation = self.operation.lock().await;
         let config = self.store.load()?;
         anyhow::ensure!(
             config.storage_revision == plan.revision,

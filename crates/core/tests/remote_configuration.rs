@@ -5,6 +5,7 @@ use nodeharbor_core::{
 
 fn edit() -> ConfigurationEdit {
     ConfigurationEdit {
+        operation: None,
         request_id: "726-test".into(),
         expected_revision: 7,
         policy: Policy::default(),
@@ -66,4 +67,34 @@ fn physical_owner_reserves_and_input_boundaries_apply_to_remote_edits() {
     let mut edit = edit();
     edit.request_id = "x".repeat(129);
     assert!(validate_edit(&edit, &current, &host(), true, 7).is_err());
+}
+
+#[test]
+fn storage_operations_require_consent_and_version_but_cannot_smuggle_policy_or_host_changes() {
+    use serde_json::json;
+    for operation in [
+        json!({"type":"storagePreview","selections":[],"options":{}}),
+        json!({"type":"storageApply","plan":{"revision":2}}),
+        json!({"type":"storageRecovery","enabled":true}),
+        json!({"type":"storageRetry"}),
+    ] {
+        let mut value = serde_json::to_value(edit()).unwrap();
+        value["operation"] = operation.clone();
+        let mut request: ConfigurationEdit = serde_json::from_value(value.clone()).unwrap();
+        let mut missing_disk = host();
+        missing_disk.disk_gib = 0;
+        assert!(validate_edit(&request, &Policy::default(), &missing_disk, true, 7).is_ok(), "Storage recovery must validate actual target capacity on the node, even when the current disk is missing");
+        assert!(validate_edit(&request, &Policy::default(), &host(), false, 7).is_err());
+        assert!(validate_edit(&request, &Policy::default(), &host(), true, 8).is_err());
+        request.policy.background = true;
+        assert!(validate_edit(&request, &Policy::default(), &host(), true, 7).is_err());
+        request.policy = Policy::default();
+        request.acknowledge_interruption = false;
+        assert_eq!(
+            validate_edit(&request, &Policy::default(), &host(), true, 7).is_ok(),
+            operation["type"] == "storagePreview"
+        );
+        value["operation"]["vpn"] = json!(true);
+        assert!(serde_json::from_value::<ConfigurationEdit>(value).is_err());
+    }
 }

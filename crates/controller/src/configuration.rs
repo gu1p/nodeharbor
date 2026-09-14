@@ -11,6 +11,21 @@ pub(super) async fn initialize(db: &SqlitePool) -> anyhow::Result<()> {
           PRIMARY KEY(device_id,request_id));
         CREATE UNIQUE INDEX IF NOT EXISTS one_configuration_request ON configuration_requests(device_id)
           WHERE status IN ('requested','pending');").execute(db).await?;
+    let columns: Vec<String> = sqlx::query("PRAGMA table_info(configuration_requests)")
+        .fetch_all(db)
+        .await?
+        .iter()
+        .map(|row| row.get("name"))
+        .collect();
+    for name in ["result", "effective_storage", "before_storage"] {
+        if !columns.iter().any(|column| column == name) {
+            sqlx::query(&format!(
+                "ALTER TABLE configuration_requests ADD COLUMN {name} TEXT"
+            ))
+            .execute(db)
+            .await?;
+        }
+    }
     Ok(())
 }
 fn conflict(message: &str) -> ApiError {
@@ -55,7 +70,7 @@ fn view(row: &sqlx::sqlite::SqliteRow) -> ApiResult<Value> {
             .map(|v| v.unwrap_or(Value::Null))
     };
     Ok(
-        json!({"requestId":edit.request_id,"expectedRevision":edit.expected_revision,"policy":edit.policy,
+        json!({"requestId":edit.request_id,"expectedRevision":edit.expected_revision,"policy":edit.policy,"operation":edit.operation,"result":value("result")?,"beforeStorage":value("before_storage")?,"effectiveStorage":value("effective_storage")?,
         "actor":row.get::<String,_>("actor"),"requestedAt":row.get::<String,_>("at"),"status":row.get::<String,_>("status"),
         "beforePolicy":value("before_policy")?,"effectivePolicy":value("effective_policy")?,"effectiveResources":value("effective_resources")?,
         "error":row.get::<Option<String>,_>("error"),"acknowledgedAt":row.get::<Option<String>,_>("ack_at")}),
@@ -139,6 +154,11 @@ pub(super) async fn request(
         .policy
         .as_ref()
         .ok_or_else(|| conflict("The node has not reported its current settings"))?;
+    if edit.operation.is_some() && (!report.capabilities.storage || report.storage.is_none()) {
+        return Err(ApiError::bad(
+            "This node does not support remote storage configuration; update it locally",
+        ));
+    }
     if edit.policy.resources.disk_gib != policy.resources.disk_gib
         && !report.capabilities.disk_growth
     {
@@ -159,11 +179,11 @@ pub(super) async fn request(
     }
     let at = Utc::now().to_rfc3339();
     let mut tx = state.db.begin().await.map_err(ApiError::internal)?;
-    sqlx::query("INSERT INTO configuration_requests(device_id,request_id,edit,actor,at,status,before_policy) VALUES(?,?,?,?,?,'requested',?)")
-        .bind(&id).bind(&edit.request_id).bind(json!(edit).to_string()).bind(&actor).bind(&at).bind(json!(policy).to_string())
+    sqlx::query("INSERT INTO configuration_requests(device_id,request_id,edit,actor,at,status,before_policy,before_storage) VALUES(?,?,?,?,?,'requested',?,?)")
+        .bind(&id).bind(&edit.request_id).bind(json!(edit).to_string()).bind(&actor).bind(&at).bind(json!(policy).to_string()).bind(report.storage.as_ref().map(|s|json!(s).to_string()))
         .execute(&mut *tx).await.map_err(ApiError::internal)?;
     sqlx::query("INSERT INTO audit(at,device_id,action) VALUES(?,?,?)").bind(&at).bind(&id)
-        .bind(json!({"action":"configuration_requested","actor":actor,"edit":edit,"beforePolicy":policy}).to_string())
+        .bind(json!({"action":"configuration_requested","actor":actor,"edit":edit,"beforePolicy":policy,"beforeStorage":report.storage}).to_string())
         .execute(&mut *tx).await.map_err(ApiError::internal)?;
     tx.commit().await.map_err(ApiError::internal)?;
     let row =
@@ -199,13 +219,14 @@ pub(super) async fn exchange(
         report.policy = None;
         report.hardware = None;
         report.storage_inventory.clear();
+        report.storage = None;
         report.worker_disk_location = None;
     }
     let mut tx = state.db.begin().await.map_err(ApiError::internal)?;
     sqlx::query("INSERT INTO node_configuration(device_id,report) VALUES(?,?) ON CONFLICT(device_id) DO UPDATE SET report=excluded.report")
         .bind(id).bind(json!(report).to_string()).execute(&mut *tx).await.map_err(ApiError::internal)?;
     for receipt in &report.receipts {
-        if !["pending", "applied", "rejected"].contains(&receipt.status.as_str()) {
+        if !["pending", "reviewed", "applied", "rejected"].contains(&receipt.status.as_str()) {
             return Err(ApiError::bad("Invalid configuration acknowledgment"));
         }
         let row=sqlx::query("SELECT * FROM configuration_requests WHERE device_id=? AND request_id=? AND status IN ('requested','pending')")
@@ -215,9 +236,9 @@ pub(super) async fn exchange(
         if receipt.revision < edit.expected_revision {
             continue;
         }
-        sqlx::query("UPDATE configuration_requests SET status=?,effective_policy=?,effective_resources=?,error=?,ack_at=? WHERE device_id=? AND request_id=?")
+        sqlx::query("UPDATE configuration_requests SET status=?,effective_policy=?,effective_resources=?,error=?,ack_at=?,result=?,effective_storage=? WHERE device_id=? AND request_id=?")
             .bind(&receipt.status).bind(receipt.effective_policy.as_ref().map(|p|json!(p).to_string()))
-            .bind(receipt.effective_resources.as_ref().map(|r|json!(r).to_string())).bind(&receipt.error).bind(&receipt.at)
+            .bind(receipt.effective_resources.as_ref().map(|r|json!(r).to_string())).bind(&receipt.error).bind(&receipt.at).bind(receipt.result.as_ref().map(|v|json!(v).to_string())).bind(receipt.effective_storage.as_ref().map(|v|json!(v).to_string()))
             .bind(id).bind(&receipt.request_id).execute(&mut *tx).await.map_err(ApiError::internal)?;
         if receipt.status != row.get::<String, _>("status") {
             sqlx::query("INSERT INTO audit(at,device_id,action) VALUES(?,?,?)").bind(Utc::now().to_rfc3339()).bind(id)
@@ -230,6 +251,17 @@ pub(super) async fn exchange(
     let mut command = None;
     for row in rows {
         let edit: ConfigurationEdit = decode(row.get("edit"))?;
+        let acknowledged_pending = row.get::<String, _>("status") == "pending"
+            && report.receipts.iter().any(|r| {
+                r.request_id == edit.request_id
+                    && r.status == "pending"
+                    && r.revision == report.revision
+            });
+        if report.consent && acknowledged_pending {
+            // Internal storage phases advance the node revision. Its pending
+            // receipt acknowledges those writes without claiming application.
+            continue;
+        }
         if !report.consent || report.revision != edit.expected_revision {
             sqlx::query("UPDATE configuration_requests SET status='rejected',error=?,ack_at=? WHERE device_id=? AND request_id=?")
                 .bind("The owner changed settings or consent; reload current settings").bind(Utc::now().to_rfc3339())

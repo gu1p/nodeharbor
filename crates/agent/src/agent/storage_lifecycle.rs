@@ -658,6 +658,14 @@ impl Agent {
 
     pub async fn retry_storage_maintenance(&self) -> Result<Snapshot> {
         self.store.update(|c| {
+            c.storage_revision = c
+                .storage_revision
+                .checked_add(1)
+                .context("Storage revision overflow")?;
+            if let Some(operation) = &mut c.storage_operation {
+                operation.paused = false;
+                return Ok(());
+            }
             if let Some(missing) = &mut c.storage_lifecycle.missing {
                 missing.error = None;
                 missing.last_check = 0;
@@ -961,7 +969,6 @@ impl Agent {
     }
 
     pub(super) async fn apply_storage_maintenance(&self, plan: ChangePlan) -> Result<Snapshot> {
-        let _operation = self.operation.lock().await;
         let config = self.store.load()?;
         anyhow::ensure!(
             config.storage_revision == plan.revision,
@@ -1065,6 +1072,8 @@ impl Agent {
         inventory.disabled = lifecycle.disabled;
         inventory.recovery_enabled = lifecycle.recovery_enabled;
         inventory.active_gib = if lifecycle.disabled
+            || c.remote.repair_required
+            || c.storage_operation.is_some()
             || lifecycle.missing.is_some()
             || lifecycle.maintenance.is_some()
             || !c.vm_created

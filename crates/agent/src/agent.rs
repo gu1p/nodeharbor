@@ -9,6 +9,8 @@ use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 #[path = "remote.rs"]
 mod remote;
+#[path = "remote_storage.rs"]
+mod remote_storage;
 
 #[derive(Clone, Copy)]
 enum Starting {
@@ -163,7 +165,10 @@ impl Agent {
             &config.device_id,
             &self.store.directory,
             Arc::new(crate::activity::ActivityRunner {
-                inner: runner,
+                inner: Arc::new(remote_storage::ConfigurationRunner {
+                    store: self.store.clone(),
+                    inner: runner,
+                }),
                 log: self.activity.clone(),
             }),
         )
@@ -192,7 +197,11 @@ impl Agent {
         runtime.worker.installed = config.vm_configured;
         let storage = self.storage_snapshot(&config, storage);
         Ok(Snapshot {
-            configuration: self.configuration_report_for(&config, observation.resources.clone()),
+            configuration: self.configuration_report_for(
+                &config,
+                observation.resources.clone(),
+                &storage,
+            ),
             device_id: config.device_id,
             name: config.name,
             platform: std::env::consts::OS.into(),
@@ -490,6 +499,7 @@ impl Agent {
         path: &str,
         payload: Option<Value>,
     ) -> Result<Value> {
+        self.store.check_runtime_authority()?;
         let url = format!(
             "{}/api/v1{path}",
             config
@@ -502,7 +512,7 @@ impl Agent {
         } else {
             self.client.get(url)
         };
-        checked(
+        let response = checked(
             request
                 .bearer_auth(
                     config
@@ -513,7 +523,9 @@ impl Agent {
                 .send()
                 .await?,
         )
-        .await
+        .await?;
+        self.store.check_runtime_authority()?;
+        Ok(response)
     }
     async fn set_status(&self, state: &str, reason: impl Into<String>) {
         let reason = reason.into();
@@ -682,6 +694,14 @@ impl Agent {
             .await;
             return Ok(());
         }
+        if config
+            .remote
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.edit.operation.is_some())
+        {
+            return self.process_remote_storage().await;
+        }
         let config = self.resolve_initial_storage(&config).await?;
         let vm = self.vm(&config)?;
         let owned = config.vm_created || vm.has_receipt()?;
@@ -848,7 +868,7 @@ impl Agent {
             return Ok(());
         }
         if config.remote.pending.is_some() && !info.running {
-            self.apply_configuration(&vm).await?;
+            self.apply_configuration().await?;
             let _ = self.heartbeat(&self.store.load()?).await;
             return Ok(());
         }
@@ -1228,11 +1248,14 @@ impl Agent {
         let permitted = permitted
             && !config.storage_lifecycle.disabled
             && config.storage_lifecycle.missing.is_none();
-        let mut report = self.configuration_report_for(config, observation.resources.clone());
+        let storage = self.storage_snapshot(config, self.discover_storage(config));
+        let mut report =
+            self.configuration_report_for(config, observation.resources.clone(), &storage);
         if !report.consent {
             report.policy = None;
             report.hardware = None;
             report.storage_inventory.clear();
+            report.storage = None;
         }
         let value=self.request(config,"/heartbeat",Some(json!({"configuration":report,"storageGeneration":config.storage_generation,"state":runtime.state.unwrap_or_else(||"paused".into()),"reason":reason,"resources":resources,
             "allowCi":config.policy.allow_ci,"allowServices":config.policy.allow_services,"permitted":permitted && config.remote.pending.is_none() && !config.remote.repair_required}))).await?;

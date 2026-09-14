@@ -100,6 +100,7 @@ fn updates_enabled() -> bool {
 #[derive(Clone)]
 pub struct Store {
     pub directory: PathBuf,
+    configuration_request: Option<nodeharbor_core::configuration::ConfigurationEdit>,
 }
 impl Store {
     pub fn default_directory() -> Result<PathBuf> {
@@ -116,6 +117,7 @@ impl Store {
         }
         let store = Self {
             directory: directory.to_path_buf(),
+            configuration_request: None,
         };
         let _lock = store.lock()?;
         if !store.path().exists() {
@@ -142,7 +144,7 @@ impl Store {
         let config: Configuration = serde_json::from_reader(file)
             .context("NodeHarbor settings are damaged; the original file has been preserved")?;
         anyhow::ensure!(
-            matches!(config.format_version, 1..=5),
+            matches!(config.format_version, 1..=6),
             "These settings require a newer NodeHarbor application"
         );
         anyhow::ensure!(
@@ -171,6 +173,7 @@ impl Store {
     ) -> Result<Configuration> {
         let _lock = self.lock()?;
         let mut config = self.load()?;
+        self.check_configuration_authority(&config)?;
         let before = config.clone();
         change(&mut config)?;
         // All local entry points, including CLI and another app process, advance
@@ -178,6 +181,13 @@ impl Store {
         if before.policy != config.policy
             || before.remote.consent != config.remote.consent
             || before.device_id != config.device_id
+            || before.vm_provider != config.vm_provider
+            || before.controller_url != config.controller_url
+            || before.device_token != config.device_token
+            || before.storage_revision != config.storage_revision
+            || before.storage_locations != config.storage_locations
+            || before.storage_lifecycle.recovery_enabled
+                != config.storage_lifecycle.recovery_enabled
             || before.remote.revision != config.remote.revision
             || before.recreation.is_some() != config.recreation.is_some()
             || before.application_update_pending != config.application_update_pending
@@ -187,16 +197,39 @@ impl Store {
                 .revision
                 .checked_add(1)
                 .context("Configuration revision exhausted; local recovery required")?;
-            if let Some(command) = config.remote.pending.take() {
+            if self.configuration_request.is_some() {
+                config.remote.execution_revision = Some(config.remote.revision);
+                if before.storage_revision != config.storage_revision {
+                    config.remote.storage_started = true;
+                }
+                if let Some(receipt) = config
+                    .remote
+                    .receipts
+                    .iter_mut()
+                    .find(|r| r.status == "pending")
+                {
+                    receipt.revision = config.remote.revision;
+                }
+            } else if let Some(command) = config.remote.pending.take() {
+                if config.remote.storage_started {
+                    Self::pause_remote_storage(&mut config);
+                }
+                config.remote.execution_revision = None;
+                config.remote.storage_started = false;
                 config
                     .remote
                     .record(nodeharbor_core::configuration::ConfigurationReceipt {
+                        result: None,
+                        effective_storage: None,
                         request_id: command.edit.request_id,
                         status: "rejected".into(),
                         revision: config.remote.revision,
                         at: chrono::Utc::now().to_rfc3339(),
                         effective_policy: Some(config.policy.clone()),
-                        effective_resources: if config.remote.applying {
+                        effective_resources: if config.remote.applying
+                            || config.storage_operation.is_some()
+                            || config.storage_lifecycle.maintenance.is_some()
+                        {
                             None
                         } else {
                             config.allocated_resources.clone()
@@ -210,8 +243,63 @@ impl Store {
         self.write(&config)?;
         Ok(config)
     }
+    /// Scope the existing storage lifecycle to a single authenticated request.
+    /// Every durable write checks the latest owner consent under the file lock.
+    pub(crate) fn for_configuration(
+        &self,
+        edit: &nodeharbor_core::configuration::ConfigurationEdit,
+    ) -> Self {
+        Self {
+            directory: self.directory.clone(),
+            configuration_request: Some(edit.clone()),
+        }
+    }
+    pub(crate) fn check_configuration_authority(&self, config: &Configuration) -> Result<()> {
+        if let Some(edit) = &self.configuration_request {
+            anyhow::ensure!(config.remote.consent
+                && config.remote.pending.as_ref().is_some_and(|p| &p.edit == edit)
+                && config.remote.revision == config.remote.execution_revision.unwrap_or(edit.expected_revision),
+                "The owner changed settings or revoked remote configuration; unapplied changes are canceled");
+        }
+        Ok(())
+    }
+    pub(crate) fn check_runtime_authority(&self) -> Result<()> {
+        if self.configuration_request.is_some() {
+            self.check_configuration_authority(&self.load()?)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn pause_remote_storage(config: &mut Configuration) {
+        if config
+            .storage_operation
+            .as_ref()
+            .is_some_and(|op| op.phase == "pending")
+        {
+            config.storage_operation = None;
+        } else if let Some(op) = &mut config.storage_operation {
+            op.paused = true;
+        }
+        if config
+            .storage_lifecycle
+            .maintenance
+            .as_ref()
+            .is_some_and(|op| op.phase == crate::storage_lifecycle::Phase::Drain)
+        {
+            config.storage_lifecycle.maintenance = None;
+        } else if let Some(op) = &mut config.storage_lifecycle.maintenance {
+            op.paused = true;
+        }
+    }
     fn write(&self, config: &Configuration) -> Result<()> {
         let mut config = config.clone();
+        if config.remote.consent
+            || config.remote.pending.is_some()
+            || !config.remote.receipts.is_empty()
+        {
+            // Earlier agents understand local storage journals but cannot
+            // enforce the remote request's consent and revision while applying.
+            config.format_version = config.format_version.max(6);
+        }
         if serde_json::to_value(&config.storage_lifecycle)?
             != serde_json::to_value(crate::storage_lifecycle::Lifecycle::default())?
         {

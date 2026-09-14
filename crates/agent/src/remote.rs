@@ -7,21 +7,16 @@ use nodeharbor_core::configuration::{
 impl Agent {
     pub fn configuration_report(&self) -> Result<ConfigurationReport> {
         let config = self.store.load()?;
-        let observation = crate::observe::observation(
-            &self.store.directory,
-            config
-                .allocated_resources
-                .as_ref()
-                .map_or(0, |r| r.disk_gib),
-        );
-        Ok(self.configuration_report_for(&config, observation.resources))
+        let observation = self.observe_storage(&config);
+        let storage = self.storage_snapshot(&config, self.discover_storage(&config));
+        Ok(self.configuration_report_for(&config, observation.resources, &storage))
     }
     pub(super) fn configuration_report_for(
         &self,
         config: &Configuration,
         mut hardware: Resources,
+        storage: &crate::storage::Inventory,
     ) -> ConfigurationReport {
-        let disks = sysinfo::Disks::new_with_refreshed_list();
         let home = self.store.directory.join("lima");
         let disk_path = home
             .join("worker/diffdisk")
@@ -29,39 +24,39 @@ impl Agent {
             .or_else(|_| home.canonicalize())
             .or_else(|_| self.store.directory.canonicalize())
             .ok();
-        let worker_disk = disk_path.as_ref().and_then(|path| {
-            disks
-                .iter()
-                .filter(|disk| path.starts_with(disk.mount_point()))
-                .max_by_key(|disk| disk.mount_point().as_os_str().len())
-        });
-        let disk_growth = config.vm_provider == crate::VmProvider::Lima && worker_disk.is_some();
-        if config.vm_provider == crate::VmProvider::Lima {
-            hardware.disk_gib = worker_disk
-                .map_or(0, |d| d.available_space() / 1073741824)
-                .saturating_add(
-                    config
-                        .allocated_resources
-                        .as_ref()
-                        .map_or(0, |r| r.disk_gib),
-                );
+        let worker_disk = disk_path
+            .as_ref()
+            .and_then(|path| crate::storage::volume_for(path, &storage.volumes));
+        let disk_growth = config.storage_locations.is_empty()
+            && config.vm_provider == crate::VmProvider::Lima
+            && worker_disk.is_some();
+        if config.storage_locations.is_empty() && config.vm_provider == crate::VmProvider::Lima {
+            hardware.disk_gib = worker_disk.map_or(0, |d| d.available_gib).saturating_add(
+                config
+                    .allocated_resources
+                    .as_ref()
+                    .map_or(0, |r| r.disk_gib),
+            );
         }
         let disk_growth_reason = if disk_growth {
-            "Existing-disk growth uses capacity on the application-managed Lima disk's filesystem. Shrinking requires local replacement."
+            "Existing-disk growth uses capacity on the application-managed Lima disk's filesystem. Use the storage review for shrinking, replacement, and location changes."
+        } else if !config.storage_locations.is_empty() {
+            "Change the combined disk allowance through Storage locations. CPU and memory edits preserve the separate worker system disk."
         } else {
-            "Disk growth requires local approval because this runtime does not report a verifiable host storage location. CPU and memory limits can still be edited remotely."
+            "Use the node's storage review for supported single-disk changes. The review reports native capacity inspection and local approval requirements."
         };
-        let storage_reason="Additional disks and selectable storage locations require the multiple-disk runtime feature. Additional disk placement is unavailable with the current runtime APIs.";
+        let storage_reason = if storage.supported {
+            "Review additions, moves, growth, shrink and removal on the node. Disk changes use the same verified storage lifecycle as local changes."
+        } else {
+            &storage.reason
+        };
         let inventory = if config.remote.consent {
-            disks.iter().map(|disk|json!({
-                "label":disk.name().to_string_lossy(),"mountPoint":disk.mount_point().to_string_lossy(),
-                "filesystem":disk.file_system().to_string_lossy(),"availableGib":disk.available_space()/1073741824,
-                "totalGib":disk.total_space()/1073741824,"configuredGib":if config.vm_provider == crate::VmProvider::Lima && worker_disk.is_some_and(|owned| owned.mount_point() == disk.mount_point()) { config.allocated_resources.as_ref().map_or(0, |r| r.disk_gib) } else { 0 },"eligible":false,"reason":storage_reason
-            })).collect()
+            storage.volumes.iter().map(|volume| json!(volume)).collect()
         } else {
             Vec::new()
         };
         ConfigurationReport {
+            storage: config.remote.consent.then(|| json!(storage)),
             worker_disk_location: if config.remote.consent
                 && config.vm_provider == crate::VmProvider::Lima
             {
@@ -73,20 +68,28 @@ impl Agent {
             revision: config.remote.revision,
             policy: Some(config.policy.clone()),
             hardware: Some(hardware),
-            allocated_resources: if config.remote.repair_required {
-                None
-            } else {
-                config.allocated_resources.clone()
-            },
+            allocated_resources: Self::configuration_effective_resources(config),
             capabilities: ConfigurationCapabilities {
                 disk_growth,
                 disk_growth_reason: disk_growth_reason.into(),
-                storage: false,
+                storage: true,
                 storage_reason: storage_reason.into(),
                 local_approval: vec!["startAtLogin".into()],
             },
             storage_inventory: inventory,
             receipts: config.remote.receipts.clone(),
+        }
+    }
+    pub(super) fn configuration_effective_resources(config: &Configuration) -> Option<Resources> {
+        if config.remote.repair_required
+            || config.storage_operation.is_some()
+            || config.storage_lifecycle.maintenance.is_some()
+            || config.storage_lifecycle.missing.is_some()
+            || config.storage_lifecycle.disabled
+        {
+            None
+        } else {
+            config.allocated_resources.clone()
         }
     }
     /// This API is exposed only by local IPC/CLI. It never takes a remote edit.
@@ -113,14 +116,16 @@ impl Agent {
             }
             validate_edit(&command.edit,&config.policy,&hardware,config.remote.consent,config.remote.revision).map_err(anyhow::Error::msg)?;
             Self::validate_remote_runtime(config,&command)?;
-            config.remote.record(ConfigurationReceipt {request_id:command.edit.request_id.clone(),status:"pending".into(),revision:config.remote.revision,
-                at:chrono::Utc::now().to_rfc3339(),effective_policy:Some(config.policy.clone()),effective_resources:config.allocated_resources.clone(),error:None});
+            config.remote.record(ConfigurationReceipt { result: None, effective_storage: None,request_id:command.edit.request_id.clone(),status:"pending".into(),revision:config.remote.revision,
+                at:chrono::Utc::now().to_rfc3339(),effective_policy:Some(config.policy.clone()),effective_resources:Self::configuration_effective_resources(config),error:None});
+            config.remote.execution_revision=None;
+            config.remote.storage_started=false;
             config.remote.pending=Some(command);
             Ok(())
         })?;
         Ok(())
     }
-    fn validate_remote_runtime(
+    pub(super) fn validate_remote_runtime(
         config: &Configuration,
         command: &ConfigurationCommand,
     ) -> Result<()> {
@@ -134,6 +139,36 @@ impl Agent {
                 && !config.application_update_pending
                 && !config.stop_requested,
             "Wait for the current local worker operation to finish before changing configuration"
+        );
+        if let Some(operation) = &command.edit.operation {
+            use nodeharbor_core::configuration::ConfigurationOperation::*;
+            match operation {
+                StoragePreview {
+                    selections,
+                    options,
+                } => {
+                    let _: Vec<crate::storage::Selection> =
+                        serde_json::from_value(json!(selections))?;
+                    let _: crate::storage_lifecycle::ReviewOptions =
+                        serde_json::from_value(options.clone())?;
+                }
+                StorageApply { plan } => {
+                    let _: crate::storage::ChangePlan = serde_json::from_value(plan.clone())?;
+                    anyhow::ensure!(config.remote.receipts.iter().any(|r| r.status == "reviewed" && r.revision == config.remote.revision && r.result.as_ref() == Some(plan)),
+                        "Review storage changes on this node before applying; this plan is missing or stale");
+                }
+                StorageRecovery { .. } | StorageRetry {} => {}
+            }
+            return Ok(());
+        }
+        anyhow::ensure!(
+            config.storage_operation.is_none() && config.storage_lifecycle.maintenance.is_none(),
+            "Wait for storage maintenance to finish before editing sharing rules"
+        );
+        anyhow::ensure!(
+            config.storage_locations.is_empty()
+                || command.edit.policy.resources.disk_gib == config.policy.resources.disk_gib,
+            "Use the storage review to change the combined disk allowance"
         );
         anyhow::ensure!(command.edit.policy.resources.disk_gib == config.policy.resources.disk_gib
             || config.vm_provider == crate::VmProvider::Lima,
@@ -165,23 +200,32 @@ impl Agent {
                 return Ok(());
             }
             config.remote.record(ConfigurationReceipt {
+                result: None,
+                effective_storage: None,
                 request_id: command.edit.request_id.clone(),
                 status: "rejected".into(),
                 revision: config.remote.revision,
                 at: chrono::Utc::now().to_rfc3339(),
                 effective_policy: Some(config.policy.clone()),
-                effective_resources: config.allocated_resources.clone(),
+                effective_resources: Self::configuration_effective_resources(config),
                 error: Some(error.into()),
             });
             Ok(())
         })?;
         Ok(())
     }
-    async fn wait_configuration_changed(&self, command: &ConfigurationCommand) -> Result<()> {
+    pub(super) async fn wait_configuration_changed(
+        &self,
+        command: &ConfigurationCommand,
+    ) -> Result<()> {
         loop {
             let current = self.store.load()?;
             if !current.remote.consent
-                || current.remote.revision != command.edit.expected_revision
+                || current.remote.revision
+                    != current
+                        .remote
+                        .execution_revision
+                        .unwrap_or(command.edit.expected_revision)
                 || current
                     .remote
                     .pending
@@ -195,7 +239,7 @@ impl Agent {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
-    pub(super) async fn apply_configuration(&self, vm: &Vm) -> Result<()> {
+    pub(super) async fn apply_configuration(&self) -> Result<()> {
         let Some(command) = self.store.load()?.remote.pending else {
             return Ok(());
         };
@@ -224,11 +268,14 @@ impl Agent {
         });
         let result = async {
             let claimed = claim?;
+            let mut authorized = self.clone();
+            authorized.store = self.store.for_configuration(&command.edit);
+            let vm = authorized.vm(&claimed)?;
             if claimed.remote.repair_required {
                 tokio::select! {
                     biased;
                     result=self.wait_configuration_changed(&command)=>result?,
-                    result=vm.resize(&command.edit.policy.resources)=>result?,
+                    result=async { if claimed.storage_locations.is_empty() { vm.resize(&command.edit.policy.resources).await } else { vm.resize_compute(&command.edit.policy.resources).await } }=>result?,
                 }
             }
             self.store.update(|current| {
@@ -252,12 +299,14 @@ impl Agent {
                 }
                 current.policy = command.edit.policy.clone();
                 current.remote.record(ConfigurationReceipt {
+                    result: None,
+                    effective_storage: None,
                     request_id: command.edit.request_id.clone(),
                     status: "applied".into(),
                     revision,
                     at: chrono::Utc::now().to_rfc3339(),
                     effective_policy: Some(current.policy.clone()),
-                    effective_resources: current.allocated_resources.clone(),
+                    effective_resources: Self::configuration_effective_resources(current),
                     error: None,
                 });
                 Ok(())
@@ -273,8 +322,8 @@ impl Agent {
                 }else{error.to_string()};
                 current.remote.applying=false;
                 current.remote.pending=None;
-                current.remote.record(ConfigurationReceipt {request_id:command.edit.request_id,status:"rejected".into(),revision:current.remote.revision,
-                    at:chrono::Utc::now().to_rfc3339(),effective_policy:Some(current.policy.clone()),effective_resources:current.allocated_resources.clone(),error:Some(error)});
+                current.remote.record(ConfigurationReceipt { result: None, effective_storage: None,request_id:command.edit.request_id,status:"rejected".into(),revision:current.remote.revision,
+                    at:chrono::Utc::now().to_rfc3339(),effective_policy:Some(current.policy.clone()),effective_resources:Self::configuration_effective_resources(current),error:Some(error)});
                 Ok(())
             })?;
         }
@@ -288,7 +337,7 @@ impl Agent {
                 config.remote.repair_required=true;
                 config.allocated_resources=None;
                 if let Some(command)=config.remote.pending.take() {
-                    config.remote.record(ConfigurationReceipt {request_id:command.edit.request_id,status:"rejected".into(),revision:config.remote.revision,
+                    config.remote.record(ConfigurationReceipt { result: None, effective_storage: None,request_id:command.edit.request_id,status:"rejected".into(),revision:config.remote.revision,
                         at:chrono::Utc::now().to_rfc3339(),effective_policy:Some(config.policy.clone()),effective_resources:None,
                         error:Some("Configuration was interrupted. Inspect the stopped worker locally or replace it; sharing is blocked until recovery".into())});
                 }

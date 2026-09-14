@@ -105,16 +105,27 @@ restart and possible interruption. The page shows requested, pending, applied,
 rejected and offline states, plus who requested each change and its effective
 values. Concurrent edits require reloading current settings.
 
-CPU and memory changes use the existing owned-VM runtime. Existing-disk growth
-is remotely available for the application-managed Lima disk after capacity checks.
-Multipass disk changes require local approval because its supported API does not
-report the host storage directory. Start at login and disk replacement also remain
-local operations. An interrupted or failed runtime change leaves sharing blocked
-when allocation is unverified; the local **Replace worker** flow can recover it.
+CPU and memory changes use the existing owned-VM runtime. Pooled workers keep
+their separate system-disk allowance. **Storage locations** uses the node's local
+review and apply APIs for adding file-backed disks, moving or resizing allocations,
+backup-based shrink/removal, restoring excluded capacity, automatic recovery,
+maintenance retry, and explicitly confirmed deletion. Plans are checked again
+against physical capacity and runtime support before applying. A read-only review
+is marked **Reviewed**; a disk change stays **Pending** until verification finishes.
 
-**Task #726 is not complete for additional disks or selectable storage locations.**
-Those controls depend on task #724's supported storage model and runtime; this
-worktree reports them as unavailable. Host and VPN settings are preserved. See
+Selectable locations and additional disks require the supported Lima runtime on
+macOS/Linux. Windows Multipass uses its supported single-disk review and verified
+replacement flow; native storage inspection errors are returned to the browser.
+Start at login, runtime installation and native OS permission grants require local
+approval. The separate Android development agent does not yet implement this
+configuration protocol and is clearly reported as unsupported by the dashboard.
+
+Revocation cancels unapplied requests and pauses interrupted disk maintenance.
+Failed changes preserve configured choices and recovery information; unverified
+allocations are never presented as effective or admitted for work. Remote consent
+promotes local settings to format 6 so older agents cannot resume remote storage
+journals without enforcing their authority. Older settings remain readable.
+Host settings and existing VPN policy are preserved. See
 [the implementation and validation notes](docs/remote-configuration-726.md).
 
 ## Architecture

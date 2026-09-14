@@ -4,6 +4,7 @@ use nodeharbor_core::configuration::{ConfigurationCommand, ConfigurationEdit};
 fn command(revision: u64) -> ConfigurationCommand {
     ConfigurationCommand {
         edit: ConfigurationEdit {
+            operation: None,
             request_id: "request-726".into(),
             expected_revision: revision,
             policy: nodeharbor_core::Policy::default(),
@@ -566,4 +567,45 @@ async fn lima_disk_growth_uses_owned_runtime_storage_and_returns_effective_value
         .unwrap()
         .iter()
         .any(|a| a == &["edit", "worker", "--cpus=2", "--memory=4", "--disk=35"]));
+}
+
+#[tokio::test]
+async fn local_storage_choices_and_recovery_preferences_invalidate_pending_remote_edits() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = Agent::open(dir.path()).unwrap();
+    agent.set_remote_consent(true).await.unwrap();
+    let revision = agent.configuration_report().unwrap().revision;
+    agent.receive_configuration(command(revision)).unwrap();
+    agent.set_storage_recovery(true).await.unwrap();
+    assert!(agent.store.load().unwrap().remote.pending.is_none());
+    assert!(agent.configuration_report().unwrap().revision > revision);
+    let revision = agent.configuration_report().unwrap().revision;
+    let mut next = command(revision);
+    next.edit.request_id = "storage-local-726".into();
+    agent.receive_configuration(next).unwrap();
+    agent
+        .store
+        .update(|c| {
+            c.format_version = 4;
+            c.storage_revision += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert!(agent.store.load().unwrap().remote.pending.is_none());
+}
+
+#[tokio::test]
+async fn remote_consent_requires_a_settings_format_that_older_agents_cannot_apply_without_authority(
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = Agent::open(dir.path()).unwrap();
+    agent.set_remote_consent(true).await.unwrap();
+    assert!(
+        agent.store.load().unwrap().format_version >= 6,
+        "Older agents cannot understand the remote authority attached to pending storage journals"
+    );
+    agent.set_remote_consent(false).await.unwrap();
+    let reopened = Agent::open(dir.path()).unwrap();
+    assert!(!reopened.configuration_report().unwrap().consent);
+    assert!(reopened.store.load().unwrap().format_version >= 6);
 }

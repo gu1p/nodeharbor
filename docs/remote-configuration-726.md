@@ -37,10 +37,9 @@ Accessible browser and desktop contracts:
 - Native start-at-login changes need local approval. Unsupported storage options
   are explained rather than accepting a request the runtime cannot implement.
 
-Dependency: task 724 is in the separate `multiple-disks` worktree. At the start
-of this task it contained contracts only, with no committed storage implementation.
-Integration must use its reviewed storage model/runtime rather than inventing a
-second attachment path or changing global host storage/VPN settings.
+Initial dependency state: task 724 had not yet supplied a committed storage
+implementation when the foundation was written. The later integration below uses
+its reviewed local-main model and runtime; no second attachment path was added.
 
 Verification:
 
@@ -82,31 +81,126 @@ Verification:
 - Inventory UI red: the browser did not show the resolved worker disk path or
   per-volume configured allocation. Add those read-only, consent-gated fields.
 
-Review status and remaining acceptance:
+## Current behavior and platform limits
 
-- Implemented local consent/CLI, durable versioned requests, authenticated
-  controller/agent exchange, browser editing and audit comparison, revocation
-  during delivery/drain/application, duplicate handling and offline reporting.
-- CPU/memory and contribution-rule edits reuse the owner policy validator and
-  owned VM lifecycle. Lima disk growth uses the managed disk's filesystem for
-  capacity checks. Multipass disk growth requires local approval because its
-  daemon does not expose the host storage location through the supported API.
-- Disk changes are never considered applied merely because they were queued.
-  Unknown allocation after a failure or interruption blocks sharing. The supported
-  in-app recovery is the locally confirmed worker replacement, which explains
-  deletion before proceeding. There is no remote recovery or deletion shortcut.
+- Rust desktop/server agents expose every contribution policy field supported
+  locally, with start-at-login explicitly requiring native local approval.
+  Owner consent remains exclusively local and is disabled by default.
+- The browser reuses the local Storage editor and strict local storage schemas.
+  Node-generated previews cover new file-backed disks, selected directories,
+  growth/moves, backup-based shrink/removal, deletion, returned-disk restoration,
+  recovery preferences and maintenance retry. Application requires a retained
+  node-issued plan at the same revision and explicit interruption acknowledgment.
+- Durable storage phases use the same VM ownership, capacity, isolation, backup,
+  verification, generation and health-qualification paths as local operations.
+  Scoped settings writes and controller/runtime commands check current authority.
+  Revocation clears unstarted operations or pauses interrupted journals. Partial
+  files or verified backups can remain in reviewed locations; they are preserved
+  for inspection/retry and never silently redirected to another volume.
+- Storage remains pending until the node verifies it. Read-only previews report
+  Reviewed. Reports distinguish configured capacity from active storage and omit
+  verified allocation during maintenance or unknown compute allocation.
+- Consent, node identity/runtime, local policy, storage choices, recovery preferences,
+  explicit owner actions and application-maintenance holds share version checks.
+  Internal remote storage phases advance revisions without overwriting owner edits.
+  Format 6 prevents old agents from bypassing authority on remote storage journals;
+  older local-only configurations remain supported and consent stays off on upgrade.
 - Gateway-authenticated requests record the administrator's allowed email. The
-  existing shared administrator token is recorded as “administrator token”; it
-  cannot identify an individual person. The UI shows the latest 100 requests;
-  controller audit history remains persisted, and the agent retains 64 receipts.
-- Task #724 has no reviewed commit available in this worktree. Its current
-  investigation reports no supported API for placing individual disks on selected
-  host volumes with the pinned runtimes. Adding disks, relocating disks, and
-  integrating its final storage model remain incomplete acceptance criteria.
-  No work was imported from another worktree, merged, committed or released.
-- The automated suite runs on this macOS host. A Chromium smoke with fixture API
-  responses checked the browser form, focused cancellation, confirmation, posted
-  revision/values and requested state; its confirmation screenshot was inspected.
-  Windows, Linux, real VM resizing, deployed gateway sessions and real worker
-  health qualification have not been validated for this change. VM/controller
-  integration tests use isolated fixtures and localhost, not live fleet devices.
+  shared administrator token is recorded as “administrator token”; it cannot
+  identify an individual person. History shows before/requested/effective settings,
+  paths, actor, times and errors. The UI shows 100 requests; the agent retains 64
+  receipts, while the controller's audit history remains persisted.
+- Additional disks/locations use Lima on supported macOS/Linux hosts. Windows
+  Multipass retains the local single-disk review/replacement and its supported
+  native capacity inspection. Native OS approvals and runtime installation remain
+  local. The separate Android development agent has no remote configuration
+  protocol; its dashboard status explicitly reports that support is unavailable.
+- No host network settings, VPN configuration or routing exceptions are changed.
+  Live VM/backup/replacement acceptance, Linux/Windows hosts, Android runtime
+  behavior and deployed gateway sessions have not been exercised for this task.
+  Runtime/controller integration uses isolated fixtures and localhost.
+
+## Integration with local main (2026-09-14)
+
+Rebased foundation onto local main `df0aac4`, including the reviewed multi-disk
+storage lifecycle (`a398fa9`) and Android platform changes. The rebased baseline
+passes `make check` on macOS (73 UI tests).
+
+New behavioral/UI contracts, before storage transport implementation:
+- The browser exposes the same labeled directory, allocation, backup folder,
+  shrink/remove, restore, recovery preference, retry, and deletion review controls.
+- Review runs on the authenticated node, checks physical capacity, and returns a
+  versioned plan. Applying requires the exact reviewed plan and interruption
+  acknowledgment; deletion additionally requires its explicit data-loss control.
+- Pending disk changes remain pending until runtime verification; failures and
+  revocation pause interrupted maintenance and report preserved/recovery state.
+- Local storage edits and owner recovery choices invalidate stale remote requests.
+- Pooled CPU/memory changes leave the separate worker system-disk size unchanged.
+- Storage UI red: `make check` has 2 new failures (73 passing): missing Add storage
+  location and recovery controls in the browser editor.
+- Unit red: core storage operation deserialization rejects unknown `operation`;
+  agent recovery-policy edit leaves the pending remote command intact.
+- Controller–agent integration red: opted-in report has no shared storage inventory
+  (`storage.supported` is null). No storage command is accepted or applied yet.
+- First storage implementation compile check found two helper methods private to
+  the policy module. Limit their visibility to the shared agent parent module.
+- First complete storage check: browser and controller–agent storage tests pass;
+  the unit contract catches Serde accepting extra fields on a tagged unit variant.
+  Represent the retry action as a strict empty struct variant.
+- Runtime integration passes staged-request revocation, failed disk creation, full
+  multi-disk verification, and compute changes without changing the system disk.
+  The stricter boundary check fails: a disk inspection command continues after
+  revocation, before the periodic cancellation future runs. Gate every runtime
+  command and controller action on current consent, before and after awaiting it.
+- Retry integration red: the shared Retry storage maintenance API rejects paused
+  growth/add/move operations. Extend that same local API to resume their durable
+  journal; remote retries still need fresh consent and wait for verification.
+- UI regression red: a local storage save leaves an otherwise valid sharing-rules
+  draft on its old revision. Only merge the new disk allowance/revision when all
+  other saved policy fields still match the draft's original base. A concurrent
+  unrelated edit must keep the draft stale. Nodes lacking the protocol also need
+  a separate unsupported message instead of desktop consent instructions.
+- Compatibility unit red: owner consent leaves the settings in an older format
+  whose agent cannot enforce remote authority on storage journals. Remote use now
+  promotes settings to format 6, which older agents explicitly reject; revocation
+  and upgrades retain that format. Existing local-only formats remain readable.
+- Status/audit red: read-only previews are labeled Applied, and the storage history
+  lacks its before/requested/effective comparison. Return Reviewed for previews
+  and render each changed directory, allowance, removal, and recovery preference.
+- Capacity integration red: a staged storage journal reports the previous allocation
+  as verified. Report no verified allocation and zero active storage during storage
+  maintenance or unknown compute allocation, while retaining configured choices.
+- Audit UI check: the new Requested column also matches the old status assertion.
+  Scope the assertion to the history status; both remain visible to users.
+
+## Verification of the integrated implementation
+
+- `make check` passes on macOS: 149 Python tests (3 platform skips), 80 accessible
+  UI tests, 290 Rust tests (13 native/environment acceptance tests ignored),
+  formatting, clippy with warnings denied, TypeScript and the production UI build.
+- Controller–agent integration covers storage preview/application/recovery over
+  real authenticated localhost HTTP, duplicate replay, over-capacity rejection,
+  offline rejection, revocation and acknowledgment/audit propagation. Separate
+  controller coverage preserves pending state across storage phase revisions.
+- Injected Lima integration covers fully verified multiple-disk application,
+  preserving the system disk on CPU edits, revocation before and between disk
+  operations, failed creation, paused recovery and a fresh remote retry.
+- Chromium smoke with fixture API responses exercises asynchronous preview polling,
+  interruption review, the exact versioned plan submission, requested/applied
+  acknowledgment and the before/requested/effective storage audit. Both review
+  and applied screenshots were inspected. This does not substitute for live VM
+  or deployed authentication acceptance.
+- No release was manually published. The existing main-push workflow automatically
+  publishes images/releases after successful CI; that behavior must be reconciled
+  with the earlier no-release constraint before a main push.
+- The documentation/layout verification run hit a timeout in the existing
+  `an_earlier_worker_error_does_not_reject_a_new_update_before_inspection` fixture
+  (the isolated setup tick exceeded its three-second deadline). Investigate and
+  rerun before considering the final source verified.
+- The complete rerun passed without weakening that timeout. Snapshot reports now
+  reuse the already-discovered inventory, including its volume capacity, instead
+  of repeating host volume scans during each snapshot; local and remote views use
+  the same storage observation. The subsequent full check validates that change.
+- The CLI replacement action also passes the revision from its settings read to
+  the already-tested versioned replacement API, matching the desktop's conflict
+  protection. No local confirmation or native approval is bypassed.

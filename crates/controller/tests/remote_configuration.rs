@@ -313,3 +313,212 @@ async fn controller_rejects_disk_growth_when_physical_location_cannot_be_verifie
         StatusCode::BAD_REQUEST
     );
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+async fn browser_storage_reviews_and_changes_use_the_authenticated_agent_and_preserve_consent() {
+    use nodeharbor_agent::{Agent, CommandOutput, Runner, VmProvider};
+    use std::{future::IntoFuture, sync::Arc};
+    struct NoVm;
+    #[async_trait::async_trait]
+    impl Runner for NoVm {
+        fn provider(&self) -> VmProvider {
+            VmProvider::Lima
+        }
+        async fn run(
+            &self,
+            _: &[String],
+            _: Option<Vec<u8>>,
+            _: u64,
+        ) -> anyhow::Result<CommandOutput> {
+            anyhow::bail!("An unprepared worker must not execute VM commands")
+        }
+    }
+    let (state, app, id, token) = setup().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(axum::serve(listener, app.clone()).into_future());
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let volume_id = nodeharbor_agent::storage::volume_identity(&root).unwrap();
+    let volume = nodeharbor_agent::storage::Volume {
+        id: volume_id.clone(),
+        capacity_pool: volume_id,
+        label: "Data".into(),
+        mount_point: root.to_string_lossy().into(),
+        filesystem: "apfs".into(),
+        available_gib: 200,
+        configured_gib: 0,
+        eligible: true,
+        reason: String::new(),
+    };
+    let agent = Agent::open_with_runner_and_volumes(&root, Arc::new(NoVm), vec![volume]).unwrap();
+    agent
+        .store
+        .update(|c| {
+            c.vm_provider = VmProvider::Lima;
+            c.format_version = 4;
+            c.device_id = id.clone();
+            c.controller_url = Some(url);
+            c.device_token = Some(token.clone());
+            Ok(())
+        })
+        .unwrap();
+    agent.set_remote_consent(true).await.unwrap();
+    agent.tick().await.unwrap();
+    let path = format!("/api/v1/devices/{id}/configuration");
+    let (_, view) = call(&app, &path, Some("admin"), None).await;
+    assert_eq!(view["report"]["storage"]["supported"], true);
+    let selections = json!([{"directory":root.join("first"),"allocationGib":30},{"directory":root.join("second"),"allocationGib":40}]);
+    let request_for = |request_id: &str, operation: Value| {
+        let config = agent.store.load().unwrap();
+        json!({"requestId":request_id,"expectedRevision":config.remote.revision,"policy":config.policy,"acknowledgeInterruption":true,"operation":operation})
+    };
+    let preview = request_for(
+        "preview",
+        json!({"type":"storagePreview","selections":selections,"options":{}}),
+    );
+    assert_eq!(
+        call(&app, &path, Some(&token), Some(preview.clone()))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(&app, &path, Some("admin"), Some(preview)).await.0,
+        StatusCode::ACCEPTED
+    );
+    agent.tick().await.unwrap();
+    agent.tick().await.unwrap();
+    let (_, view) = call(&app, &path, Some("admin"), None).await;
+    assert_eq!(view["requests"][0]["status"], "reviewed");
+    let plan = view["requests"][0]["result"].clone();
+    assert_eq!(plan["totalGib"], 70);
+    assert!(agent.store.load().unwrap().storage_locations.is_empty());
+    let apply = request_for("apply", json!({"type":"storageApply","plan":plan}));
+    assert_eq!(
+        call(&app, &path, Some("admin"), Some(apply.clone()))
+            .await
+            .0,
+        StatusCode::ACCEPTED
+    );
+    agent.tick().await.unwrap();
+    agent.tick().await.unwrap();
+    let (_, view) = call(&app, &path, Some("admin"), None).await;
+    assert_eq!(view["requests"][0]["status"], "applied", "{view}");
+    assert_eq!(
+        view["requests"][0]["effectiveStorage"]["locations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(agent.store.load().unwrap().policy.resources.disk_gib, 70);
+    assert_eq!(
+        call(&app, &path, Some("admin"), Some(apply)).await.1["status"],
+        "applied"
+    );
+    assert!(!root.join("first").exists());
+    let recovery = request_for("recovery", json!({"type":"storageRecovery","enabled":true}));
+    assert_eq!(
+        call(&app, &path, Some("admin"), Some(recovery)).await.0,
+        StatusCode::ACCEPTED
+    );
+    agent.tick().await.unwrap();
+    agent.tick().await.unwrap();
+    assert!(
+        agent
+            .store
+            .load()
+            .unwrap()
+            .storage_lifecycle
+            .recovery_enabled
+    );
+    let revoke = request_for(
+        "revoke-pending",
+        json!({"type":"storageRecovery","enabled":false}),
+    );
+    assert_eq!(
+        call(&app, &path, Some("admin"), Some(revoke)).await.0,
+        StatusCode::ACCEPTED
+    );
+    agent.tick().await.unwrap();
+    agent.set_remote_consent(false).await.unwrap();
+    agent.tick().await.unwrap();
+    let (_, view) = call(&app, &path, Some("admin"), None).await;
+    assert_eq!(view["requests"][0]["status"], "rejected");
+    assert!(view["report"]["storage"].is_null());
+    assert!(
+        agent
+            .store
+            .load()
+            .unwrap()
+            .storage_lifecycle
+            .recovery_enabled
+    );
+    agent.set_remote_consent(true).await.unwrap();
+    agent.tick().await.unwrap();
+    let invalid = request_for(
+        "over-capacity",
+        json!({"type":"storagePreview","selections":[{"directory":root.join("too-big"),"allocationGib":9999}],"options":{}}),
+    );
+    assert_eq!(
+        call(&app, &path, Some("admin"), Some(invalid)).await.0,
+        StatusCode::ACCEPTED
+    );
+    agent.tick().await.unwrap();
+    agent.tick().await.unwrap();
+    let (_, view) = call(&app, &path, Some("admin"), None).await;
+    assert_eq!(view["requests"][0]["status"], "rejected");
+    assert!(view["requests"][0]["error"].as_str().unwrap().len() > 10);
+    assert_eq!(agent.store.load().unwrap().storage_locations.len(), 2);
+    sqlx::query("UPDATE devices SET last_seen='2000-01-01T00:00:00Z' WHERE id=?")
+        .bind(&id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        call(
+            &app,
+            &path,
+            Some("admin"),
+            Some(request_for("offline", json!({"type":"storageRetry"})))
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn storage_phase_revisions_remain_pending_and_revocation_rejects_them() {
+    let (_, app, id, token) = setup().await;
+    let path = format!("/api/v1/devices/{id}/configuration");
+    let mut initial = report(true, 2);
+    initial["capabilities"]["storage"] = json!(true);
+    initial["storage"] = json!({"revision":1});
+    heartbeat(&app, &token, initial.clone()).await;
+    let mut request = edit(2);
+    request["operation"] = json!({"type":"storageRetry"});
+    assert_eq!(
+        call(&app, &path, Some("admin"), Some(request)).await.0,
+        StatusCode::ACCEPTED
+    );
+    let mut pending = initial;
+    pending["revision"] = json!(3);
+    pending["receipts"] = json!([{"requestId":"726-1","status":"pending","revision":3,"at":"2026-09-14T00:00:00Z","effectivePolicy":null,"effectiveResources":null,"error":null}]);
+    let (_, response) = heartbeat(&app, &token, pending.clone()).await;
+    assert!(response["configurationRequest"].is_null());
+    assert_eq!(
+        call(&app, &path, Some("admin"), None).await.1["requests"][0]["status"],
+        "pending"
+    );
+    pending["revision"] = json!(4);
+    pending["consent"] = json!(false);
+    pending["receipts"] = json!([]);
+    heartbeat(&app, &token, pending).await;
+    let (_, view) = call(&app, &path, Some("admin"), None).await;
+    assert_eq!(view["requests"][0]["status"], "rejected");
+    assert!(view["report"]["storage"].is_null());
+}

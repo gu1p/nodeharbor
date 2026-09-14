@@ -210,7 +210,10 @@ async fn main() -> Result<()> {
             confirm_delete_disk,
         } => {
             anyhow::ensure!(confirm_delete_disk,"Replacement permanently deletes the owned worker disk. Supply --confirm-delete-disk to request it");
-            agent.recreate_worker(agent.store.load()?.policy).await?;
+            let current = agent.store.load()?;
+            agent
+                .recreate_worker_versioned(current.policy, Some(current.remote.revision))
+                .await?;
             println!("Worker replacement requested. Enrollment and sharing rules are preserved; sharing remains off.");
         }
         Command::Enroll { url, code_file } => {
