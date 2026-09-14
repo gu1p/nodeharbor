@@ -1,3 +1,5 @@
+#[path = "support/remote_host.rs"]
+mod remote_host;
 use nodeharbor_agent::Agent;
 use nodeharbor_core::configuration::{ConfigurationCommand, ConfigurationEdit};
 
@@ -24,7 +26,7 @@ fn command(revision: u64) -> ConfigurationCommand {
 #[tokio::test]
 async fn consent_defaults_off_persists_and_revocation_invalidates_pending_and_in_flight_requests() {
     let dir = tempfile::tempdir().unwrap();
-    let agent = Agent::open(dir.path()).unwrap();
+    let agent = remote_host::unprepared_agent(dir.path());
     assert!(!agent.configuration_report().unwrap().consent);
     agent.set_remote_consent(true).await.unwrap();
     let revision = agent.configuration_report().unwrap().revision;
@@ -41,7 +43,7 @@ async fn consent_defaults_off_persists_and_revocation_invalidates_pending_and_in
         "pending"
     );
     agent.set_remote_consent(false).await.unwrap();
-    let reopened = Agent::open(dir.path()).unwrap();
+    let reopened = remote_host::unprepared_agent(dir.path());
     assert!(!reopened.configuration_report().unwrap().consent);
     assert_eq!(
         reopened
@@ -60,7 +62,7 @@ async fn consent_defaults_off_persists_and_revocation_invalidates_pending_and_in
 #[tokio::test]
 async fn local_edits_advance_revision_and_cannot_be_overwritten_by_queued_requests() {
     let dir = tempfile::tempdir().unwrap();
-    let agent = Agent::open(dir.path()).unwrap();
+    let agent = remote_host::unprepared_agent(dir.path());
     agent.set_remote_consent(true).await.unwrap();
     let revision = agent.configuration_report().unwrap().revision;
     agent.receive_configuration(command(revision)).unwrap();
@@ -79,7 +81,7 @@ async fn local_edits_advance_revision_and_cannot_be_overwritten_by_queued_reques
 #[tokio::test]
 async fn retries_are_idempotent_but_reusing_a_request_id_with_different_values_conflicts() {
     let dir = tempfile::tempdir().unwrap();
-    let agent = Agent::open(dir.path()).unwrap();
+    let agent = remote_host::unprepared_agent(dir.path());
     agent.set_remote_consent(true).await.unwrap();
     let request = command(agent.configuration_report().unwrap().revision);
     agent.receive_configuration(request.clone()).unwrap();
@@ -96,7 +98,7 @@ async fn revocation_during_an_authenticated_heartbeat_rejects_the_late_response(
     use serde_json::{json, Value};
     use std::{future::IntoFuture, sync::Arc};
     let dir = tempfile::tempdir().unwrap();
-    let agent = Agent::open(dir.path()).unwrap();
+    let agent = remote_host::unprepared_agent(dir.path());
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -220,7 +222,7 @@ async fn disk_runtime_failure_preserves_owner_policy_and_never_reports_an_applie
 #[tokio::test]
 async fn an_owner_stop_cancels_a_request_even_when_sharing_was_already_off() {
     let dir = tempfile::tempdir().unwrap();
-    let agent = Agent::open(dir.path()).unwrap();
+    let agent = remote_host::unprepared_agent(dir.path());
     agent.set_remote_consent(true).await.unwrap();
     agent
         .receive_configuration(command(agent.configuration_report().unwrap().revision))
@@ -232,7 +234,7 @@ async fn an_owner_stop_cancels_a_request_even_when_sharing_was_already_off() {
 #[tokio::test]
 async fn a_supervisor_stop_at_the_owner_deadline_does_not_cancel_the_edit_it_is_draining_for() {
     let dir = tempfile::tempdir().unwrap();
-    let agent = Agent::open(dir.path()).unwrap();
+    let agent = remote_host::unprepared_agent(dir.path());
     agent
         .store
         .update(|c| {
@@ -262,7 +264,7 @@ async fn a_supervisor_stop_at_the_owner_deadline_does_not_cancel_the_edit_it_is_
 #[tokio::test]
 async fn a_stale_local_form_cannot_overwrite_an_applied_remote_choice() {
     let dir = tempfile::tempdir().unwrap();
-    let agent = Agent::open(dir.path()).unwrap();
+    let agent = remote_host::unprepared_agent(dir.path());
     let snapshot = agent.snapshot().await.unwrap();
     agent
         .store
@@ -425,7 +427,7 @@ async fn local_snapshots_never_pair_an_older_policy_with_a_newer_configuration_r
         Arc,
     };
     let dir = tempfile::tempdir().unwrap();
-    let agent = Agent::open(dir.path()).unwrap();
+    let agent = remote_host::unprepared_agent(dir.path());
     let stop = Arc::new(AtomicBool::new(false));
     let writer = {
         let stop = stop.clone();
@@ -579,7 +581,7 @@ async fn lima_disk_growth_uses_owned_runtime_storage_and_returns_effective_value
 #[tokio::test]
 async fn local_storage_choices_and_recovery_preferences_invalidate_pending_remote_edits() {
     let dir = tempfile::tempdir().unwrap();
-    let agent = Agent::open(dir.path()).unwrap();
+    let agent = remote_host::unprepared_agent(dir.path());
     agent.set_remote_consent(true).await.unwrap();
     let revision = agent.configuration_report().unwrap().revision;
     agent.receive_configuration(command(revision)).unwrap();
@@ -605,14 +607,14 @@ async fn local_storage_choices_and_recovery_preferences_invalidate_pending_remot
 async fn remote_consent_requires_a_settings_format_that_older_agents_cannot_apply_without_authority(
 ) {
     let dir = tempfile::tempdir().unwrap();
-    let agent = Agent::open(dir.path()).unwrap();
+    let agent = remote_host::unprepared_agent(dir.path());
     agent.set_remote_consent(true).await.unwrap();
     assert!(
         agent.store.load().unwrap().format_version >= 6,
         "Older agents cannot understand the remote authority attached to pending storage journals"
     );
     agent.set_remote_consent(false).await.unwrap();
-    let reopened = Agent::open(dir.path()).unwrap();
+    let reopened = remote_host::unprepared_agent(dir.path());
     assert!(!reopened.configuration_report().unwrap().consent);
     assert!(reopened.store.load().unwrap().format_version >= 6);
 }

@@ -285,3 +285,19 @@ Linux ARM64 now verifies the Debian package, then rejects the AppImage because
 embedded binaries by default. Its supported `NO_STRIP` setting preserves the
 pinned runtime; apply it only to the Linux bundler subprocess environment and
 retain checksum verification for every packaged component.
+
+Run 34816587599 (`3652f0d`) reaches the macOS remote-configuration suite, where
+six consent/queue fixtures request 30 GiB with less than 40 GiB physical free
+space (`/tmp/nodeharbor-726-3652f0d-macos.log`). These tests do not create disks.
+Use the existing injected-VM/volume API with an explicit unprepared test host
+and fixed 200 GiB inventory, shared with the authenticated controller fixture.
+Keep the same production physical validator; capacity-specific tests continue
+to exercise real observed capacity or explicit insufficient-volume inventories.
+
+Windows run 34816587599 passes the agent/controller tests, then the desktop IPC
+harness exits before execution with `STATUS_ENTRYPOINT_NOT_FOUND`
+(`/tmp/nodeharbor-726-3652f0d-windows.log`). This matches Tauri's documented test
+manifest requirement for Common Controls v6 (upstream API example build.rs and
+issue tauri-apps/tauri#13419). Add a standard asInvoker/v6 manifest to the test
+executables through MSVC's supported manifest linker options. The application's
+existing Tauri manifest and native permission requests remain unchanged.

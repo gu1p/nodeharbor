@@ -1,3 +1,5 @@
+#[path = "../../agent/tests/support/remote_host.rs"]
+mod remote_host;
 use axum::{
     body::{to_bytes, Body},
     http::{Request, StatusCode},
@@ -165,14 +167,13 @@ async fn only_the_addressed_agent_can_acknowledge_and_disk_failures_remain_rejec
 
 #[tokio::test]
 async fn a_real_agent_receives_and_acknowledges_an_edit_over_the_authenticated_controller_path() {
-    use nodeharbor_agent::Agent;
     use std::future::IntoFuture;
     let (state, app, id, token) = setup().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(axum::serve(listener, app.clone()).into_future());
     let dir = tempfile::tempdir().unwrap();
-    let agent = Agent::open(dir.path()).unwrap();
+    let agent = remote_host::unprepared_agent(dir.path());
     agent
         .store
         .update(|c| {
