@@ -8,6 +8,20 @@ function backend(overrides: Partial<Backend> = {}): Backend {
   return {snapshot:vi.fn().mockResolvedValue(snapshot()),savePolicy:vi.fn().mockImplementation(async policy => ({...snapshot(),policy})),action:vi.fn().mockResolvedValue(snapshot()),enroll:vi.fn().mockResolvedValue(snapshot()),fleet:vi.fn().mockResolvedValue([]),...overrides};
 }
 describe('A person contributes a machine', () => {
+ it('announces a worker permission failure and keeps owner controls available until recovery',async()=>{
+  const reason='Cannot create worker temporary files. In System Settings → Privacy & Security → Files & Folders, enable Removable Volumes for NodeHarbor, then quit and reopen the app.';
+  const failed={...snapshot(),enrolled:true,state:'error',reason,worker:{installed:true,running:false}};
+  const api=backend({snapshot:vi.fn().mockResolvedValueOnce(failed).mockResolvedValue({...failed,state:'paused',reason:'Sharing is switched off'})});
+  const user=userEvent.setup();render(<App backend={api}/>);
+  expect(await screen.findByRole('alert')).toHaveTextContent(reason);
+  expect(screen.getByRole('heading',{name:reason})).toBeVisible();
+  expect(screen.getByRole('button',{name:'Start sharing'})).toBeEnabled();
+  expect(screen.getByRole('button',{name:'Edit sharing rules'})).toBeEnabled();
+  expect(api.action).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('button',{name:'Refresh machine status'}));
+  await waitFor(()=>expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+  expect(screen.getByRole('heading',{name:'Sharing is switched off'})).toBeVisible();
+ });
  it('lets a person stop an unreachable worker that never finished preparation',async()=>{
   const api=backend({snapshot:vi.fn().mockResolvedValue({...snapshot(),enrolled:true,state:'error',reason:'The worker is powered on but unreachable. Use Stop now before preparing it again.',worker:{installed:false,running:true}})});
   const user=userEvent.setup();render(<App backend={api}/>);

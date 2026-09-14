@@ -512,7 +512,14 @@ async fn an_earlier_worker_error_does_not_reject_a_new_update_before_inspection(
     let task = tokio::spawn(async move { supervisor.run().await });
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
-            if agent.snapshot().await.unwrap().state == "error" {
+            // A full snapshot rescans host storage. Poll the in-memory log so
+            // that disk discovery cannot consume the supervisor's test deadline.
+            if agent
+                .activity()
+                .entries
+                .iter()
+                .any(|entry| entry.level == "error")
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -520,6 +527,7 @@ async fn an_earlier_worker_error_does_not_reject_a_new_update_before_inspection(
     })
     .await
     .unwrap();
+    assert_eq!(agent.snapshot().await.unwrap().state, "error");
     agent.begin_application_update().await.unwrap();
     let fresh = agent.application_update_ready().await;
     assert!(

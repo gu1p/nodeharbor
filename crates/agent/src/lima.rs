@@ -83,14 +83,19 @@ impl LimaRunner {
             ];
             command.env("PATH", std::env::join_paths(paths)?);
         }
-        crate::process::run_command(
+        let output = crate::process::run_command(
             command,
             input,
             timeout,
             progress,
             crate::process::OutputFormat::Lines,
         )
-        .await
+        .await?;
+        Ok(startup_diagnostic(
+            std::env::consts::OS,
+            args.first().map(String::as_str),
+            output,
+        ))
     }
 }
 #[async_trait]
@@ -131,6 +136,50 @@ impl Runner for LimaRunner {
     ) -> Result<CommandOutput> {
         self.command(args, stdin, timeout, Some(progress)).await
     }
+}
+
+/// Keep the actionable summary ahead of the VM's diagnostic truncation. Raw
+/// command lines still reach the activity sink with its existing redactions.
+fn startup_diagnostic(
+    platform: &str,
+    operation: Option<&str>,
+    mut output: CommandOutput,
+) -> CommandOutput {
+    if platform != "macos" || !matches!(operation, Some("start" | "create")) || output.success {
+        return output;
+    }
+    let denied = output.stderr.lines().any(|line| {
+        let Some((_, message)) = line.split_once("[hostagent] mkdir ") else {
+            return false;
+        };
+        let Some((path, error)) = message.split_once(": ") else {
+            return false;
+        };
+        let temporary = Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("diskfs_iso"))
+            .is_some_and(|suffix| {
+                !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+            });
+        temporary
+            && matches!(
+                error.split('"').next(),
+                Some("operation not permitted" | "permission denied")
+            )
+    });
+    if denied {
+        // Redact before shortening so truncation cannot expose part of a secret.
+        // 800 Unicode characters plus the summary fit the 4096-byte log limit.
+        let details: String = crate::activity::redact(&output.stderr, &[])
+            .chars()
+            .take(800)
+            .collect();
+        output.stderr = format!(
+            "Cannot create worker temporary files. Check NodeHarbor’s folder access in System Settings → Privacy & Security → Files & Folders. For an external drive, enable Removable Volumes for NodeHarbor, then quit and reopen the app.\nLima: {details}"
+        );
+    }
+    output
 }
 
 pub(crate) fn info(output: &str) -> Result<VmInfo> {
@@ -293,6 +342,105 @@ fi
     probes.push(json!({"mode":"readiness","description":"The complete configured worker storage must be mounted","script":"#!/bin/sh\nsudo python3 /usr/local/lib/nodeharbor/storage_pool.py check\n"}));
     configuration["probes"] = json!(probes);
     Ok(())
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+
+    fn failure(stderr: &str) -> CommandOutput {
+        CommandOutput {
+            success: false,
+            stdout: "unchanged output".into(),
+            stderr: stderr.into(),
+        }
+    }
+
+    #[test]
+    fn temporary_directory_denials_explain_macos_recovery_and_retain_diagnostics() {
+        for operation in ["start", "create"] {
+            for error in ["operation not permitted", "permission denied"] {
+                let stderr = format!(
+                    "time=\"fixture\" level=error msg=\"[hostagent] mkdir /Volumes/External Disk/tmp/diskfs_iso123: {error}\" fields.level=fatal"
+                );
+                let output = startup_diagnostic("macos", Some(operation), failure(&stderr));
+                assert!(!output.success);
+                assert_eq!(output.stdout, "unchanged output");
+                assert!(output
+                    .stderr
+                    .starts_with("Cannot create worker temporary files."));
+                assert!(output.stderr.contains("Removable Volumes for NodeHarbor"));
+                assert!(output.stderr.contains("quit and reopen"));
+                assert!(output.stderr.contains(&stderr));
+            }
+        }
+    }
+
+    #[test]
+    fn guidance_survives_activity_limits_without_exposing_sensitive_output() {
+        let denial = "[hostagent] mkdir /Volumes/Test/tmp/diskfs_iso9: operation not permitted";
+        for stderr in [
+            format!("{}\n{denial}", "download progress\n".repeat(500)),
+            format!("password=private-fixture-value\n{denial}"),
+            format!("{}\n{denial}", "🦀".repeat(950)),
+        ] {
+            let output = startup_diagnostic("macos", Some("start"), failure(&stderr));
+            let logged = crate::activity::redact(&output.stderr, &[]);
+            assert!(logged.starts_with("Cannot create worker temporary files."));
+            assert!(logged
+                .chars()
+                .take(1200)
+                .collect::<String>()
+                .contains("quit and reopen"));
+            assert!(!logged.contains("private-fixture-value"));
+            assert!(output.stderr.len() <= 4096);
+        }
+    }
+
+    #[test]
+    fn unrelated_errors_platforms_operations_and_success_are_unchanged() {
+        let denial = "[hostagent] mkdir /Volumes/Test/tmp/diskfs_iso9: operation not permitted";
+        for (platform, operation, success, stderr) in [
+            ("linux", Some("start"), false, denial),
+            ("windows", Some("start"), false, denial),
+            ("macos", Some("shell"), false, denial),
+            ("macos", Some("stop"), false, denial),
+            ("macos", None, false, denial),
+            ("macos", Some("start"), true, denial),
+            ("macos", Some("start"), false, "VM launch timed out"),
+            (
+                "macos",
+                Some("start"),
+                false,
+                "[hostagent] mkdir /Volumes/Test/worker: operation not permitted",
+            ),
+            (
+                "macos",
+                Some("start"),
+                false,
+                "[hostagent] mkdir /Volumes/Test/diskfs_iso9: no space left on device",
+            ),
+            (
+                "macos",
+                Some("start"),
+                false,
+                "mkdir /tmp/diskfs_iso9: permission denied",
+            ),
+            (
+                "macos",
+                Some("start"),
+                false,
+                "[hostagent] mkdir /tmp/diskfs_iso9: read-only file system\npermission denied",
+            ),
+        ] {
+            let mut output = failure(stderr);
+            output.success = success;
+            let result = startup_diagnostic(platform, operation, output);
+            assert_eq!(result.stderr, stderr);
+            assert_eq!(result.success, success);
+            assert_eq!(result.stdout, "unchanged output");
+        }
+    }
 }
 
 #[cfg(test)]

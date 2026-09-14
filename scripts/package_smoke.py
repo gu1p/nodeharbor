@@ -28,6 +28,42 @@ def run(args, **kwargs):
     return subprocess.run(args, check=True, timeout=180, **kwargs)
 
 
+def check_macos_bundle(application, version, commit):
+    """Verify the complete bundle before executing any packaged component."""
+    app = Path(application)
+    codesign = '/usr/bin/codesign'
+    run([codesign, '--verify', '--deep', '--strict', '--verbose=2', str(app)])
+    with (app / 'Contents/Info.plist').open('rb') as source:
+        info = plistlib.load(source)
+    identifier = 'io.github.gu1p.nodeharbor'
+    if (info.get('CFBundleIdentifier') != identifier or info.get('CFBundleExecutable') != 'nodeharbor'
+            or info.get('CFBundleShortVersionString') != version or info.get('CFBundleVersion') != version):
+        raise ValueError('The macOS bundle identity or version is incorrect')
+    description = info.get('NSRemovableVolumesUsageDescription')
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError('The macOS bundle must explain its removable-volume access')
+    signed = subprocess.check_output([codesign, '--display', '--verbose=2', str(app)],
+                                     stderr=subprocess.STDOUT, timeout=30).decode()
+    if f'Identifier={identifier}' not in signed.splitlines():
+        raise ValueError('The macOS signing identity does not match the application bundle')
+    binaries = [app / 'Contents/MacOS' / name for name in ['nodeharbor', 'nodeharbor-agent']]
+    lima = app / 'Contents/Resources/lima/bin/limactl'
+    for binary in [*binaries, lima]:
+        if not binary.is_file():
+            raise ValueError('The macOS bundle is missing a required executable: ' + binary.name)
+    # Lima lives in Resources and retains the upstream signature and entitlements.
+    run([codesign, '--verify', '--strict', '--verbose=2', str(lima)])
+    entitlements = plistlib.loads(subprocess.check_output(
+        [codesign, '--display', '--entitlements', '-', '--xml', str(lima)],
+        stderr=subprocess.DEVNULL, timeout=30))
+    for name in ['virtualization', 'network.client', 'network.server']:
+        if entitlements.get(f'com.apple.security.{name}') is not True:
+            raise ValueError('The bundled Lima runtime is missing its ' + name + ' entitlement')
+    for binary in binaries:
+        check_executable(binary, version, commit)
+    check_vm_runtime(app)
+
+
 @contextmanager
 def mounted_image(path):
     output=subprocess.check_output(['hdiutil','attach',str(path),'-nobrowse','-readonly','-plist'],timeout=180)
@@ -50,14 +86,9 @@ def smoke_packages(folder, target, version, commit):
         if 'apple-darwin' in target:
             with tarfile.open(folder / (prefix + '.app.tar.gz')) as archive:
                 archive.extractall(root, filter='data')
-            app = root / 'NodeHarbor.app/Contents/MacOS'
-            for binary in ['nodeharbor', 'nodeharbor-agent']:
-                check_executable(app / binary, version, commit)
-            check_vm_runtime(root/'NodeHarbor.app')
+            check_macos_bundle(root / 'NodeHarbor.app', version, commit)
             with mounted_image(folder / (prefix + '.dmg')) as mount:
-                for binary in ['nodeharbor', 'nodeharbor-agent']:
-                    check_executable(mount / 'NodeHarbor.app/Contents/MacOS' / binary, version, commit)
-                check_vm_runtime(mount/'NodeHarbor.app')
+                check_macos_bundle(mount / 'NodeHarbor.app', version, commit)
         elif 'linux' in target:
             deb = root / 'deb'
             run(['dpkg-deb', '--extract', str(folder / (prefix + '.deb')), str(deb)])
