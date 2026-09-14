@@ -173,6 +173,13 @@ async fn windows_runtime_rejects_selectable_locations_without_touching_configura
         })
         .unwrap();
     let agent = open(directory.path(), Arc::new(Runtime::default()));
+    agent
+        .store
+        .update(|configuration| {
+            configuration.vm_provider = VmProvider::Multipass;
+            Ok(())
+        })
+        .unwrap();
     let before = std::fs::read(directory.path().join("config.json")).unwrap();
     assert!(agent
         .preview_storage(vec![])

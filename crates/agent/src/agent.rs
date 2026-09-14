@@ -143,11 +143,15 @@ impl Agent {
     }
     fn open_inner(directory: &Path, runner: Option<Arc<dyn crate::Runner>>) -> Result<Self> {
         let activity = crate::activity::ActivityLog::default();
+        let store = match &runner {
+            Some(runner) => Store::open_with_provider(directory, runner.provider())?,
+            None => Store::open(directory)?,
+        };
         Ok(Self {
             runner,
             storage_volumes: None,
             activity,
-            store: Store::open(directory)?,
+            store,
             runtime: Arc::new(Mutex::new(Runtime::default())),
             operation: Arc::new(Mutex::new(())),
             client: reqwest::Client::builder()

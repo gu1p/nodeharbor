@@ -69,3 +69,32 @@ async fn missing_lima_is_reported_before_preparation_can_start() {
     assert!(error.to_string().contains("bundled VM runtime is missing"));
     assert!(!directory.path().join("lima").exists());
 }
+
+#[test]
+fn explicit_protocol_fixtures_keep_their_runtime_across_reopen() {
+    use nodeharbor_agent::{Agent, CommandOutput, Runner, VmProvider};
+    use std::sync::Arc;
+    struct Fixture;
+    #[async_trait::async_trait]
+    impl Runner for Fixture {
+        async fn run(
+            &self,
+            _: &[String],
+            _: Option<Vec<u8>>,
+            _: u64,
+        ) -> anyhow::Result<CommandOutput> {
+            panic!("A configuration fixture must not execute native commands")
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let agent = Agent::open_with_runner(dir.path(), Arc::new(Fixture)).unwrap();
+    let original = agent.store.load().unwrap();
+    assert_eq!(original.vm_provider, VmProvider::Multipass);
+    let reopened = Agent::open_with_runner(dir.path(), Arc::new(Fixture))
+        .unwrap()
+        .store
+        .load()
+        .unwrap();
+    assert_eq!(reopened.device_id, original.device_id);
+    assert_eq!(reopened.vm_provider, VmProvider::Multipass);
+}

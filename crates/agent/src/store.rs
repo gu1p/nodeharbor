@@ -119,6 +119,26 @@ impl Store {
         Self::open_for_platform(directory, std::env::consts::OS)
     }
     fn open_for_platform(directory: &Path, platform: &str) -> Result<Self> {
+        let provider = if platform == "linux" {
+            crate::VmProvider::Lima
+        } else {
+            Configuration::default().vm_provider
+        };
+        Self::open_inner(directory, provider, platform == "linux")
+    }
+    /// Explicit protocol fixtures must not inherit the machine's native runtime.
+    /// Native MultipassRunner still rejects Linux execution independently.
+    pub(crate) fn open_with_provider(
+        directory: &Path,
+        provider: crate::VmProvider,
+    ) -> Result<Self> {
+        Self::open_inner(directory, provider, false)
+    }
+    fn open_inner(
+        directory: &Path,
+        provider: crate::VmProvider,
+        reset_obsolete_linux: bool,
+    ) -> Result<Self> {
         fs::create_dir_all(directory).context("Cannot create the NodeHarbor settings directory")?;
         #[cfg(unix)]
         {
@@ -131,15 +151,18 @@ impl Store {
         };
         let _lock = store.lock()?;
         if !store.path().exists() {
-            let mut config = Configuration::default();
-            if platform == "linux" {
-                config.vm_provider = crate::VmProvider::Lima;
-                config.format_version = 2;
-            }
-            store.write(&config)?;
+            store.write(&Configuration {
+                vm_provider: provider,
+                format_version: if provider == crate::VmProvider::Lima {
+                    2
+                } else {
+                    1
+                },
+                ..Configuration::default()
+            })?;
         }
         let config = store.load()?;
-        if platform == "linux" && config.vm_provider == crate::VmProvider::Multipass {
+        if reset_obsolete_linux && config.vm_provider == crate::VmProvider::Multipass {
             // Never replace the active supervisor's identity or touch its VM.
             let _supervisor = store.supervisor_lock()?;
             let mut archive = tempfile::NamedTempFile::new_in(directory)?;
