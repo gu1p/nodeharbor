@@ -315,3 +315,10 @@ mutation and the metadata argument (`/tmp/nodeharbor-726-d57-windows.log`). Scop
 the mutable builder to the Unix permission block and explicitly consume metadata
 on other targets. Keep Unix owner/mode verification and unsupported-runtime
 rejection intact; do not suppress the warning policy.
+
+Release identity inspection found that rebased main position 65 produces
+`0.1.65`, an immutable tag already published for a different commit; the old line
+also contains `0.1.72`. The CLI upgrade contract fails with `(0, 1, 65) not greater
+than (0, 1, 72)` (`/tmp/nodeharbor-726-release-version-red.log`). Start this feature's
+release line at `0.2`, retaining the deterministic first-parent sequence, exact
+source stamping, immutable-tag checks, and update-channel downgrade protection.

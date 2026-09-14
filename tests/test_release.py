@@ -6,6 +6,7 @@ import json
 import shutil
 import tomllib
 import io
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -157,6 +158,17 @@ class ReleaseContract(unittest.TestCase):
         self.assertEqual(release.version_for("0.1.0", 12), release.version_for("0.1.0", 12))
         for invalid in [0, -1]:
             with self.assertRaises(ValueError): release.version_for("0.1.0", invalid)
+
+    def test_rebased_remote_configuration_releases_upgrade_the_published_0_1_line(self):
+        versions=[]
+        for position in [65,65,66]:
+            output=io.StringIO()
+            with patch('sys.argv',['release.py','version']), patch.object(release.subprocess,'check_output',return_value=str(position)), redirect_stdout(output):
+                release.main()
+            versions.append(tuple(map(int,output.getvalue().strip().split('.'))))
+        self.assertGreater(versions[0],(0,1,72))
+        self.assertEqual(versions[0],versions[1])
+        self.assertGreater(versions[2],versions[1])
 
     def test_only_a_complete_matching_release_can_be_published(self):
         with tempfile.TemporaryDirectory() as directory:

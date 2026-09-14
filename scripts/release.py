@@ -222,7 +222,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     version_parser = commands.add_parser("version")
-    version_parser.add_argument("--base", default="0.1.0")
+    version_parser.add_argument("--base", default="0.2.0")
     validate_parser = commands.add_parser("validate")
     validate_parser.add_argument("folder", type=Path)
     validate_parser.add_argument("version")
