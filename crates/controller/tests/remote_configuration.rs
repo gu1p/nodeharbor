@@ -341,7 +341,11 @@ async fn browser_storage_reviews_and_changes_use_the_authenticated_agent_and_pre
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(axum::serve(listener, app.clone()).into_future());
-    let dir = tempfile::tempdir().unwrap();
+    // This protocol fixture also validates the native Lima socket path budget.
+    let dir = tempfile::Builder::new()
+        .prefix("nh")
+        .tempdir_in("/tmp")
+        .unwrap();
     let root = dir.path().canonicalize().unwrap();
     let volume_id = nodeharbor_agent::storage::volume_identity(&root).unwrap();
     let volume = nodeharbor_agent::storage::Volume {

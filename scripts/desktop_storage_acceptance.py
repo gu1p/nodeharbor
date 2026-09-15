@@ -148,7 +148,7 @@ def run(args):
                            XDG_CONFIG_HOME=str(temporary / 'xdg-config'),
                            XDG_DATA_HOME=str(temporary / 'xdg-data'),
                            NO_AT_BRIDGE='0', GTK_MODULES='atk-bridge', XDG_CURRENT_DESKTOP='XFCE')
-        directories = [Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='nhgui-', dir=root)))
+        directories = [Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='nh-', dir=root)))
                        for root in args.storage_root]
         snapshot = json.loads(subprocess.check_output([str(args.agent.resolve()), '--config-dir', str(config), 'status'], env=environment, text=True, timeout=45))
         eligible = [v for v in snapshot['storage']['volumes'] if v['eligible'] and v['id']]
@@ -232,6 +232,19 @@ def run(args):
                 json.dump(report, output, indent=2)
                 output.write('\n')
             print(json.dumps(report), flush=True)
+        except Exception:
+            # Preserve the actual validation message when a reviewed action
+            # fails. Only this disposable application's accessibility tree is read.
+            try:
+                desktop = Atspi.get_desktop(0)
+                for i in range(desktop.get_child_count()):
+                    app = desktop.get_child_at_index(i)
+                    if app is not None and process is not None and app.get_process_id() == process.pid:
+                        labels = [node.get_name() for node in descendants(app) if node.get_name()]
+                        print(json.dumps({'failedGuiLabels': labels[:200]}), flush=True)
+            except Exception:
+                pass
+            raise
         finally:
             stop()
 

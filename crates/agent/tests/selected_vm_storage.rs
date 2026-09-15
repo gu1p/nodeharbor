@@ -228,3 +228,58 @@ async fn shrink_review_reserves_backup_and_system_space_on_the_picked_volume_tog
         folder.to_string_lossy()
     );
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn review_rejects_the_qemu_socket_boundary_without_saving_or_running_commands() {
+    let temporary = tempfile::Builder::new()
+        .prefix("nh")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let runner = Arc::new(NoVm::default());
+    let agent = Agent::open_with_runner_and_volumes(
+        &root,
+        runner.clone(),
+        vec![volume(&root, "picked", 256)],
+    )
+    .unwrap();
+    let owner = agent.store.load().unwrap().device_id;
+    let limit = if cfg!(target_os = "macos") { 104 } else { 108 };
+    let folder = (1..100)
+        .map(|n| root.join("x".repeat(n)))
+        .find(|folder| {
+            let location = Location {
+                id: "one".into(),
+                directory: folder.to_string_lossy().into(),
+                volume_id: "picked".into(),
+                allocation_gib: 100,
+            };
+            let layout =
+                nodeharbor_agent::storage_layout::Layout::resolve(&owner, &[location], None)
+                    .unwrap();
+            layout
+                .home()
+                .join("_networks/user-v2/user-v2_qemu.sock")
+                .as_os_str()
+                .len()
+                == limit
+        })
+        .unwrap();
+    std::fs::create_dir(&folder).unwrap();
+    let before = std::fs::read(root.join("config.json")).unwrap();
+    let reviewed = agent
+        .preview_storage(vec![Selection {
+            id: None,
+            expected_volume_id: Some("picked".into()),
+            directory: folder.to_string_lossy().into(),
+            allocation_gib: 100,
+        }])
+        .await;
+    assert!(
+        reviewed.is_err(),
+        "Review accepted a folder that cannot boot QEMU: {reviewed:?}"
+    );
+    assert_eq!(std::fs::read(root.join("config.json")).unwrap(), before);
+    assert!(runner.0.lock().unwrap().is_empty());
+}

@@ -94,6 +94,8 @@ impl Layout {
         for suffix in [
             "worker/ssh.sock.1234567890123456",
             "_networks/user-v2/user-v2_ep.sock",
+            #[cfg(target_os = "linux")]
+            "_networks/user-v2/user-v2_qemu.sock",
         ] {
             anyhow::ensure!(path.join(suffix).as_os_str().len() < limit, "The selected folder path is too long for the VM runtime. Choose a shorter folder on the same drive");
         }

@@ -94,3 +94,19 @@ fn a_thirty_gib_total_can_be_restored_as_sixteen_system_and_fourteen_data() {
         15
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn runtime_path_budget_includes_the_qemu_usernet_socket_before_preparation() {
+    let limit = if cfg!(target_os = "macos") { 104 } else { 108 };
+    let suffix = "/_networks/user-v2/user-v2_qemu.sock";
+    let mut layout = Layout::resolve(OWNER, &[location("one", 100)], None).unwrap();
+    layout.runtime_directory = format!("/{}", "x".repeat(limit - suffix.len() - 1));
+    assert_eq!(format!("{}{suffix}", layout.runtime_directory).len(), limit);
+    assert!(
+        layout.validate_path().is_err(),
+        "Reject the QEMU socket path before preparing any VM files"
+    );
+    layout.runtime_directory.pop();
+    layout.validate_path().unwrap();
+}
