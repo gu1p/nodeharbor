@@ -229,11 +229,15 @@ pub struct VmInfo {
     #[serde(default)]
     pub addresses: Vec<String>,
 }
+#[derive(Clone)]
 pub struct Vm {
     pub name: String,
     device_id: String,
     runner: Arc<dyn Runner>,
     receipt: Option<PathBuf>,
+    runtime_home: Option<PathBuf>,
+    boot_image: Option<PathBuf>,
+    system_gib: u64,
 }
 impl Vm {
     pub async fn replacement_space(&self) -> Result<crate::storage_lifecycle::ReplacementSpace> {
@@ -375,6 +379,9 @@ impl Vm {
             device_id: device_id.into(),
             runner,
             receipt: None,
+            runtime_home: None,
+            boot_image: None,
+            system_gib: 16,
         })
     }
     pub fn local(device_id: &str) -> Result<Self> {
@@ -387,6 +394,18 @@ impl Vm {
         let mut vm = Self::new(device_id, runner)?;
         vm.receipt = Some(directory.join(format!("{}.receipt.json", vm.name)));
         Ok(vm)
+    }
+    pub(crate) fn with_system_gib(mut self, gib: u64) -> Self {
+        self.system_gib = gib;
+        self
+    }
+    pub(crate) fn with_boot_image(mut self, image: PathBuf) -> Self {
+        self.boot_image = Some(image);
+        self
+    }
+    pub(crate) fn with_runtime_home(mut self, home: PathBuf) -> Self {
+        self.runtime_home = Some(home);
+        self
     }
     pub fn local_in(device_id: &str, directory: &Path) -> Result<Self> {
         if cfg!(target_os = "linux") {
@@ -402,9 +421,21 @@ impl Vm {
         provider: crate::VmProvider,
         directory: &Path,
     ) -> Result<Arc<dyn Runner>> {
+        Self::native_runner_at(provider, &directory.join("lima"))
+    }
+    pub(crate) fn native_runner_at(
+        provider: crate::VmProvider,
+        home: &Path,
+    ) -> Result<Arc<dyn Runner>> {
         Ok(match provider {
             crate::VmProvider::Multipass => Arc::new(MultipassRunner),
-            crate::VmProvider::Lima => Arc::new(crate::LimaRunner::bundled(directory)?),
+            crate::VmProvider::Lima => Arc::new(crate::LimaRunner::new(
+                crate::runtime_platform::bundled_program(
+                    std::env::consts::OS,
+                    &std::env::current_exe()?,
+                )?,
+                home.to_owned(),
+            )),
         })
     }
     fn is_lima(&self) -> bool {
@@ -700,7 +731,7 @@ impl Vm {
             self.is_lima(),
             "This runtime does not support pooled worker disks"
         );
-        let configuration = crate::lima::configuration_with_storage(
+        let mut configuration = crate::lima::configuration_with_storage(
             &self.device_id,
             resources,
             &files,
@@ -708,6 +739,7 @@ impl Vm {
             pool_id,
             generation,
         )?;
+        configuration["disk"] = json!(format!("{}GiB", self.system_gib));
         self.create_inner(resources, directory, files, Some(configuration))
             .await
     }
@@ -723,12 +755,15 @@ impl Vm {
             "The worker VM already exists; refusing to replace it"
         );
         if self.is_lima() {
-            let config = configuration.map(Ok).unwrap_or_else(|| {
+            let mut config = configuration.map(Ok).unwrap_or_else(|| {
                 crate::lima::configuration(&self.device_id, resources, &files)
             })?;
+            if let Some(image) = &self.boot_image {
+                config["images"][0]["location"] = json!(image.to_string_lossy());
+            }
             let mut file = tempfile::Builder::new()
                 .suffix(".yaml")
-                .tempfile_in(directory)?;
+                .tempfile_in(self.runtime_home.as_deref().unwrap_or(directory))?;
             serde_json::to_writer(file.as_file_mut(), &config)?;
             file.as_file().sync_all()?;
             self.record_creation()?;
@@ -789,7 +824,9 @@ impl Vm {
     pub fn storage_adapter(&self, directory: &Path) -> Result<crate::lima_storage::LimaStorage> {
         crate::lima_storage::LimaStorage::new(
             self.runner.clone(),
-            directory.join("lima"),
+            self.runtime_home
+                .clone()
+                .unwrap_or_else(|| directory.join("lima")),
             &self.device_id,
         )
     }

@@ -148,6 +148,8 @@ pub enum Phase {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Maintenance {
+    #[serde(default)]
+    pub layout: Option<crate::storage_layout::Layout>,
     pub request_id: uuid::Uuid,
     pub pool_id: uuid::Uuid,
     pub generation: u64,
@@ -210,7 +212,7 @@ pub fn recovery_decision(
     if !consent || now.saturating_sub(since) < 120 {
         return RecoveryDecision::Wait;
     }
-    if remaining_gib < 15 {
+    if remaining_gib < 30 {
         return RecoveryDecision::Insufficient;
     }
     RecoveryDecision::Rebuild
@@ -225,7 +227,7 @@ pub fn required_capacity(data_bytes: u64, system_disk: bool) -> Result<u64> {
         .div_ceil(GIB)
         .checked_add(if system_disk { 8 } else { 0 })
         .context("Worker allocation overflow")?;
-    Ok(size.max(15))
+    Ok(size.max(if system_disk { 15 } else { 14 }))
 }
 
 pub fn open_backup(backup: &Backup) -> Result<File> {

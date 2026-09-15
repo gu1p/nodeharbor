@@ -25,6 +25,7 @@ fn saved_locations_survive_reopen_and_a_missing_volume_is_not_rebound_by_path() 
     let saved = Store::open(directory.path()).unwrap().load().unwrap();
     assert_eq!(saved.storage_locations, vec![location]);
     let replacement = Volume {
+        available_bytes: None,
         drive_type: None,
         suggested_directory: None,
         id: "replacement-volume".into(),

@@ -4,7 +4,7 @@ use nodeharbor_agent::storage_lifecycle::{recovery_decision, required_capacity, 
 fn shrinking_reserves_filesystem_and_operating_space() {
     assert_eq!(
         required_capacity(10 * 1024 * 1024 * 1024, false).unwrap(),
-        15
+        14
     );
     assert!(required_capacity(20 * 1024 * 1024 * 1024, true).unwrap() > 25);
     assert!(required_capacity(u64::MAX, false).is_err());

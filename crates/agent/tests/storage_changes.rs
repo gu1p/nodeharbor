@@ -22,6 +22,7 @@ impl Runner for Runtime {
 
 fn open(directory: &std::path::Path, runner: Arc<dyn Runner>) -> Agent {
     let volume = nodeharbor_agent::storage::Volume {
+        available_bytes: None,
         drive_type: None,
         suggested_directory: None,
         id: "fixture".into(),
@@ -44,6 +45,7 @@ fn selected_volume(
     free: u64,
 ) -> nodeharbor_agent::storage::Volume {
     nodeharbor_agent::storage::Volume {
+        available_bytes: None,
         drive_type: Some("ssd".into()),
         suggested_directory: None,
         id: name.into(),
@@ -104,7 +106,7 @@ async fn selected_100_gib_uses_picked_drives_through_review_apply_reopen_save_an
         reopened.save_policy(policy).await.unwrap();
         reopened.action("prepare").await.unwrap();
         let saved = reopened.store.load().unwrap();
-        assert_eq!(saved.storage_locations, review.locations);
+        assert_eq!(saved.total_locations().unwrap(), review.locations);
         assert_eq!(saved.policy.resources.disk_gib, 100);
         assert_eq!(saved.storage_boot_gib, 16);
         assert!(saved.prepare_requested);
@@ -116,7 +118,7 @@ async fn selected_100_gib_uses_picked_drives_through_review_apply_reopen_save_an
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test]
-async fn sharing_rule_validation_preserves_selected_drive_and_system_disk_errors() {
+async fn sharing_rule_validation_checks_selected_capacity_and_ignores_unselected_system_space() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let external = root.join("selected");
@@ -145,7 +147,7 @@ async fn sharing_rule_validation_preserves_selected_drive_and_system_disk_errors
     let plan = agent.preview_storage(vec![selection]).await.unwrap();
     agent.apply_storage(plan).await.unwrap();
     let before = std::fs::read(root.join("config.json")).unwrap();
-    for (index, free, expected) in [(1, 109, "Work disk"), (0, 25, "system disk")] {
+    for (index, free, expected) in [(1, 109, "Work disk")] {
         let mut changed = volumes.clone();
         changed[index].available_gib = free;
         let reopened = Agent::open_with_runner_and_volumes(&root, runner.clone(), changed).unwrap();
@@ -166,6 +168,13 @@ async fn sharing_rule_validation_preserves_selected_drive_and_system_disk_errors
         );
         assert_eq!(std::fs::read(root.join("config.json")).unwrap(), before);
     }
+    let mut root_full = volumes;
+    root_full[0].available_gib = 1;
+    let reopened = Agent::open_with_runner_and_volumes(&root, runner.clone(), root_full).unwrap();
+    reopened
+        .save_policy(reopened.store.load().unwrap().policy)
+        .await
+        .unwrap();
     assert!(runner.0.lock().unwrap().is_empty());
 }
 
@@ -197,7 +206,7 @@ async fn setup_preview_is_read_only_and_apply_persists_the_resolved_default() {
     );
     agent.apply_storage(preview.clone()).await.unwrap();
     let saved = agent.store.load().unwrap();
-    assert_eq!(saved.storage_locations, preview.locations);
+    assert_eq!(saved.total_locations().unwrap(), preview.locations);
     assert_eq!(saved.storage_generation, 0);
     assert_eq!(
         Agent::open_with_runner(directory.path(), runner.clone())
@@ -205,7 +214,8 @@ async fn setup_preview_is_read_only_and_apply_persists_the_resolved_default() {
             .store
             .load()
             .unwrap()
-            .storage_locations,
+            .total_locations()
+            .unwrap(),
         preview.locations
     );
     let preview = serde_json::to_value(preview).unwrap();
@@ -279,6 +289,7 @@ async fn storage_maintenance_requires_the_existing_worker_receipt_before_vm_comm
             c.vm_configured = true;
             c.device_token = Some("test-only".into());
             c.storage_operation = Some(nodeharbor_agent::storage::Operation {
+                layout: None,
                 previous: vec![],
                 target: vec![],
                 generation: 1,
@@ -331,6 +342,7 @@ async fn windows_runtime_rejects_selectable_locations_without_touching_configura
     policy.resources.disk_gib = 30;
     policy.idle_only = true;
     let plan = nodeharbor_agent::storage::ChangePlan {
+        layout: None,
         maintenance: None,
         revision: config.storage_revision,
         locations: vec![nodeharbor_agent::storage::Location {
@@ -389,7 +401,7 @@ async fn first_preparation_records_default_storage_before_attempting_runtime_wri
         1,
         "Preparation must use a persisted file-backed data disk"
     );
-    assert_eq!(saved.storage_locations[0].allocation_gib, 30);
+    assert_eq!(saved.storage_locations[0].allocation_gib, 14);
     assert_eq!(
         saved.storage_locations[0].directory,
         directory.path().join("storage").to_str().unwrap()
@@ -442,7 +454,7 @@ async fn combined_save_commits_selected_capacity_and_policy_once_before_reopen_a
         assert_eq!(saved.configuration.revision, before.remote.revision + 1);
         let reopened = Agent::open_with_runner_and_volumes(&root, runner.clone(), volumes).unwrap();
         assert_eq!(
-            reopened.store.load().unwrap().storage_locations,
+            reopened.store.load().unwrap().total_locations().unwrap(),
             plan.locations
         );
         assert_eq!(reopened.store.load().unwrap().policy, policy);
@@ -540,7 +552,7 @@ async fn combined_growth_persists_rules_and_a_durable_operation_without_waiting_
     assert_eq!(saved.policy, policy);
     assert_eq!(
         saved.storage_operation.unwrap().target[0].allocation_gib,
-        100
+        84
     );
     assert_eq!(
         saved.storage_locations[0].allocation_gib,
@@ -641,7 +653,7 @@ async fn combined_setup_shrink_and_removal_keep_the_reviewed_rules_and_locations
             .load()
             .unwrap();
         assert_eq!(saved.policy, policy);
-        assert_eq!(saved.storage_locations, plan.locations);
+        assert_eq!(saved.total_locations().unwrap(), plan.locations);
         assert_eq!(saved.remote.revision, config.remote.revision + 1);
     }
 }

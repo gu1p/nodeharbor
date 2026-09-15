@@ -36,7 +36,12 @@ impl Runner for Host {
                 .skip(2)
                 .find(|arg| !arg.starts_with('-'))
                 .unwrap();
-            let directory = self.store.directory.join("lima/_disks").join(name);
+            let directory = self
+                .store
+                .load()?
+                .runtime_home(&self.store.directory)
+                .join("_disks")
+                .join(name);
             let image = directory.join("datadisk");
             match args[1].as_str() {
                 "create" => {
@@ -111,6 +116,7 @@ async fn fixture() -> (
     });
     let volume_id = nodeharbor_agent::storage::volume_identity(&root).unwrap();
     let volume = nodeharbor_agent::storage::Volume {
+        available_bytes: None,
         drive_type: None,
         suggested_directory: None,
         id: volume_id.clone(),
@@ -159,6 +165,13 @@ async fn fixture() -> (
             .to_string(),
     )
     .unwrap();
+    let home = root.join("lima/worker");
+    std::fs::create_dir_all(&home).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    for directory in [&home, &root.join("lima")] {
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::write(home.join("disk"), b"owned fixture system disk").unwrap();
     agent.set_remote_consent(true).await.unwrap();
     (directory, agent, host, server)
 }
@@ -212,7 +225,8 @@ async fn failed_disk_creation_is_rejected_and_paused_without_changing_effective_
     stage(&agent).await;
     agent.tick().await.unwrap();
     host.fail_create.store(true, Ordering::SeqCst);
-    agent.tick().await.unwrap();
+    agent.tick().await.unwrap(); // Copy and persist runtime relocation.
+    agent.tick().await.unwrap(); // Create data disks in the new runtime home.
     let c = agent.store.load().unwrap();
     let receipt = c.remote.receipts.last().unwrap();
     assert_eq!(receipt.status, "rejected");
@@ -237,6 +251,7 @@ async fn revocation_between_disk_commands_prevents_the_next_mutation_without_wai
     stage(&agent).await;
     agent.tick().await.unwrap();
     host.revoke_after_create.store(true, Ordering::SeqCst);
+    agent.tick().await.unwrap(); // Relocate the stopped VM first.
     agent.tick().await.unwrap();
     let c = agent.store.load().unwrap();
     assert_eq!(c.remote.receipts.last().unwrap().status, "rejected");
@@ -268,7 +283,7 @@ async fn revocation_between_disk_commands_prevents_the_next_mutation_without_wai
 async fn a_verified_multi_disk_change_is_acknowledged_and_compute_edits_preserve_the_system_disk() {
     let (_dir, agent, host, server) = fixture().await;
     stage(&agent).await;
-    for _ in 0..5 {
+    for _ in 0..8 {
         agent.tick().await.unwrap();
         if agent.store.load().unwrap().remote.pending.is_none() {
             break;
@@ -307,7 +322,8 @@ async fn a_fresh_remote_retry_resumes_the_preserved_disk_change_and_waits_for_ve
     stage(&agent).await;
     agent.tick().await.unwrap();
     host.fail_create.store(true, Ordering::SeqCst);
-    agent.tick().await.unwrap();
+    agent.tick().await.unwrap(); // Copy and persist runtime relocation.
+    agent.tick().await.unwrap(); // Create data disks in the new runtime home.
     host.fail_create.store(false, Ordering::SeqCst);
     agent
         .receive_configuration(request(&agent, "retry", json!({"type":"storageRetry"})))
@@ -323,7 +339,7 @@ async fn a_fresh_remote_retry_resumes_the_preserved_disk_change_and_waits_for_ve
             .status,
         "pending"
     );
-    for _ in 0..5 {
+    for _ in 0..8 {
         agent.tick().await.unwrap();
         if agent.store.load().unwrap().remote.pending.is_none() {
             break;

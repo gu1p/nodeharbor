@@ -18,6 +18,7 @@ fn system_disk_capacity_resolves_an_existing_directory_alias() {
 
 fn volume(root: &Path, id: &str, pool: &str, free: u64) -> Volume {
     Volume {
+        available_bytes: None,
         drive_type: None,
         suggested_directory: None,
         id: id.into(),

@@ -264,6 +264,52 @@ impl Agent {
                         )?;
                     }
                 }
+                if let Some(layout) = &op.layout {
+                    if whole_vm {
+                        if config.storage_layout.as_ref() != Some(layout) {
+                            let old_home = config.runtime_home(&self.store.directory);
+                            let retained = if old_home == layout.home() {
+                                None
+                            } else if let Some(previous) = &config.storage_layout {
+                                Some(previous.clone())
+                            } else if old_home.exists() {
+                                Some(crate::storage_layout::Layout {
+                                    version: 1,
+                                    system_location_id: "retired".into(),
+                                    volume_id: crate::storage::volume_identity(&old_home)?,
+                                    runtime_directory: old_home.to_string_lossy().into(),
+                                    system_gib: config.system_gib(),
+                                })
+                            } else {
+                                None
+                            };
+                            if let Some(previous) = &retained {
+                                if config.storage_layout.is_none() && previous.home().exists() {
+                                    anyhow::ensure!(vm.has_receipt()? && (!info.installed || info.stopped), "Verify ownership and stop the original VM before retiring it");
+                                    crate::runtime_storage::mark_retired_home(
+                                        previous,
+                                        &config.device_id,
+                                    )?;
+                                }
+                            }
+                            vm.remove().await?;
+                            crate::runtime_storage::prepare_home(layout, &config.device_id)?;
+                            self.store.update(|c| {
+                                if let Some(previous) = &retained {
+                                    if !c.runtime_retained.contains(previous) {
+                                        c.runtime_retained.push(previous.clone());
+                                    }
+                                }
+                                c.storage_layout = Some(layout.clone());
+                                c.storage_boot_gib = layout.system_gib;
+                                Ok(())
+                            })?;
+                            return Ok(());
+                        }
+                    } else if self.relocate_runtime(config, vm, layout).await? {
+                        return Ok(());
+                    }
+                }
                 if whole_vm {
                     vm.remove().await?;
                 } else {
@@ -326,15 +372,21 @@ impl Agent {
                             .await?;
                             vm.start().await?;
                         } else {
-                            vm.create_with_storage(
-                                &resources,
-                                &self.store.directory,
-                                crate::guest_files(),
-                                &op.target,
-                                &op.pool_id.to_string(),
-                                op.generation,
-                            )
-                            .await?;
+                            let mut target_config = config.clone();
+                            target_config.storage_locations = op.target.clone();
+                            target_config.storage_layout =
+                                op.layout.clone().or(config.storage_layout.clone());
+                            let prepared = self.prepared_storage_vm(&target_config, vm).await?;
+                            prepared
+                                .create_with_storage(
+                                    &resources,
+                                    &self.store.directory,
+                                    crate::guest_files(),
+                                    &op.target,
+                                    &op.pool_id.to_string(),
+                                    op.generation,
+                                )
+                                .await?;
                         }
                     }
                     vm.prepare_storage_guest().await?;
@@ -429,6 +481,16 @@ impl Agent {
                     !info.running,
                     "Stop the worker before finishing storage maintenance"
                 );
+                if op.review.kind != Kind::DeleteAll {
+                    if let Some(layout) = &op.layout {
+                        self.verify_runtime_placement(layout, &config.device_id)
+                            .await?;
+                        if self.runner.is_none() {
+                            crate::runtime_image::cleanup(layout, &config.device_id)?;
+                        }
+                    }
+                    self.cleanup_runtime_relocation(config, vm).await?;
+                }
                 self.store.update(|c| {
                     let deleting = op.review.kind == Kind::DeleteAll;
                     if c.storage_lifecycle.configured_locations.is_empty() {
@@ -445,6 +507,9 @@ impl Agent {
                     }
                     c.storage_locations = op.target.clone();
                     c.storage_generation = op.generation;
+                    if c.vm_provider == crate::VmProvider::Lima {
+                        c.format_version = 7;
+                    }
                     c.storage_lifecycle.pool_id = (!deleting).then_some(op.pool_id);
                     c.storage_lifecycle.disabled = deleting;
                     c.storage_lifecycle.missing = None;
@@ -454,8 +519,14 @@ impl Agent {
                     if deleting {
                         c.policy.enabled = false;
                         c.allocated_resources = None;
+                        c.storage_layout = None;
+                        c.storage_boot_gib = 0;
                     } else {
-                        c.policy.resources.disk_gib = op.total_gib;
+                        c.policy.resources.disk_gib = if c.vm_provider == crate::VmProvider::Lima {
+                            c.total_storage_gib()
+                        } else {
+                            op.total_gib
+                        };
                         c.allocated_resources = Some(c.policy.resources.clone());
                     }
                     if let Some(backup) = &op.backup {
@@ -467,6 +538,7 @@ impl Agent {
                     Ok(())
                 })?;
                 self.cleanup_backups().await?;
+                self.cleanup_retired_runtimes(&self.store.load()?).await;
                 self.set_status("paused", if op.review.kind == Kind::DeleteAll {"Worker storage deleted and disabled; host enrollment remains"} else {"Storage verified; fresh health qualification is required before new assignments"}).await;
             }
         }
@@ -529,13 +601,26 @@ impl Agent {
         }
         let inventory = self.discover_storage(config);
         let adapter = vm.storage_adapter(&self.store.directory)?;
+        let runtime_missing = config.storage_layout.as_ref().is_some_and(|layout| {
+            crate::runtime_storage::validate_home(layout, &config.device_id).is_err()
+        });
         let missing: Vec<_> = config
             .storage_locations
             .iter()
             .filter(|l| {
                 !crate::storage::inspect_locations(std::slice::from_ref(l), &inventory.volumes)[0]
                     .available
-                    || adapter.validate(l).is_err()
+                    || (if runtime_missing {
+                        adapter.validate_backing(l)
+                    } else {
+                        adapter.validate(l)
+                    })
+                    .is_err()
+                    || (runtime_missing
+                        && config
+                            .storage_layout
+                            .as_ref()
+                            .is_some_and(|layout| layout.system_location_id == l.id))
             })
             .cloned()
             .collect();
@@ -622,27 +707,33 @@ impl Agent {
             .as_ref()
             .context("Missing recovery timing")?;
         let remaining: Vec<_> = config
-            .storage_locations
-            .iter()
-            .filter(|l| !missing.contains(l))
-            .cloned()
+            .total_locations()?
+            .into_iter()
+            .filter(|l| !missing.iter().any(|lost| lost.id == l.id))
             .collect();
         let total: u64 = remaining.iter().map(|l| l.allocation_gib).sum();
         match recovery_decision(config.storage_lifecycle.recovery_enabled, config.policy.enabled && !config.application_update_pending, saved.since, now, total, saved.error.is_some()) {
             RecoveryDecision::Rebuild => {
+                let layout = match config.resolve_storage_layout(&remaining) {
+                    Ok(layout) => layout,
+                    Err(error) => {
+                        self.set_status("error", format!("Remaining selected drives cannot contain the VM: {error}. Reconnect the original storage.")).await;
+                        return Ok(true);
+                    }
+                };
+                layout.validate_path()?;
                 let selections = remaining.iter().map(|l| Selection {expected_volume_id:Some(l.volume_id.clone()), id:Some(l.id.clone()), directory:l.directory.clone(), allocation_gib:l.allocation_gib}).collect::<Vec<_>>();
-                let mut volumes = inventory; self.reserve_boot_storage(config, &mut volumes)?;
-                crate::storage::plan_change(&selections, &self.store.directory.join("storage"), total, &volumes.volumes, &remaining, &crate::storage::allocated_bytes(&self.store.directory, &config.device_id, &remaining))?;
-                let plan = ChangePlan {revision:config.storage_revision, locations:remaining, total_gib:total, requires_restart:true,
-                    maintenance:Some(Review {kind:Kind::FailureRecovery, backup:None, minimum_gib:15, temporary_bytes:0,
+                crate::storage::plan_change(&selections, &self.store.directory.join("storage"), total, &inventory.volumes, &remaining, &crate::storage::allocated_bytes(&self.store.directory, &config.device_id, &config.storage_locations))?;
+                let plan = ChangePlan { layout:Some(layout), revision:config.storage_revision, locations:remaining, total_gib:total, requires_restart:true,
+                    maintenance:Some(Review {kind:Kind::FailureRecovery, backup:None, minimum_gib:30, temporary_bytes:0,
                         deletions:vec!["All local data from the entire previous pool".into()], downtime:"Rebuilding on remaining selected disks; workloads follow their Kubernetes retry policies".into()})};
                 self.store.update(|c| {
                     anyhow::ensure!(c.policy.enabled && c.storage_lifecycle.recovery_enabled, "Owner paused automatic recovery");
-                    let mut op = new_maintenance(c, &plan); op.phase = Phase::Reset;
+                    let mut op = new_maintenance(c, &plan)?; op.phase = Phase::Reset;
                     c.storage_lifecycle.maintenance = Some(op); c.storage_revision += 1; Ok(())
                 })?;
             }
-            RecoveryDecision::Insufficient => self.set_status("error", format!("Only {total} GiB remains on selected disks; at least 15 GiB plus the host reserve is required. Reconnect the original storage.")).await,
+            RecoveryDecision::Insufficient => self.set_status("error", format!("Only {total} GiB remains on selected disks; the VM needs at least 30 GiB total plus the host reserve. Reconnect the original storage.")).await,
             RecoveryDecision::Paused => self.set_status("paused", "Storage recovery paused by owner").await,
             _ => {}
         }
@@ -690,10 +781,11 @@ impl Agent {
             .await
     }
 
-    pub async fn preview_storage_request(
+    pub(super) async fn preview_storage_request_inner(
         &self,
         mut selections: Vec<Selection>,
         options: ReviewOptions,
+        prepared: Option<super::storage_layout::Prepared>,
     ) -> Result<ChangePlan> {
         let config = self.store.load()?;
         anyhow::ensure!(
@@ -722,6 +814,7 @@ impl Agent {
                 "Deletion cannot include replacement storage"
             );
             return Ok(ChangePlan {
+                layout: None,
                 revision: config.storage_revision,
                 locations: vec![],
                 total_gib: 0,
@@ -808,7 +901,7 @@ impl Agent {
             && options.restore_disk.is_none()
             && !returned
         {
-            return self.preview_storage_growth(selections).await;
+            return self.preview_storage_growth(selections, prepared).await;
         }
         let mut inventory = self.discover_storage(&config);
         let (locations, total_gib) = if multipass {
@@ -826,23 +919,36 @@ impl Agent {
             (vec![], size)
         } else {
             crate::storage::require_location_support(config.vm_provider)?;
-            self.reserve_boot_storage(&config, &mut inventory)?;
+            if prepared.is_none() {
+                self.reserve_boot_storage(&config, &mut inventory)?;
+            }
             let physical = crate::storage::allocated_bytes(
                 &self.store.directory,
                 &config.device_id,
                 &config.storage_locations,
             );
-            let locations = crate::storage::plan_change(
-                &selections,
-                &self.store.directory.join("storage"),
-                config.policy.resources.disk_gib,
-                &inventory.volumes,
-                &config.storage_locations,
-                &physical,
-            )?;
+            let locations = if let Some(prepared) = &prepared {
+                prepared.data.clone()
+            } else {
+                crate::storage::plan_disks(
+                    &selections,
+                    &self.store.directory.join("storage"),
+                    config.policy.resources.disk_gib,
+                    &inventory.volumes,
+                    &config.storage_locations,
+                    &physical,
+                )?
+            };
             let size = locations.iter().map(|l| l.allocation_gib).sum();
             (locations, size)
         };
+        if let Some(prepared) = &prepared {
+            let mut target_config = config.clone();
+            target_config.storage_layout = Some(prepared.layout.clone());
+            target_config.storage_locations = prepared.data.clone();
+            self.reserve_boot_storage(&target_config, &mut inventory)?;
+            inventory.layout = Some(prepared.layout.clone());
+        }
         let (minimum_gib, temporary_bytes, backup) = if requires_restart {
             anyhow::ensure!(vm.has_receipt()? && vm.info().await?.reachable, "Start the existing worker so NodeHarbor can inspect its data before reviewing a smaller allocation");
             let usage = vm.backup_inspect().await?;
@@ -878,7 +984,8 @@ impl Agent {
         } else {
             (15, 0, None)
         };
-        Ok(ChangePlan {revision: config.storage_revision, locations, total_gib, requires_restart,
+        Ok(ChangePlan {
+            layout: None,revision: config.storage_revision, locations, total_gib, requires_restart,
             maintenance: Some(Review {kind: Kind::ResizeRemove, backup, minimum_gib, temporary_bytes,
                 deletions: vec!["Previous managed storage images are replaced after backup verification; worker data is preserved".into()],
                 downtime: "Drain, verified backup, disk replacement, restore and Kubernetes capacity check; duration depends on data size and disk speed".into()})})
@@ -898,9 +1005,9 @@ impl Agent {
         } else if config.storage_locations.is_empty() {
             vec![self.store.directory.to_string_lossy().into()]
         } else {
-            config
-                .storage_locations
+            target
                 .iter()
+                .chain(&config.storage_locations)
                 .map(|l| l.directory.clone())
                 .collect()
         };
@@ -911,8 +1018,11 @@ impl Agent {
         );
         for directory in candidates {
             let path = crate::storage::canonical_directory(Path::new(&directory))?;
-            let lima_home = self.store.directory.join("lima");
+            let lima_home = config.runtime_home(&self.store.directory);
             let mut forbidden = vec![lima_home.clone()];
+            if let Some(layout) = &inventory.layout {
+                forbidden.push(layout.home());
+            }
             for old in config
                 .storage_locations
                 .iter()
@@ -932,25 +1042,40 @@ impl Agent {
             let Some(volume) = crate::storage::volume_for(&path, &inventory.volumes) else {
                 continue;
             };
-            let growth: u64 = target
+            let growth = target
                 .iter()
-                .filter(|l| {
-                    inventory
-                        .volumes
+                .filter(|location| {
+                    inventory.volumes.iter().any(|candidate| {
+                        candidate.id == location.volume_id
+                            && candidate.capacity_pool == volume.capacity_pool
+                    })
+                })
+                .try_fold(0_u64, |total, location| -> Result<u64> {
+                    let credit = config
+                        .storage_locations
                         .iter()
-                        .any(|v| v.id == l.volume_id && v.capacity_pool == volume.capacity_pool)
-                })
-                .map(|l| {
-                    l.allocation_gib
-                        .saturating_sub(physical.get(&l.id).copied().unwrap_or(0) / GIB)
-                })
-                .sum();
-            if volume.available_gib
-                >= bytes
-                    .div_ceil(GIB)
-                    .saturating_add(10)
-                    .saturating_add(growth)
-            {
+                        .find(|old| old.id == location.id)
+                        .filter(|old| {
+                            inventory.volumes.iter().any(|candidate| {
+                                candidate.id == old.volume_id
+                                    && candidate.capacity_pool == volume.capacity_pool
+                            })
+                        })
+                        .and_then(|old| physical.get(&old.id))
+                        .copied()
+                        .unwrap_or(0);
+                    total
+                        .checked_add(crate::storage_layout::remaining_bytes(
+                            location.allocation_gib,
+                            credit,
+                        )?)
+                        .context("Backup space calculation overflow")
+                })?;
+            let required = bytes
+                .checked_add(10 * GIB)
+                .and_then(|value| value.checked_add(growth))
+                .context("Backup space calculation overflow")?;
+            if volume.free_bytes() >= required {
                 if let Some((space, total)) = replacement {
                     if check_replacement_space(
                         space,
@@ -1041,6 +1166,9 @@ impl Agent {
         if settings.is_some() && config.vm_provider == crate::VmProvider::Lima {
             self.storage_runtime_preflight().await?;
         }
+        if plan.layout.is_some() {
+            self.checked_layout(&config, &plan)?;
+        }
         self.store.update(|c| {
             if let Some(settings) = &settings {
                 settings.validate(c)?;
@@ -1056,15 +1184,20 @@ impl Agent {
                 "Storage choices changed; review again"
             );
             c.storage_revision += 1;
-            c.format_version = 4;
+            c.format_version = 7;
             if !plan.requires_restart {
                 c.storage_lifecycle.disabled = review.kind == Kind::DeleteAll;
                 if !c.storage_lifecycle.disabled {
                     c.storage_lifecycle.initializing = true;
                     c.storage_lifecycle.pool_id = Some(uuid::Uuid::new_v4());
                 }
-                c.storage_locations = plan.locations.clone();
-                c.storage_lifecycle.configured_locations = plan.locations.clone();
+                c.storage_locations = if let Some(layout) = &plan.layout {
+                    layout.data_locations(&plan.locations)?
+                } else {
+                    plan.locations.clone()
+                };
+                c.storage_layout = plan.layout.clone();
+                c.storage_lifecycle.configured_locations = c.storage_locations.clone();
                 if c.storage_lifecycle.disabled {
                     c.policy.enabled = false;
                     c.prepare_requested = false;
@@ -1072,7 +1205,7 @@ impl Agent {
                     c.policy.resources.disk_gib = plan.total_gib;
                 }
             } else {
-                c.storage_lifecycle.maintenance = Some(new_maintenance(c, &plan));
+                c.storage_lifecycle.maintenance = Some(new_maintenance(c, &plan)?);
                 c.draining_since.get_or_insert_with(now_seconds);
                 if review.kind == Kind::DeleteAll {
                     c.policy.enabled = false;
@@ -1106,7 +1239,7 @@ impl Agent {
         } else if c.storage_locations.is_empty() {
             c.policy.resources.disk_gib
         } else {
-            c.storage_locations.iter().map(|l| l.allocation_gib).sum()
+            c.total_storage_gib()
         };
         inventory.configured_gib = if lifecycle.configured_locations.is_empty() {
             if lifecycle.disabled {
@@ -1119,7 +1252,12 @@ impl Agent {
                 .configured_locations
                 .iter()
                 .map(|l| l.allocation_gib)
-                .sum()
+                .sum::<u64>()
+                .saturating_add(if c.vm_provider == crate::VmProvider::Lima {
+                    c.system_gib()
+                } else {
+                    0
+                })
         };
         let excluded: Vec<_> = lifecycle
             .configured_locations
@@ -1167,10 +1305,21 @@ impl Agent {
     }
 }
 
-fn new_maintenance(config: &Configuration, plan: &ChangePlan) -> Maintenance {
-    let mut target = plan.locations.clone();
+fn new_maintenance(config: &Configuration, plan: &ChangePlan) -> Result<Maintenance> {
+    let mut layout = plan.layout.clone();
+    let mut target = if let Some(layout) = &layout {
+        layout.data_locations(&plan.locations)?
+    } else {
+        plan.locations.clone()
+    };
     for location in &mut target {
+        let old_id = location.id.clone();
         location.id = format!("nh{}", &uuid::Uuid::new_v4().simple().to_string()[..9]);
+        if let Some(layout) = &mut layout {
+            if layout.system_location_id == old_id {
+                layout.system_location_id = location.id.clone();
+            }
+        }
     }
     let mut previous = config.storage_locations.clone();
     for old in config
@@ -1191,7 +1340,11 @@ fn new_maintenance(config: &Configuration, plan: &ChangePlan) -> Maintenance {
             previous.push(old.clone());
         }
     }
-    Maintenance {
+    let total_gib = plan
+        .total_gib
+        .saturating_sub(layout.as_ref().map_or(0, |l| l.system_gib));
+    Ok(Maintenance {
+        layout,
         request_id: uuid::Uuid::new_v4(),
         pool_id: uuid::Uuid::new_v4(),
         generation: config.storage_generation + 1,
@@ -1201,12 +1354,12 @@ fn new_maintenance(config: &Configuration, plan: &ChangePlan) -> Maintenance {
             .expect("reviewed storage operation"),
         previous,
         target,
-        total_gib: plan.total_gib,
+        total_gib,
         phase: Phase::Drain,
         backup: None,
         paused: false,
         error: None,
-    }
+    })
 }
 
 async fn verified_file(backup: Backup, vm: &Vm) -> Result<std::fs::File> {

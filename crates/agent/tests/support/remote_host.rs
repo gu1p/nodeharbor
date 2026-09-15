@@ -16,6 +16,7 @@ impl Runner for NoVm {
 pub fn unprepared_agent(directory: &Path) -> Agent {
     let root = directory.canonicalize().unwrap();
     let volume = Volume {
+        available_bytes: None,
         drive_type: None,
         suggested_directory: None,
         id: "protocol-fixture-volume".into(),

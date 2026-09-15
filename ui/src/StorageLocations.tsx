@@ -8,12 +8,17 @@ export function StorageLocations({inventory,locations,onChange,onChoose,onDelete
 }) {
  const title=useId();const impact=useId();const focusNew=useRef(false);const drives=useRef<(HTMLSelectElement|null)[]>([]);
  useEffect(()=>{if(focusNew.current){drives.current[locations.length-1]?.focus();focusNew.current=false;}},[locations.length]);
+ const totalGib=locations.reduce((total,location)=>total+location.allocationGib,0)||(inventory.disabled?0:inventory.configuredGib||30);
+ const systemGib=inventory.layout?.systemGib??inventory.systemDisk?.allocationGib??16;
+ const savedSystem=locations.findIndex(l=>l.id===inventory.layout?.systemLocationId&&l.allocationGib>systemGib);
+ const systemIndex=savedSystem>=0?savedSystem:locations.findIndex(l=>l.allocationGib>systemGib);
  const editable=inventory.supported&&!!onChange&&!disabled;
  const change=(index:number,patch:Partial<StorageSelection>)=>onChange?.(locations.map((location,i)=>i===index?{...location,...patch}:location));
  return <section className="panel" aria-labelledby={title}>
   <h2 id={title}>Storage locations</h2>
   {inventory.defaultDirectory&&<p>The application-managed worker directory is <code>{inventory.defaultDirectory}</code>.</p>}
-  {inventory.systemDisk&&<p>The worker system disk uses a separate {inventory.systemDisk.allocationGib} GiB allowance in <code>{inventory.systemDisk.directory}</code>. This does not add workload storage.</p>}
+  {inventory.layout&&<p>VM directory: <code>{inventory.layout.runtimeDirectory}</code>. Its operating system is included in the selected allocation.</p>}
+  {!inventory.layout&&inventory.locations.length>0&&inventory.systemDisk&&<p>The existing VM has {inventory.systemDisk.allocationGib} GiB of system storage in <code>{inventory.systemDisk.directory}</code>, previously added outside your allocation. Its actual total is shown here. Saving storage changes moves the VM onto a selected drive.</p>}
   {!inventory.supported&&<p>{inventory.reason}</p>}
   {inventory.volumes.length===0?<p>No host volumes could be inspected.</p>:<ul>
    {inventory.volumes.map((volume,index)=><li key={`${volume.id}:${volume.mountPoint}:${index}`}>
@@ -26,7 +31,7 @@ export function StorageLocations({inventory,locations,onChange,onChoose,onDelete
    <p><code>{location.directory}</code> · {location.allocationGib} GiB configured</p>
    {!location.available&&<p role="alert">{location.reason}</p>}
   </div>)}
-  <p>{locations.reduce((total,location)=>total+location.allocationGib,0)||(inventory.disabled?0:inventory.configuredGib||30)} GiB allocated. Usable Kubernetes storage will be less because filesystem space and worker reserves are reserved.</p>
+  {inventory.supported?<><p>{totalGib} GiB total VM storage: {systemGib} GiB system + {Math.max(0,totalGib-systemGib)} GiB workload storage, before filesystem overhead.</p>{systemIndex>=0&&<p>The operating system is included on disk {systemIndex+1}. NodeHarbor leaves 10 GiB free on each selected capacity pool.</p>}</>:<p>{totalGib} GiB allocated. Usable Kubernetes storage will be less because filesystem space and worker reserves are reserved.</p>}
   <p id={impact}>Storage changes require a drain and worker restart. Running work may be interrupted at your drain deadline. Shrink allocation and Remove disk preserve worker data through verified backup and restore. Temporary backup space is required. Delete all worker storage permanently deletes worker data.</p>
   <p>Disconnecting any selected disk makes storage unavailable for the whole worker. Combining disks does not provide a backup.</p><p>Recommended during setup: review automatic recovery below and decide whether to allow whole-pool data loss after a missing disk.</p>
   {inventory.operation&&<p role="status">{inventory.operation.message}</p>}
@@ -91,6 +96,7 @@ export function StorageEditor({inventory,backend,onSaved,onDirtyChange,disabled,
  <p>Recommended if you accept data loss: after two minutes, recovery can discard local data from the entire old pool and rebuild on remaining selected disks. Pause and Stop override recovery. Existing installations keep waiting until you enable this setting.</p>
  <p>Workloads restart according to their Kubernetes retry policies. Every interrupted job is not guaranteed to retry.</p>
  {inventory.excluded?.map(location=><div key={location.id}><p><code>{location.directory}</code> remains excluded. Its stale managed storage must be replaced to restore capacity.</p><button type="button" disabled={blocked||!available||!location.available} onClick={()=>void review({restoreDisk:location.id})}>Restore this disk’s capacity</button></div>)}
+ {inventory.retainedRuntimeDirectories?.map(directory=><p key={directory} role="status">Retired VM cleanup pending: <code>{directory}</code>. Reconnect the original volume to finish cleanup.</p>)}
  {inventory.backupCleanup?.map(backup=><p key={backup.path} role="status">Backup cleanup pending: <code>{backup.path}</code> still occupies {(backup.bytes/1073741824).toFixed(2)} GiB. Reconnect the backup volume to finish cleanup.</p>)}
  {inventory.recoveryBackup&&<p role="status">Worker recovery backup: <code>{inventory.recoveryBackup.path}</code> · {(inventory.recoveryBackup.bytes/1073741824).toFixed(2)} GiB. Keep this file until storage recovery and verification finish. {inventory.recoveryBackup.verified?'Backup verified.':'Backup verification has not finished.'}</p>}
  {inventory.operation&&backend?.retryStorageMaintenance&&<button type="button" disabled={disabled||busy} onClick={()=>void retry()}>Retry storage maintenance</button>}
@@ -102,7 +108,8 @@ export function StorageEditor({inventory,backend,onSaved,onDirtyChange,disabled,
  <p>NodeHarbor prefers sufficient space on a selected volume. If necessary, choose another temporary folder. Backups remain private and are never extracted on this computer.</p>
  {editable&&<button type="button" disabled={blocked} onClick={()=>void review()}>Review storage changes</button>}
  {dirty&&<button type="button" disabled={blocked} onClick={discard}>Discard storage changes</button>}
- {plan&&<div role="region" aria-label="Storage change review"><p role="status">Reviewed: {plan.totalGib} GiB allocated.{plan.requiresRestart?' Applying this change drains work and restarts the worker.':' These locations will be used when you prepare the worker.'}</p>
+ {plan&&<div role="region" aria-label="Storage change review"><p role="status">Reviewed: {plan.totalGib} GiB total VM storage.{plan.requiresRestart?' Applying this change drains work and restarts the worker.':' These locations will be used when you prepare the worker.'}</p>
+ {plan.layout&&<p>{plan.layout.systemGib} GiB system + {plan.totalGib-plan.layout.systemGib} GiB workload storage. VM directory: <code>{plan.layout.runtimeDirectory}</code>.</p>}
  <ul>{plan.locations.map(location=><li key={location.id}><code>{location.directory}</code> · {location.allocationGib} GiB</li>)}</ul>
  {plan.maintenance&&<><p>Downtime: {plan.maintenance.downtime}</p><p>Temporary space: {(plan.maintenance.temporaryBytes/1073741824).toFixed(2)} GiB. Minimum resulting capacity: {plan.maintenance.minimumGib} GiB.</p>{plan.maintenance.backup&&<p>Backup location: <code>{plan.maintenance.backup.directory}</code>. The backup is removed after restore verification; unfinished cleanup remains visible.</p>}<ul>{plan.maintenance.deletions.map(item=><li key={item}>{item}</li>)}</ul></>}
  {plan.maintenance?.kind==='deleteAll'&&<><p>Host enrollment remains. All worker data is permanently deleted and storage stays disabled.</p><label><input type="checkbox" checked={confirmed} onChange={e=>setConfirmed(e.target.checked)}/>I confirm: delete all worker data</label></>}

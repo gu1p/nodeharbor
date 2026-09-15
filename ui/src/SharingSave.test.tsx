@@ -88,3 +88,24 @@ it('prevents duplicate commits while keeping the running worker pause control av
  reject(new Error('Settings changed; review again'));
  expect(await screen.findByRole('alert')).toHaveTextContent('Settings changed');
 });
+
+it('reviews a 30 to 100 GiB change as total VM space on the picked drive, including its system disk',async()=>{
+ const f=fixture();
+ const saved={id:'one',volumeId:'data',directory:'/data/NodeHarbor',allocationGib:30,available:true,reason:''};
+ f.setSnapshot({...f.snapshot(),resources:{cpus:8,memoryMib:16384,diskGib:25},worker:{installed:true,running:false},storage:{...f.snapshot().storage!,locations:[saved]}});
+ Object.assign(f.plan,{requiresRestart:true,layout:{version:1,systemLocationId:'one',volumeId:'data',runtimeDirectory:'/data/NodeHarbor/.nh12345678',systemGib:16}});
+ const user=userEvent.setup();render(<App backend={f.api}/>);
+ await user.click(await screen.findByRole('button',{name:'Sharing rules'}));
+ const allocation=screen.getByRole('spinbutton',{name:'Allocation for disk 1 (GiB)'});
+ expect(allocation).toHaveValue(30);await user.clear(allocation);await user.type(allocation,'100');
+ await user.click(screen.getByRole('button',{name:'Save sharing rules'}));
+ const review=await screen.findByRole('alertdialog');
+ expect(review).toHaveTextContent('100 GiB total VM storage');
+ expect(review).toHaveTextContent('16 GiB system');
+ expect(review).toHaveTextContent('84 GiB workload');
+ expect(review).toHaveTextContent('/data/NodeHarbor/.nh12345678');
+ expect(review).not.toHaveTextContent('Separate system disk');
+ await user.click(within(review).getByRole('button',{name:'Confirm and save'}));
+ expect(await screen.findByText(/saved.*storage update pending/i)).toBeVisible();
+ expect(f.api.action).not.toHaveBeenCalled();
+});

@@ -9,6 +9,8 @@ use std::{
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Volume {
+    #[serde(default)]
+    pub available_bytes: Option<u64>,
     pub id: String,
     pub capacity_pool: String,
     #[serde(default)]
@@ -56,6 +58,7 @@ pub struct LocationStatus {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Inventory {
+    pub layout: Option<crate::storage_layout::Layout>,
     pub active_gib: u64,
     pub configured_gib: u64,
     pub recovery_enabled: bool,
@@ -71,6 +74,7 @@ pub struct Inventory {
     pub revision: u64,
     pub operation: Option<OperationStatus>,
     pub retained_copies: Vec<LocationStatus>,
+    pub retained_runtime_directories: Vec<String>,
     pub system_disk: Option<SystemDisk>,
 }
 
@@ -87,6 +91,20 @@ pub fn reserve_system_disk(
     directory: &Path,
     remaining_gib: u64,
 ) -> Result<()> {
+    reserve_system_bytes(
+        volumes,
+        directory,
+        remaining_gib
+            .checked_mul(1 << 30)
+            .context("Storage allocation overflow")?,
+    )
+}
+
+pub fn reserve_system_bytes(
+    volumes: &mut [Volume],
+    directory: &Path,
+    remaining: u64,
+) -> Result<()> {
     let volume = volume_for(directory, volumes)
         .context("The application system-disk volume is unavailable")?;
     anyhow::ensure!(
@@ -95,16 +113,18 @@ pub fn reserve_system_disk(
         volume.reason
     );
     anyhow::ensure!(
-        volume.available_gib >= remaining_gib.saturating_add(10),
+        volume.free_bytes() >= remaining.saturating_add(10 << 30),
         "Not enough space for the separate system disk on {} ({}): it needs {} GiB more plus 10 GiB kept free, but only {} GiB is free",
-        volume.label, volume.mount_point, remaining_gib, volume.available_gib
+        volume.label, volume.mount_point, remaining.div_ceil(1 << 30), volume.available_gib
     );
     let pool = volume.capacity_pool.clone();
     for volume in volumes
         .iter_mut()
         .filter(|volume| volume.capacity_pool == pool)
     {
-        volume.available_gib = volume.available_gib.saturating_sub(remaining_gib);
+        let free = volume.free_bytes().saturating_sub(remaining);
+        volume.available_bytes = Some(free);
+        volume.available_gib = free / (1 << 30);
     }
     Ok(())
 }
@@ -112,6 +132,8 @@ pub fn reserve_system_disk(
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChangePlan {
+    #[serde(default)]
+    pub layout: Option<crate::storage_layout::Layout>,
     #[serde(default)]
     pub maintenance: Option<crate::storage_lifecycle::Review>,
     pub revision: u64,
@@ -130,6 +152,8 @@ pub struct OperationStatus {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Operation {
+    #[serde(default)]
+    pub layout: Option<crate::storage_layout::Layout>,
     pub previous: Vec<Location>,
     pub target: Vec<Location>,
     pub generation: u64,
@@ -236,6 +260,24 @@ pub fn plan(
 }
 
 /// Credits are actual allocated host bytes, never the logical size of a sparse image.
+pub fn plan_disks(
+    selections: &[Selection],
+    default_directory: &Path,
+    default_gib: u64,
+    volumes: &[Volume],
+    previous: &[Location],
+    allocated_bytes: &BTreeMap<String, u64>,
+) -> Result<Vec<Location>> {
+    plan_with_minimum(
+        selections,
+        default_directory,
+        default_gib,
+        volumes,
+        previous,
+        allocated_bytes,
+        1,
+    )
+}
 pub fn plan_change(
     selections: &[Selection],
     default_directory: &Path,
@@ -243,6 +285,25 @@ pub fn plan_change(
     volumes: &[Volume],
     previous: &[Location],
     allocated_bytes: &BTreeMap<String, u64>,
+) -> Result<Vec<Location>> {
+    plan_with_minimum(
+        selections,
+        default_directory,
+        default_gib,
+        volumes,
+        previous,
+        allocated_bytes,
+        15,
+    )
+}
+fn plan_with_minimum(
+    selections: &[Selection],
+    default_directory: &Path,
+    default_gib: u64,
+    volumes: &[Volume],
+    previous: &[Location],
+    allocated_bytes: &BTreeMap<String, u64>,
+    minimum: u64,
 ) -> Result<Vec<Location>> {
     anyhow::ensure!(
         selections.len() <= 16,
@@ -301,7 +362,7 @@ pub fn plan_change(
         );
         let budget = budgets
             .entry(&volume.capacity_pool)
-            .or_insert((0, volume.available_gib));
+            .or_insert((0, volume.free_bytes()));
         let old = selection
             .id
             .as_ref()
@@ -318,17 +379,19 @@ pub fn plan_change(
             .filter(|old| old.directory == path.to_string_lossy() && old.volume_id == volume.id)
             .and_then(|old| allocated_bytes.get(&old.id))
             .copied()
-            .unwrap_or(0)
-            / (1024 * 1024 * 1024);
+            .unwrap_or(0);
         budget.0 = budget
             .0
-            .checked_add(selection.allocation_gib.saturating_sub(credit))
+            .checked_add(crate::storage_layout::remaining_bytes(
+                selection.allocation_gib,
+                credit,
+            )?)
             .context("Storage allocation exceeds the supported size")?;
-        budget.1 = budget.1.min(volume.available_gib);
+        budget.1 = budget.1.min(volume.free_bytes());
         anyhow::ensure!(
-            budget.0 <= budget.1.saturating_sub(10),
+            budget.0 <= budget.1.saturating_sub(10 << 30),
             "Not enough free space on {} ({}): the selected allocations need {} GiB more, but only {} GiB can be allocated after keeping 10 GiB free. Choose a smaller allocation or another drive",
-            volume.label, volume.mount_point, budget.0, budget.1.saturating_sub(10)
+            if volume.label.is_empty() { "selected drive" } else { &volume.label }, volume.mount_point, budget.0.div_ceil(1 << 30), budget.1.saturating_sub(10 << 30) / (1 << 30)
         );
         let probe_directory = if path.exists() {
             path.as_path()
@@ -361,8 +424,8 @@ pub fn plan_change(
             .iter()
             .map(|location| location.allocation_gib)
             .sum::<u64>()
-            >= 15,
-        "Choose at least 15 GiB of combined worker storage"
+            >= minimum,
+        "Choose at least {minimum} GiB of combined worker storage"
     );
     // Existing attachment order remains stable. New disks append to the pool.
     result.sort_by_key(|location| {
@@ -389,11 +452,20 @@ pub fn inspect_locations(locations: &[Location], volumes: &[Volume]) -> Vec<Loca
 /// Physical system-image blocks on the application volume. Lima 2.2 uses
 /// `disk`; older owned instances may still use `diffdisk`.
 pub fn allocated_system_bytes(directory: &Path) -> Result<u64> {
+    allocated_system_bytes_at(&directory.join("lima"))
+}
+
+pub fn allocated_system_bytes_at(home: &Path) -> Result<u64> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        for name in ["disk", "diffdisk"] {
-            let path = directory.join("lima/worker").join(name);
+        for name in [
+            "worker/disk",
+            "worker/diffdisk",
+            ".nodeharbor-copy-worker/disk",
+            ".nodeharbor-copy-worker/diffdisk",
+        ] {
+            let path = home.join(name);
             let file = match std::fs::File::open(path) {
                 Ok(file) => file,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -401,14 +473,14 @@ pub fn allocated_system_bytes(directory: &Path) -> Result<u64> {
             };
             anyhow::ensure!(
                 file.metadata()?.is_file()
-                    && volume_identity_file(&file)? == volume_identity(directory)?,
+                    && volume_identity_file(&file)? == volume_identity(home)?,
                 "The worker system disk is not on its application volume"
             );
             return Ok(file.metadata()?.blocks().saturating_mul(512));
         }
     }
     #[cfg(not(unix))]
-    let _ = directory;
+    let _ = home;
     Ok(0)
 }
 
@@ -459,6 +531,7 @@ pub fn inventory(
     let mut volumes: Vec<_> = disks.iter().map(|disk| {
         let filesystem = disk.file_system().to_string_lossy().to_lowercase();
         let mut volume = Volume {
+            available_bytes: Some(disk.available_space()),
             drive_type: match disk.kind() { sysinfo::DiskKind::HDD => Some("hdd".into()), sysinfo::DiskKind::SSD => Some("ssd".into()), _ => None },
             suggested_directory: Some(disk.mount_point().join("NodeHarbor").to_string_lossy().into()),
             id: String::new(), capacity_pool: String::new(), label: disk.name().to_string_lossy().into(),
@@ -519,6 +592,7 @@ pub fn inventory(
     }
     let statuses = inspect_locations(locations, &volumes);
     Inventory {
+        layout: None,
         active_gib: locations
             .iter()
             .map(|location| location.allocation_gib)
@@ -544,6 +618,7 @@ pub fn inventory(
         revision: 0,
         operation: None,
         retained_copies: Vec::new(),
+        retained_runtime_directories: Vec::new(),
         system_disk: (provider == crate::VmProvider::Lima).then(|| SystemDisk {
             directory: directory.join("lima/worker").to_string_lossy().into(),
             allocation_gib: boot_gib,
@@ -844,5 +919,12 @@ mod label_tests {
             assert!(device_label(directory.path(), device).is_none(), "{label}");
             std::fs::remove_file(path).unwrap();
         }
+    }
+}
+
+impl Volume {
+    pub fn free_bytes(&self) -> u64 {
+        self.available_bytes
+            .unwrap_or_else(|| self.available_gib.saturating_mul(1 << 30))
     }
 }

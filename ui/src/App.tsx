@@ -67,7 +67,7 @@ export function App({backend}:{backend:Backend}) {
   try {
    const saved=await backend.savePolicy(sharingReview.policy,sharingReview.revision,sharingReview.plan);
    acceptSnapshot(saved,true);if(saved.storage)setStorageDraft(createStorageDraft(saved.storage));
-   setSharingReview(null);setNotice(saved.storage?.operation?'Sharing rules saved; storage change is in progress':'Sharing rules and storage saved');
+   setSharingReview(null);setNotice((saved.storage?.operation||sharingReview?.plan.requiresRestart)?'Sharing rules saved; storage update pending':'Sharing rules and storage saved');
   }catch(e){setSaveError(errorText(e));}finally{setSavePhase(null);savePending.current=false;}
  }
  const changeStorageDraft=(draft:StorageDraft)=>{setStorageDraft(draft);setSharingReview(null);setSaveError('');};

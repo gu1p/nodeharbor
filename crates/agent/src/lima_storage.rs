@@ -216,6 +216,9 @@ impl LimaStorage {
 
     /// Validate saved ownership, privacy, volume identity and registration before
     /// starting a worker. This only reads host files and never invokes Lima.
+    pub(crate) fn validate_backing(&self, location: &Location) -> Result<()> {
+        self.backing(location).map(|_| ())
+    }
     pub fn validate(&self, location: &Location) -> Result<()> {
         self.linked(location).map(|_| ())
     }
@@ -858,7 +861,7 @@ fn stage_copy(
 }
 
 #[cfg(unix)]
-fn extents(file: &File) -> Result<Vec<(u64, u64)>> {
+pub(crate) fn extents(file: &File) -> Result<Vec<(u64, u64)>> {
     use std::os::fd::AsRawFd;
     let length = file.metadata()?.len();
     let mut offset = 0;
@@ -885,7 +888,7 @@ fn extents(file: &File) -> Result<Vec<(u64, u64)>> {
 }
 
 #[cfg(not(unix))]
-fn extents(_file: &File) -> Result<Vec<(u64, u64)>> {
+pub(crate) fn extents(_file: &File) -> Result<Vec<(u64, u64)>> {
     anyhow::bail!("Verified sparse copying requires macOS or Linux")
 }
 

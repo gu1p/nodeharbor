@@ -52,7 +52,7 @@ fn disk(root: &Path, id: &str, name: &str) -> Location {
         id: name.into(),
         directory: root.join(name).to_string_lossy().into(),
         volume_id: nodeharbor_agent::storage::volume_identity(root).unwrap(),
-        allocation_gib: 15,
+        allocation_gib: if name == "nhsecond" { 30 } else { 15 },
     };
     let paths =
         nodeharbor_agent::lima_storage::disk_paths(&root.join("lima"), id, &location).unwrap();
@@ -85,7 +85,7 @@ async fn fixture(root: &Path) -> (Agent, Arc<Host>, Vec<Location>, tokio::task::
         id: id.clone(),
         running: Mutex::new(true),
         events: Mutex::new(vec![]),
-        pool: json!({"deviceId":id,"poolId":id,"generation":1,"migrationComplete":true,"capacityBytes":29u64<<30,"disks":locations.iter().map(|l|json!({"id":l.id,"allocationBytes":15u64<<30})).collect::<Vec<_>>()}),
+        pool: json!({"deviceId":id,"poolId":id,"generation":1,"migrationComplete":true,"capacityBytes":44u64<<30,"disks":locations.iter().map(|l|json!({"id":l.id,"allocationBytes":l.allocation_gib<<30})).collect::<Vec<_>>()}),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -107,6 +107,7 @@ async fn fixture(root: &Path) -> (Agent, Arc<Host>, Vec<Location>, tokio::task::
         root,
         host.clone(),
         vec![Volume {
+            available_bytes: None,
             drive_type: None,
             suggested_directory: None,
             id: locations[0].volume_id.clone(),
@@ -253,7 +254,13 @@ async fn permanent_loss_keeps_configured_locations_and_controller_outage_prevent
     let saved = agent.store.load().unwrap();
     let op = saved.storage_lifecycle.maintenance.unwrap();
     assert_eq!(op.phase, Phase::Reset);
-    assert_eq!(op.total_gib, 15);
+    assert_eq!(op.total_gib, 14);
+    let layout = op
+        .layout
+        .as_ref()
+        .expect("Recovery must keep the system image within the remaining selected allocation");
+    assert_eq!(layout.system_gib, 16);
+    assert!(Path::new(&layout.runtime_directory).starts_with(&locations[1].directory));
     assert_eq!(op.target.len(), 1);
     assert_ne!(op.target[0].id, locations[1].id);
     assert_eq!(saved.storage_locations, locations);
@@ -323,6 +330,7 @@ async fn unfinished_growth_or_move_cannot_be_reclassified_as_destructive_disk_lo
         .update(|c| {
             c.storage_lifecycle.recovery_enabled = true;
             c.storage_operation = Some(nodeharbor_agent::storage::Operation {
+                layout: None,
                 previous: locations.clone(),
                 target: locations.clone(),
                 generation: 2,

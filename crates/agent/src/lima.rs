@@ -83,7 +83,15 @@ impl LimaRunner {
                 crate::runtime_platform::preflight().await?;
             }
         }
+        let temporary = self.home.join("_tmp");
+        if self.home.is_dir() && !temporary.exists() {
+            std::fs::create_dir(&temporary)?;
+        }
         let mut command = tokio::process::Command::new(&self.program);
+        if temporary.is_dir() {
+            command.env("TMPDIR", &temporary);
+        }
+        command.env("XDG_CACHE_HOME", self.home.join("_cache"));
         command
             .arg("--tty=false")
             .args(args)
@@ -129,6 +137,14 @@ impl Runner for LimaRunner {
         limit: u64,
     ) -> Result<()> {
         let mut command = tokio::process::Command::new(&self.program);
+        let temporary = self.home.join("_tmp");
+        if self.home.is_dir() && !temporary.exists() {
+            std::fs::create_dir(&temporary)?;
+        }
+        if temporary.is_dir() {
+            command.env("TMPDIR", temporary);
+        }
+        command.env("XDG_CACHE_HOME", self.home.join("_cache"));
         command
             .arg("--tty=false")
             .args(args)

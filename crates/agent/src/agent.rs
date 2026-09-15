@@ -1,4 +1,5 @@
 mod sharing_settings;
+mod storage_layout;
 mod storage_lifecycle;
 mod storage_operations;
 use crate::{worker_transition, Configuration, Store, Vm, VmInfo, WorkerAction, WorkerInput};
@@ -164,7 +165,23 @@ impl Agent {
     fn vm(&self, config: &Configuration) -> Result<Vm> {
         let runner = match &self.runner {
             Some(runner) => runner.clone(),
-            None => Vm::native_runner(config.vm_provider, &self.store.directory)?,
+            None => Vm::native_runner_at(
+                config.vm_provider,
+                &config.runtime_home(&self.store.directory),
+            )?,
+        };
+        let runner = if self.runner.is_none() {
+            if let Some(layout) = &config.storage_layout {
+                Arc::new(crate::runtime_storage::SelectedRuntimeRunner {
+                    inner: runner,
+                    layout: layout.clone(),
+                    owner: config.device_id.clone(),
+                }) as Arc<dyn crate::Runner>
+            } else {
+                runner
+            }
+        } else {
+            runner
         };
         Vm::managed(
             &config.device_id,
@@ -177,6 +194,10 @@ impl Agent {
                 log: self.activity.clone(),
             }),
         )
+        .map(|vm| {
+            vm.with_runtime_home(config.runtime_home(&self.store.directory))
+                .with_system_gib(config.system_gib())
+        })
     }
     pub fn local_vm(&self) -> Result<Vm> {
         self.vm(&self.store.load()?)
@@ -245,12 +266,7 @@ impl Agent {
         );
         if !current.storage_locations.is_empty() {
             anyhow::ensure!(
-                policy.resources.disk_gib
-                    == current
-                        .storage_locations
-                        .iter()
-                        .map(|location| location.allocation_gib)
-                        .sum::<u64>(),
+                policy.resources.disk_gib == current.total_storage_gib(),
                 "Use Storage locations to change the worker storage allowance"
             );
             // Preserve the selected volume's actual failure before a failed
@@ -267,12 +283,7 @@ impl Agent {
             );
             if !config.storage_locations.is_empty() {
                 anyhow::ensure!(
-                    policy.resources.disk_gib
-                        == config
-                            .storage_locations
-                            .iter()
-                            .map(|location| location.allocation_gib)
-                            .sum::<u64>(),
+                    policy.resources.disk_gib == config.total_storage_gib(),
                     "Storage choices changed; reload sharing rules"
                 );
             }
@@ -860,6 +871,7 @@ impl Agent {
         self.runtime.lock().await.worker = info.clone();
         if info.stopped {
             self.cleanup_storage_copies(&config, &vm).await;
+            self.cleanup_retired_runtimes(&config).await;
         }
         if config.application_update_pending && !info.running {
             self.runtime.lock().await.application_update_ready = true;

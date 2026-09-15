@@ -9,8 +9,11 @@ pub fn managed_vm_name(device_id: &str) -> anyhow::Result<String> {
 mod store;
 pub use store::{Configuration, Store};
 pub mod lima_storage;
+mod runtime_image;
 pub mod runtime_platform;
+mod runtime_storage;
 pub mod storage;
+pub mod storage_layout;
 
 mod vm;
 pub use vm::{CommandOutput, MultipassRunner, Runner, Vm, VmInfo, WorkloadInventory};
@@ -48,3 +51,6 @@ pub fn close_behavior(background: bool, active: bool, explicit_quit: bool) -> Cl
         CloseBehavior::Exit
     }
 }
+
+#[cfg(test)]
+mod runtime_storage_native_tests;

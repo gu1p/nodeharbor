@@ -12,10 +12,24 @@ import ctypes.util
 from contextlib import ExitStack
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import subprocess
 import tempfile
 import time
+
+
+def saved_total_locations(saved):
+    layout = saved.get('storageLayout')
+    assert layout and layout['version'] == 1, 'The saved VM layout is missing'
+    primary = [location for location in saved['storageLocations']
+               if location['id'] == layout['systemLocationId']]
+    assert len(primary) == 1, 'The saved system allocation has no selected location'
+    assert layout['volumeId'] == primary[0]['volumeId'], 'The system volume differs from the selection'
+    assert PurePosixPath(layout['runtimeDirectory']).parent == PurePosixPath(primary[0]['directory']), 'The VM is outside the picked storage folder'
+    assert isinstance(layout['systemGib'], int) and layout['systemGib'] >= 16
+    return [(location['directory'], location['allocationGib'] +
+             (layout['systemGib'] if location['id'] == layout['systemLocationId'] else 0),
+             location['volumeId']) for location in saved['storageLocations']]
 
 
 def run(args):
@@ -134,7 +148,7 @@ def run(args):
                            XDG_CONFIG_HOME=str(temporary / 'xdg-config'),
                            XDG_DATA_HOME=str(temporary / 'xdg-data'),
                            NO_AT_BRIDGE='0', GTK_MODULES='atk-bridge', XDG_CURRENT_DESKTOP='XFCE')
-        directories = [Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='nodeharbor-gui-storage-', dir=root)))
+        directories = [Path(stack.enter_context(tempfile.TemporaryDirectory(prefix='nhgui-', dir=root)))
                        for root in args.storage_root]
         snapshot = json.loads(subprocess.check_output([str(args.agent.resolve()), '--config-dir', str(config), 'status'], env=environment, text=True, timeout=45))
         eligible = [v for v in snapshot['storage']['volumes'] if v['eligible'] and v['id']]
@@ -197,7 +211,7 @@ def run(args):
             else:
                 raise AssertionError('Combined GUI save did not persist the selected disks')
             expected = [(str(p), n, v['id']) for p, n, v in zip(directories, args.allocation_gib, selected)]
-            actual = [(l['directory'], l['allocationGib'], l['volumeId']) for l in saved['storageLocations']]
+            actual = saved_total_locations(saved)
             assert actual == expected, 'The saved locations differ from the GUI choices'
             assert saved['policy']['resources']['diskGib'] == sum(args.allocation_gib)
             assert saved['policy']['resources']['cpus'] == 1 and saved['policy']['idleOnly']
@@ -209,6 +223,7 @@ def run(args):
                 control(f'Allocation for disk {index} (GiB)', 'entry')
             reopened = json.loads((config / 'config.json').read_text())
             assert reopened['storageLocations'] == saved['storageLocations']
+            assert reopened['storageLayout'] == saved['storageLayout']
             assert reopened['policy'] == saved['policy']
             report = dict(version=args.version, commit=args.commit, packagedGuiPassed=True,
                           navigationDraftPassed=True, combinedSavePassed=True, reopenPassed=True,

@@ -38,7 +38,7 @@ esac
     let receipt = serde_json::json!({"version":2,"provider":"lima","name":"worker","deviceId":config.device_id}).to_string();
     std::fs::write(directory.path().join("worker.receipt.json"), &receipt).unwrap();
     let original_tmp = std::env::var_os("TMPDIR");
-    let expected_tmp = original_tmp.clone().unwrap_or_else(|| "unset".into());
+    let expected_tmp = home.join("_tmp");
     let vm = agent.local_vm().unwrap();
 
     let error = vm.start().await.unwrap_err().to_string();

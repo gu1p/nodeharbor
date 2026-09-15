@@ -19,6 +19,7 @@ impl Runner for StoppedWorker {
 
 fn operation(phase: Phase) -> Maintenance {
     Maintenance {
+        layout: None,
         request_id: uuid::Uuid::new_v4(),
         pool_id: uuid::Uuid::new_v4(),
         generation: 2,

@@ -22,6 +22,7 @@ fn fixture(directory: &std::path::Path) -> Agent {
         directory,
         Arc::new(NoRuntimeWrites),
         vec![nodeharbor_agent::storage::Volume {
+            available_bytes: None,
             drive_type: None,
             suggested_directory: None,
             id: "fixture".into(),
@@ -47,7 +48,7 @@ fn fixture(directory: &std::path::Path) -> Agent {
             config.device_token = Some("test-only".into());
             config.policy.resources.cpus = 1;
             config.policy.resources.memory_mib = 2048;
-            config.policy.resources.disk_gib = 15;
+            config.policy.resources.disk_gib = 30;
             Ok(())
         })
         .unwrap();
@@ -95,6 +96,7 @@ async fn an_explicit_pause_pauses_pending_storage_maintenance_as_well_as_sharing
         .update(|config| {
             config.policy.enabled = true;
             config.storage_operation = Some(Operation {
+                layout: None,
                 previous: vec![],
                 target: vec![target],
                 generation: 1,

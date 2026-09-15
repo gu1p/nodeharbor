@@ -21,6 +21,20 @@ function Editor({initial=[]}:{initial?:Selection[]}) {
  return <StorageLocations inventory={inventory} locations={locations} onChange={setLocations} disabled={false}/>;
 }
 
+it('includes the operating system in the allocation while editing a picked drive',async()=>{
+ const user=userEvent.setup();render(<Editor/>);
+ await user.click(screen.getByRole('button',{name:'Add drive'}));
+ await user.selectOptions(screen.getByRole('combobox',{name:'Drive for disk 1'}),'external');
+ const region=screen.getByRole('region',{name:'Storage locations'});
+ expect(region).toHaveTextContent('30 GiB total VM storage');
+ expect(region).toHaveTextContent('16 GiB system + 14 GiB workload');
+ const allocation=screen.getByRole('spinbutton',{name:'Allocation for disk 1 (GiB)'});
+ await user.clear(allocation);await user.type(allocation,'100');
+ expect(region).toHaveTextContent('100 GiB total VM storage');
+ expect(region).toHaveTextContent('16 GiB system + 84 GiB workload');
+ expect(region).toHaveTextContent(/operating system.*disk 1/i);
+});
+
 it('shows the resolved default and understandable volume capacities before setup',()=>{
  render(<Editor/>);
  const region=screen.getByRole('region',{name:'Storage locations'});
@@ -135,8 +149,8 @@ it('explains automatic recovery consent and distinguishes active from configured
 it('explains combined capacity and the effect of disconnecting a selected disk',()=>{
  render(<Editor initial={[{directory:'/one',allocationGib:30},{directory:'/two',allocationGib:40}]}/>);
  const region=screen.getByRole('region',{name:'Storage locations'});
- expect(region).toHaveTextContent('70 GiB allocated');
- expect(region).toHaveTextContent(/usable.*less.*reserved/i);
+ expect(region).toHaveTextContent('70 GiB total VM storage');
+ expect(region).toHaveTextContent(/before filesystem overhead/i);
  expect(region).toHaveTextContent(/disconnect.*whole worker/i);
 });
 
@@ -208,4 +222,10 @@ it('can discard a storage draft to save unrelated sharing rules',async()=>{
  await user.click(screen.getByRole('button',{name:'Save sharing rules'}));
  expect(api.savePolicy).toHaveBeenCalledWith(expect.objectContaining({idleOnly:true}));
  expect(api.applyStorage).not.toHaveBeenCalled();
+});
+
+it('keeps a retired VM on an unavailable drive visible until its cleanup finishes',()=>{
+ const retired= {...inventory,retainedRuntimeDirectories:['/Volumes/Offline/NodeHarbor/.nhprevious']};
+ render(<StorageEditor inventory={retired} disabled={false}/>);
+ expect(screen.getByText(/Retired VM cleanup pending/)).toHaveTextContent('/Volumes/Offline/NodeHarbor/.nhprevious');
 });

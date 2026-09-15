@@ -62,6 +62,12 @@ pub struct Configuration {
     #[serde(default)]
     pub storage_boot_gib: u64,
     #[serde(default)]
+    pub storage_layout: Option<crate::storage_layout::Layout>,
+    #[serde(default)]
+    pub runtime_relocation: Option<crate::runtime_storage::Relocation>,
+    #[serde(default)]
+    pub runtime_retained: Vec<crate::storage_layout::Layout>,
+    #[serde(default)]
     pub storage_lifecycle: crate::storage_lifecycle::Lifecycle,
     #[serde(default)]
     pub recreation: Option<WorkerRecreation>,
@@ -96,6 +102,9 @@ impl Default for Configuration {
             storage_operation: None,
             storage_retained: Vec::new(),
             storage_boot_gib: 0,
+            storage_layout: None,
+            runtime_relocation: None,
+            runtime_retained: Vec::new(),
             storage_lifecycle: Default::default(),
             recreation: None,
         }
@@ -202,10 +211,10 @@ impl Store {
     }
     pub fn load(&self) -> Result<Configuration> {
         let file = File::open(self.path()).context("Cannot read NodeHarbor settings")?;
-        let config: Configuration = serde_json::from_reader(file)
+        let mut config: Configuration = serde_json::from_reader(file)
             .context("NodeHarbor settings are damaged; the original file has been preserved")?;
         anyhow::ensure!(
-            matches!(config.format_version, 1..=6),
+            matches!(config.format_version, 1..=7),
             "These settings require a newer NodeHarbor application"
         );
         anyhow::ensure!(
@@ -226,6 +235,26 @@ impl Store {
             "Storage operations require versioned settings; the original file has been preserved"
         );
         Uuid::parse_str(&config.device_id).context("Invalid saved device identity")?;
+        if config.vm_provider == crate::VmProvider::Lima
+            && config.format_version < 7
+            && !config.storage_locations.is_empty()
+            && config.storage_operation.is_none()
+            && config.storage_lifecycle.maintenance.is_none()
+        {
+            let system = config.system_gib();
+            config.policy.resources.disk_gib = config.total_storage_gib();
+            if let Some(resources) = &mut config.allocated_resources {
+                resources.disk_gib = resources
+                    .disk_gib
+                    .checked_add(system)
+                    .context("Storage allocation overflow")?;
+            }
+            config.format_version = 7;
+        }
+        anyhow::ensure!(
+            config.storage_layout.is_none() || config.format_version >= 7,
+            "VM storage placement requires newer settings"
+        );
         Ok(config)
     }
     pub fn update(
@@ -237,6 +266,7 @@ impl Store {
         self.check_configuration_authority(&config)?;
         let before = config.clone();
         change(&mut config)?;
+        config.format_version = config.format_version.max(before.format_version);
         // All local entry points, including CLI and another app process, advance
         // the same revision under the existing cross-process settings lock.
         if before.policy != config.policy
@@ -247,6 +277,7 @@ impl Store {
             || before.device_token != config.device_token
             || before.storage_revision != config.storage_revision
             || before.storage_locations != config.storage_locations
+            || before.storage_layout != config.storage_layout
             || before.storage_lifecycle.recovery_enabled
                 != config.storage_lifecycle.recovery_enabled
             || before.remote.revision != config.remote.revision

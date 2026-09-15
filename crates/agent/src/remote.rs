@@ -17,9 +17,9 @@ impl Agent {
         mut hardware: Resources,
         storage: &crate::storage::Inventory,
     ) -> ConfigurationReport {
-        let home = self.store.directory.join("lima");
+        let home = config.runtime_home(&self.store.directory);
         let disk_path = home
-            .join("worker/diffdisk")
+            .join("worker/disk")
             .canonicalize()
             .or_else(|_| home.canonicalize())
             .or_else(|_| self.store.directory.canonicalize())
@@ -60,7 +60,7 @@ impl Agent {
             worker_disk_location: if config.remote.consent
                 && config.vm_provider == crate::VmProvider::Lima
             {
-                Some(home.join("worker/diffdisk").to_string_lossy().into_owned())
+                Some(home.join("worker/disk").to_string_lossy().into_owned())
             } else {
                 None
             },

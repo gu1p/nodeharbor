@@ -8,6 +8,7 @@ impl Agent {
     pub(super) async fn preview_storage_growth(
         &self,
         selections: Vec<Selection>,
+        prepared: Option<super::storage_layout::Prepared>,
     ) -> Result<ChangePlan> {
         let config = self.store.load()?;
         crate::storage::require_location_support(config.vm_provider)?;
@@ -20,7 +21,9 @@ impl Agent {
         let agent = self.clone();
         tokio::task::spawn_blocking(move || {
             let mut inventory = agent.discover_storage(&config);
-            agent.reserve_boot_storage(&config, &mut inventory)?;
+            if prepared.is_none() {
+                agent.reserve_boot_storage(&config, &mut inventory)?;
+            }
             let default = inventory
                 .default_directory
                 .context("The runtime does not report its managed storage directory")?;
@@ -29,15 +32,20 @@ impl Agent {
                 &config.device_id,
                 &config.storage_locations,
             );
-            let locations = crate::storage::plan_change(
-                &selections,
-                Path::new(&default),
-                config.policy.resources.disk_gib,
-                &inventory.volumes,
-                &config.storage_locations,
-                &physical,
-            )?;
+            let locations = if let Some(prepared) = &prepared {
+                prepared.data.clone()
+            } else {
+                crate::storage::plan_disks(
+                    &selections,
+                    Path::new(&default),
+                    config.policy.resources.disk_gib,
+                    &inventory.volumes,
+                    &config.storage_locations,
+                    &physical,
+                )?
+            };
             Ok(ChangePlan {
+                layout: None,
                 maintenance: None,
                 revision: config.storage_revision,
                 total_gib: locations
@@ -134,6 +142,8 @@ impl Agent {
             );
             location.id = reviewed.id.clone();
         }
+        let layout = self.checked_layout(&config, &plan)?;
+        let data = layout.data_locations(&checked.locations)?;
         self.store.update(|current| {
             if let Some(settings) = &settings {
                 settings.validate(current)?;
@@ -151,16 +161,17 @@ impl Agent {
                     == (current.vm_created || self.vm(current)?.has_receipt()?),
                 "The required worker restart changed; review storage again"
             );
-            current.format_version = 4;
-            current.storage_boot_gib = self.boot_disk_gib(current);
+            current.format_version = 7;
+            current.storage_boot_gib = layout.system_gib;
             current.storage_revision = current
                 .storage_revision
                 .checked_add(1)
                 .context("Storage revision overflow")?;
             if checked.requires_restart {
                 current.storage_operation = Some(Operation {
+                    layout: Some(layout.clone()),
                     previous: current.storage_locations.clone(),
-                    target: checked.locations.clone(),
+                    target: data.clone(),
                     generation: current
                         .storage_generation
                         .checked_add(1)
@@ -175,8 +186,9 @@ impl Agent {
                     current.storage_lifecycle.pool_id = Some(uuid::Uuid::new_v4());
                 }
                 current.storage_lifecycle.disabled = false;
-                current.storage_lifecycle.configured_locations = checked.locations.clone();
-                current.storage_locations = checked.locations.clone();
+                current.storage_layout = Some(layout.clone());
+                current.storage_lifecycle.configured_locations = data.clone();
+                current.storage_locations = data.clone();
                 current.policy.resources.disk_gib = checked.total_gib;
             }
             if let Some(settings) = &settings {
@@ -187,28 +199,47 @@ impl Agent {
         self.snapshot().await
     }
 
-    fn boot_disk_gib(&self, config: &Configuration) -> u64 {
-        if config.storage_boot_gib > 0 {
-            config.storage_boot_gib
-        } else {
-            config
-                .allocated_resources
-                .as_ref()
-                .map_or(16, |resources| resources.disk_gib)
-        }
-    }
-
     pub(super) fn discover_storage(&self, config: &Configuration) -> crate::storage::Inventory {
         let mut inventory = crate::storage::inventory(
             config.vm_provider,
             &self.store.directory,
             &config.storage_locations,
-            self.boot_disk_gib(config),
+            0,
         );
         if let Some(volumes) = &self.storage_volumes {
             inventory.volumes = volumes.clone();
-            inventory.locations =
-                crate::storage::inspect_locations(&config.storage_locations, volumes);
+        }
+        inventory.locations =
+            crate::storage::inspect_locations(&config.storage_locations, &inventory.volumes);
+        inventory.layout = config.storage_layout.clone();
+        if config.vm_provider == crate::VmProvider::Lima {
+            inventory.system_disk = Some(crate::storage::SystemDisk {
+                directory: config
+                    .runtime_home(&self.store.directory)
+                    .join("worker")
+                    .to_string_lossy()
+                    .into(),
+                allocation_gib: config.system_gib(),
+            });
+            let directory = config
+                .storage_layout
+                .as_ref()
+                .and_then(|layout| {
+                    config
+                        .storage_locations
+                        .iter()
+                        .find(|l| l.id == layout.system_location_id)
+                })
+                .map(|l| Path::new(&l.directory))
+                .unwrap_or(&self.store.directory);
+            if let Some(id) =
+                crate::storage::volume_for(directory, &inventory.volumes).map(|v| v.id.clone())
+            {
+                if let Some(volume) = inventory.volumes.iter_mut().find(|v| v.id == id) {
+                    volume.configured_gib =
+                        volume.configured_gib.saturating_add(config.system_gib());
+                }
+            }
         }
         inventory
     }
@@ -218,15 +249,42 @@ impl Agent {
         config: &Configuration,
         inventory: &mut crate::storage::Inventory,
     ) -> Result<()> {
+        let home = config.runtime_home(&self.store.directory);
         let allocated = if self.vm(config)?.has_receipt()? {
-            crate::storage::allocated_system_bytes(&self.store.directory)? / (1024 * 1024 * 1024)
+            crate::storage::allocated_system_bytes_at(&home)?
         } else {
             0
         };
-        let remaining = self.boot_disk_gib(config).saturating_sub(allocated);
-        crate::storage::reserve_system_disk(
+        let directory = if let Some(layout) = &config.storage_layout {
+            &config
+                .storage_locations
+                .iter()
+                .chain(
+                    config
+                        .storage_operation
+                        .iter()
+                        .flat_map(|op| op.target.iter()),
+                )
+                .chain(
+                    config
+                        .storage_lifecycle
+                        .maintenance
+                        .iter()
+                        .flat_map(|op| op.target.iter()),
+                )
+                .find(|l| l.id == layout.system_location_id)
+                .context("The VM system location is missing")?
+                .directory
+        } else {
+            self.store
+                .directory
+                .to_str()
+                .context("Invalid settings path")?
+        };
+        let remaining = crate::storage_layout::remaining_bytes(config.system_gib(), allocated)?;
+        crate::storage::reserve_system_bytes(
             &mut inventory.volumes,
-            &self.store.directory,
+            Path::new(directory),
             remaining,
         )
     }
@@ -267,9 +325,11 @@ impl Agent {
                     && !current.vm_created,
                 "Storage settings changed during preparation; retry"
             );
-            current.format_version = 4;
+            current.format_version = 7;
             current.storage_boot_gib = 16;
-            current.storage_locations = plan.locations;
+            let layout = plan.layout.clone().context("Missing VM storage layout")?;
+            current.storage_locations = layout.data_locations(&plan.locations)?;
+            current.storage_layout = Some(layout);
             current.storage_revision = current
                 .storage_revision
                 .checked_add(1)
@@ -285,12 +345,16 @@ impl Agent {
     ) -> Result<()> {
         self.storage_runtime_preflight().await?;
         self.validate_storage(config)?;
+        if let Some(layout) = &config.storage_layout {
+            crate::runtime_storage::prepare_home(layout, &config.device_id)?;
+        }
         let adapter = vm.storage_adapter(&self.store.directory)?;
         for location in &config.storage_locations {
             // Creation reopens only an exactly matching owned image. Its receipt
             // and volume checks protect retries after an interrupted first boot.
             adapter.create(location).await?;
         }
+        let vm = self.prepared_storage_vm(config, vm).await?;
         vm.create_with_storage(
             &config.policy.resources,
             &self.store.directory,
@@ -307,6 +371,58 @@ impl Agent {
                 .context("Storage generation overflow")?,
         )
         .await
+    }
+
+    pub(super) async fn prepared_storage_vm(&self, config: &Configuration, vm: &Vm) -> Result<Vm> {
+        self.storage_runtime_preflight().await?;
+        if let Some(layout) = &config.storage_layout {
+            crate::runtime_storage::prepare_home(layout, &config.device_id)?;
+        }
+        let image = if self.runner.is_none() {
+            if let Some(layout) = &config.storage_layout {
+                self.set_status(
+                    "preparing",
+                    "Downloading and verifying the VM image on the selected drive",
+                )
+                .await;
+                let runtime: Value =
+                    serde_json::from_str(include_str!("../../../../runtime/lima.json"))?;
+                let image = &runtime["images"][std::env::consts::ARCH];
+                Some(
+                    crate::runtime_image::download(
+                        layout,
+                        &config.device_id,
+                        image["location"]
+                            .as_str()
+                            .context("Missing pinned VM image")?,
+                        image["digest"]
+                            .as_str()
+                            .context("Missing pinned VM image digest")?,
+                        &|| {
+                            let current = self.store.load()?;
+                            anyhow::ensure!(
+                                (current.prepare_requested
+                                    || current
+                                        .storage_lifecycle
+                                        .maintenance
+                                        .as_ref()
+                                        .is_some_and(|op| !op.paused && op.error.is_none()))
+                                    && !current.stop_requested
+                                    && current.storage_layout == config.storage_layout,
+                                "VM preparation canceled by owner"
+                            );
+                            Ok(())
+                        },
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        Ok(image.map_or_else(|| vm.clone(), |image| vm.clone().with_boot_image(image)))
     }
 
     pub(super) async fn finish_initial_storage(
@@ -346,12 +462,19 @@ impl Agent {
             &config.storage_locations,
             &state,
         )?;
+        if let Some(layout) = &config.storage_layout {
+            self.verify_runtime_placement(layout, &config.device_id)
+                .await?;
+            if self.runner.is_none() {
+                crate::runtime_image::cleanup(layout, &config.device_id)?;
+            }
+        }
         self.store.update(|current| {
             anyhow::ensure!(
                 current.storage_locations == config.storage_locations,
                 "Storage choices changed during preparation"
             );
-            current.format_version = 4;
+            current.format_version = 7;
             current.storage_generation = generation;
             current.storage_lifecycle.initializing = false;
             Ok(())
@@ -381,6 +504,11 @@ impl Agent {
                 location.reason = "Will be created when the worker is prepared".into();
             }
         }
+        inventory.retained_runtime_directories = config
+            .runtime_retained
+            .iter()
+            .map(|r| r.runtime_directory.clone())
+            .collect();
         inventory.retained_copies =
             crate::storage::inspect_locations(&config.storage_retained, &inventory.volumes);
         inventory.operation = config
@@ -403,6 +531,24 @@ impl Agent {
                 .into(),
             });
         self.lifecycle_snapshot(config, &mut inventory);
+        if let Some(relocation) = &config.runtime_relocation {
+            let message = format!("Original VM retained at {} until the selected-drive VM is verified and cleanup finishes", relocation.source);
+            if let Some(operation) = &mut inventory.operation {
+                operation.message.push_str(&format!(". {message}"));
+            } else {
+                inventory.operation = Some(OperationStatus {
+                    phase: "cleanup".into(),
+                    message,
+                });
+            }
+        }
+        if let Ok(total) = config.total_locations() {
+            for status in &mut inventory.locations {
+                if let Some(location) = total.iter().find(|l| l.id == status.location.id) {
+                    status.location.allocation_gib = location.allocation_gib;
+                }
+            }
+        }
         inventory
     }
 
@@ -411,6 +557,11 @@ impl Agent {
             return Ok(());
         }
         crate::storage::require_location_support(config.vm_provider)?;
+        if self.runner.is_none() && (config.vm_created || self.vm(config)?.has_receipt()?) {
+            if let Some(layout) = &config.storage_layout {
+                crate::runtime_storage::validate_home(layout, &config.device_id)?;
+            }
+        }
         let mut inventory = self.discover_storage(config);
         self.reserve_boot_storage(config, &mut inventory)?;
         let selections = config
@@ -428,7 +579,7 @@ impl Agent {
             &config.device_id,
             &config.storage_locations,
         );
-        let checked = crate::storage::plan_change(
+        let checked = crate::storage::plan_disks(
             &selections,
             &self.store.directory.join("storage"),
             config.policy.resources.disk_gib,
@@ -463,12 +614,7 @@ impl Agent {
             // Per-volume validation accounts for sparse growth and shared space.
             // Do not substitute free space beside the app's settings directory.
             observation.resources.disk_gib = if self.validate_storage(config).is_ok() {
-                config
-                    .storage_locations
-                    .iter()
-                    .map(|location| location.allocation_gib)
-                    .sum::<u64>()
-                    .saturating_add(10)
+                config.total_storage_gib().saturating_add(10)
             } else {
                 0
             };
@@ -558,7 +704,17 @@ impl Agent {
             return Err(error);
         }
         if operation.phase == "pending" {
-            self.validate_storage(config)?;
+            if operation
+                .layout
+                .as_ref()
+                .is_some_and(|l| config.storage_layout.as_ref() != Some(l))
+            {
+                for location in &operation.previous {
+                    adapter.validate(location)?;
+                }
+            } else {
+                self.validate_storage(config)?;
+            }
             // A stopped worker must also be cordoned before it can boot for
             // maintenance; its old service may still be enabled in the guest.
             let drain = self
@@ -601,6 +757,11 @@ impl Agent {
             )
             .await;
             self.validate_storage_targets(config, operation)?;
+            if let Some(layout) = &operation.layout {
+                if self.relocate_runtime(config, vm, layout).await? {
+                    return Ok(());
+                }
+            }
             for target in &operation.target {
                 if adapter.inspect(target).await.is_ok() {
                     continue;
@@ -697,6 +858,11 @@ impl Agent {
             info.stopped,
             "Stop the worker before completing the storage change"
         );
+        if let Some(layout) = &operation.layout {
+            self.verify_runtime_placement(layout, &config.device_id)
+                .await?;
+        }
+        self.cleanup_runtime_relocation(config, vm).await?;
         self.store.update(|current| {
             let pending = current
                 .storage_operation
@@ -714,11 +880,8 @@ impl Agent {
                 );
             current.storage_locations = operation.target.clone();
             current.storage_generation = operation.generation;
-            current.policy.resources.disk_gib = operation
-                .target
-                .iter()
-                .map(|location| location.allocation_gib)
-                .sum();
+            current.format_version = 7;
+            current.policy.resources.disk_gib = current.total_storage_gib();
             if let Some(resources) = &mut current.allocated_resources {
                 resources.disk_gib = current.policy.resources.disk_gib;
             }
@@ -766,8 +929,13 @@ impl Agent {
         config: &Configuration,
         operation: &Operation,
     ) -> Result<()> {
-        let mut inventory = self.discover_storage(config);
-        self.reserve_boot_storage(config, &mut inventory)?;
+        let mut target_config = config.clone();
+        target_config.storage_locations = operation.target.clone();
+        if let Some(layout) = &operation.layout {
+            target_config.storage_layout = Some(layout.clone());
+        }
+        let mut inventory = self.discover_storage(&target_config);
+        self.reserve_boot_storage(&target_config, &mut inventory)?;
         let mut physical = crate::storage::allocated_bytes(
             &self.store.directory,
             &config.device_id,
@@ -799,7 +967,7 @@ impl Agent {
                 allocation_gib: location.allocation_gib,
             })
             .collect::<Vec<_>>();
-        let checked = crate::storage::plan_change(
+        let checked = crate::storage::plan_disks(
             &selections,
             &self.store.directory.join("storage"),
             30,

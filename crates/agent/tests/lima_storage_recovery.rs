@@ -207,6 +207,7 @@ async fn fixture(
         &directory,
         host.clone(),
         vec![Volume {
+            available_bytes: None,
             drive_type: None,
             suggested_directory: None,
             id: volume.clone(),
@@ -255,6 +256,7 @@ async fn fixture(
 }
 fn operation(kind: Kind, phase: Phase, target: Vec<Location>) -> Maintenance {
     Maintenance {
+        layout: None,
         request_id: uuid::Uuid::new_v4(),
         pool_id: uuid::Uuid::parse_str(POOL).unwrap(),
         generation: 2,
@@ -325,7 +327,12 @@ async fn retained_lima_shrink_refreshes_boot_contract_and_resumes_after_boot_int
     }
     let saved = agent.store.load().unwrap();
     assert!(saved.storage_lifecycle.maintenance.is_none());
-    assert_eq!(saved.policy.resources.disk_gib, 15);
+    assert_eq!(saved.policy.resources.disk_gib, 31);
+    assert_eq!(
+        saved.allocated_resources.as_ref().unwrap().disk_gib,
+        31,
+        "Completing a legacy journal must include the OS exactly once after reopening"
+    ); // 15 data + the retained 16 GiB system image.
     assert_eq!(saved.storage_lifecycle.pool_id.unwrap().to_string(), POOL);
     let s = host.state.lock().unwrap();
     assert_eq!(s.pool.as_ref().unwrap()["poolId"], POOL);
@@ -404,6 +411,7 @@ async fn both_storage_drains_publish_non_acceptance_and_honor_the_deadline() {
                 c.policy.drain_seconds = 0;
                 if legacy {
                     c.storage_operation = Some(Operation {
+                        layout: None,
                         previous: vec![],
                         target: vec![target],
                         generation: 2,
@@ -478,6 +486,7 @@ async fn controller_outage_stops_a_running_storage_change_before_disk_work() {
         .store
         .update(|c| {
             c.storage_operation = Some(Operation {
+                layout: None,
                 previous: vec![],
                 target: vec![target],
                 generation: 2,
