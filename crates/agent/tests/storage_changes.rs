@@ -1,6 +1,7 @@
 use nodeharbor_agent::{Agent, CommandOutput, Runner, VmProvider};
 use std::sync::{Arc, Mutex};
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn test_directory() -> tempfile::TempDir {
     // Native socket path validation also applies to injected storage runners.
     if cfg!(unix) {
