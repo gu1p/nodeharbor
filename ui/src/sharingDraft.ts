@@ -8,8 +8,8 @@ export interface StorageDraft {
  savedSingleDiskGib:number;
 }
 export function createStorageDraft(inventory:StorageInventory):StorageDraft {
- const locations=inventory.locations.map(({id,volumeId,directory,allocationGib})=>({id,expectedVolumeId:volumeId,directory,allocationGib}));
- const singleDiskGib=inventory.configuredGib||30;
+ const locations=(inventory.pendingUpdate?.locations??inventory.locations).map(({id,volumeId,directory,allocationGib})=>({id,expectedVolumeId:volumeId,directory,allocationGib}));
+ const singleDiskGib=inventory.pendingUpdate?.totalGib??(inventory.configuredGib||30);
  return {revision:inventory.revision??0,locations,saved:locations,temporaryDirectory:'',singleDiskGib,savedSingleDiskGib:singleDiskGib};
 }
 export function storageDraftDirty(draft:StorageDraft):boolean {

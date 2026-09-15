@@ -9,8 +9,9 @@ export function StorageLocations({inventory,locations,onChange,onChoose,onDelete
  const title=useId();const impact=useId();const focusNew=useRef(false);const drives=useRef<(HTMLSelectElement|null)[]>([]);
  useEffect(()=>{if(focusNew.current){drives.current[locations.length-1]?.focus();focusNew.current=false;}},[locations.length]);
  const totalGib=locations.reduce((total,location)=>total+location.allocationGib,0)||(inventory.disabled?0:inventory.configuredGib||30);
- const systemGib=inventory.layout?.systemGib??inventory.systemDisk?.allocationGib??16;
- const savedSystem=locations.findIndex(l=>l.id===inventory.layout?.systemLocationId&&l.allocationGib>systemGib);
+ const layout=inventory.pendingUpdate?.layout??inventory.layout;
+ const systemGib=layout?.systemGib??inventory.systemDisk?.allocationGib??16;
+ const savedSystem=locations.findIndex(l=>l.id===layout?.systemLocationId&&l.allocationGib>systemGib);
  const systemIndex=savedSystem>=0?savedSystem:locations.findIndex(l=>l.allocationGib>systemGib);
  const editable=inventory.supported&&!!onChange&&!disabled;
  const change=(index:number,patch:Partial<StorageSelection>)=>onChange?.(locations.map((location,i)=>i===index?{...location,...patch}:location));
@@ -23,17 +24,18 @@ export function StorageLocations({inventory,locations,onChange,onChoose,onDelete
   {inventory.volumes.length===0?<p>No host volumes could be inspected.</p>:<ul>
    {inventory.volumes.map((volume,index)=><li key={`${volume.id}:${volume.mountPoint}:${index}`}>
     <strong>{volume.label||'Unnamed volume'}</strong> · <code>{volume.mountPoint}</code>
-    <p>{volume.filesystem||'Unknown filesystem'} · {volume.driveType?volume.driveType.toUpperCase():'Drive type unknown'} · {volume.availableGib} GiB available · {volume.configuredGib} GiB configured</p>
+    <p>{volume.filesystem||'Unknown filesystem'} · {volume.driveType?volume.driveType.toUpperCase():'Drive type unknown'} · {volume.availableGib} GiB available · {volume.configuredGib} GiB {inventory.pendingUpdate?'currently applied':'configured'}</p>
     {!volume.eligible&&<p>{volume.reason}</p>}
    </li>)}
   </ul>}
   {inventory.locations.map(location=><div key={location.id}>
-   <p><code>{location.directory}</code> · {location.allocationGib} GiB configured</p>
+   <p><code>{location.directory}</code> · {location.allocationGib} GiB {inventory.pendingUpdate?'currently applied':'configured'}</p>
    {!location.available&&<p role="alert">{location.reason}</p>}
   </div>)}
   {inventory.supported?<><p>{totalGib} GiB total VM storage: {systemGib} GiB system + {Math.max(0,totalGib-systemGib)} GiB workload storage, before filesystem overhead.</p>{systemIndex>=0&&<p>The operating system is included on disk {systemIndex+1}. NodeHarbor leaves 10 GiB free on each selected capacity pool.</p>}</>:<p>{totalGib} GiB allocated. Usable Kubernetes storage will be less because filesystem space and worker reserves are reserved.</p>}
   <p id={impact}>Storage changes require a drain and worker restart. Running work may be interrupted at your drain deadline. Shrink allocation and Remove disk preserve worker data through verified backup and restore. Temporary backup space is required. Delete all worker storage permanently deletes worker data.</p>
   <p>Disconnecting any selected disk makes storage unavailable for the whole worker. Combining disks does not provide a backup.</p><p>Recommended during setup: review automatic recovery below and decide whether to allow whole-pool data loss after a missing disk.</p>
+  {inventory.pendingUpdate&&<p role="status">{inventory.pendingUpdate.totalGib} GiB saved; storage update pending.</p>}
   {inventory.operation&&<p role="status">{inventory.operation.message}</p>}
   {!!inventory.retainedCopies?.length&&<div><h3>Previous storage copies</h3><p>These copies occupy space without adding worker capacity. Returned stale disks remain excluded until you restore their capacity. To finish deleting all storage, reconnect their original volumes and use Delete all worker storage again.</p><ul>{inventory.retainedCopies.map(copy=><li key={`${copy.id}:${copy.directory}`}><code>{copy.directory}</code> · previous {copy.allocationGib} GiB disk{!copy.available&&<p>{copy.reason}</p>}</li>)}</ul></div>}
   <fieldset disabled={!editable} className="rules-fields" aria-describedby={impact}>
@@ -58,7 +60,7 @@ export function StorageLocations({inventory,locations,onChange,onChoose,onDelete
 }
 
 export function StorageEditor({inventory,backend,onSaved,onDirtyChange,disabled,draft,onDraftChange}:{draft?:StorageDraft;onDraftChange?:(draft:StorageDraft)=>void;inventory:StorageInventory;backend?:Backend;onSaved?:(snapshot:Snapshot)=>void;onDirtyChange?:(dirty:boolean)=>void;disabled:boolean}) {
- const [localLocations,setLocalLocations]=useState<StorageSelection[]>(()=>inventory.locations.map(({id,directory,allocationGib,volumeId})=>({id,directory,allocationGib,expectedVolumeId:volumeId})));
+ const [localLocations,setLocalLocations]=useState<StorageSelection[]>(()=>createStorageDraft(inventory).locations);
  const [localDirty,setDirty]=useState(false);
  const locations=draft?.locations??localLocations;const dirty=draft?storageDraftDirty(draft):localDirty;
  const setLocations=(next:StorageSelection[])=>{if(draft&&onDraftChange)onDraftChange({...draft,locations:next});else setLocalLocations(next);};
@@ -77,7 +79,7 @@ export function StorageEditor({inventory,backend,onSaved,onDirtyChange,disabled,
   const saved=inventory.locations.map(l=>[l.id,l.directory,l.allocationGib,l.volumeId]);
   setDirty(JSON.stringify(selected)!==JSON.stringify(saved));setLocations(next);setPlan(null);setError('');setConfirmed(false);
  };
- const discard=()=>{if(draft&&onDraftChange)onDraftChange(createStorageDraft(inventory));else {setLocations(inventory.locations.map(({id,directory,allocationGib,volumeId})=>({id,directory,allocationGib,expectedVolumeId:volumeId})));setSingleDiskGib(inventory.configuredGib||30);setTemporaryDirectory('');}setPlan(null);setError('');setConfirmed(false);setDirty(false);};
+ const discard=()=>{if(draft&&onDraftChange)onDraftChange(createStorageDraft(inventory));else {setLocations(createStorageDraft(inventory).locations);setSingleDiskGib(inventory.configuredGib||30);setTemporaryDirectory('');}setPlan(null);setError('');setConfirmed(false);setDirty(false);};
  async function review(options?:StorageReviewOptions){setBusy(true);setError('');setPlan(null);setConfirmed(false);try{
   const selected=options?.deleteAll?[]:locations;
   if(inventory.supported&&!options?.deleteAll&&!options?.restoreDisk&&selected.some(location=>!location.expectedVolumeId||!location.directory.trim()))throw new Error('Select a drive and a writable folder for every disk before review.');
@@ -90,7 +92,7 @@ export function StorageEditor({inventory,backend,onSaved,onDirtyChange,disabled,
  async function retry(){setBusy(true);setError('');try{onSaved?.(await backend!.retryStorageMaintenance!());}catch(error){setError(String(error));}finally{setBusy(false);}}
  return <><StorageLocations inventory={inventory} locations={locations} onChange={editable?change:undefined} onChoose={backend?.chooseStorageDirectory?index=>void choose(index):undefined} onDeleteAll={()=>void review({deleteAll:true})} disabled={blocked} deleteDisabled={deleteBlocked}/>
  <section className="panel" aria-label="Storage recovery">
- <p>{inventory.activeGib??inventory.locations.reduce((n,l)=>n+l.allocationGib,0)} GiB active · {inventory.configuredGib??inventory.locations.reduce((n,l)=>n+l.allocationGib,0)} GiB configured</p>
+ <p>{inventory.activeGib??inventory.locations.reduce((n,l)=>n+l.allocationGib,0)} GiB active · {inventory.configuredGib??inventory.locations.reduce((n,l)=>n+l.allocationGib,0)} GiB {inventory.pendingUpdate?'currently applied':'configured'}</p>
  {inventory.disabled&&<p role="status">Worker storage is disabled. Configure storage before preparing this worker again. Host enrollment remains.</p>}
  <label><input type="checkbox" checked={inventory.recoveryEnabled??false} disabled={disabled||busy||!backend?.setStorageRecovery} onChange={event=>void recovery(event.target.checked)}/>Automatically recover after a missing disk</label>
  <p>Recommended if you accept data loss: after two minutes, recovery can discard local data from the entire old pool and rebuild on remaining selected disks. Pause and Stop override recovery. Existing installations keep waiting until you enable this setting.</p>

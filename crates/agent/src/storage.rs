@@ -59,6 +59,8 @@ pub struct LocationStatus {
 #[serde(rename_all = "camelCase")]
 pub struct Inventory {
     pub layout: Option<crate::storage_layout::Layout>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_update: Option<PendingUpdate>,
     pub active_gib: u64,
     pub configured_gib: u64,
     pub recovery_enabled: bool,
@@ -76,6 +78,14 @@ pub struct Inventory {
     pub retained_copies: Vec<LocationStatus>,
     pub retained_runtime_directories: Vec<String>,
     pub system_disk: Option<SystemDisk>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingUpdate {
+    pub locations: Vec<Location>,
+    pub layout: crate::storage_layout::Layout,
+    pub total_gib: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -593,6 +603,7 @@ pub fn inventory(
     let statuses = inspect_locations(locations, &volumes);
     Inventory {
         layout: None,
+        pending_update: None,
         active_gib: locations
             .iter()
             .map(|location| location.allocation_gib)

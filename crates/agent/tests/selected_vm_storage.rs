@@ -76,6 +76,7 @@ async fn saves_100_total_on_the_selected_drive_with_25_free_on_settings_volume()
                         directory: folder.to_string_lossy().into(),
                         allocation_gib: 30,
                     }];
+                    c.storage_lifecycle.configured_locations = c.storage_locations.clone();
                     c.allocated_resources = Some(c.policy.resources.clone());
                 }
                 Ok(())
@@ -104,6 +105,20 @@ async fn saves_100_total_on_the_selected_drive_with_25_free_on_settings_volume()
             .await
             .unwrap();
         let reopened = Agent::open_with_runner_and_volumes(&root, runner.clone(), volumes).unwrap();
+        let inventory = serde_json::to_value(reopened.snapshot().await.unwrap().storage).unwrap();
+        if existing {
+            assert_eq!(inventory["locations"][0]["allocationGib"], 46);
+            assert_eq!(
+                inventory["pendingUpdate"]["locations"][0]["allocationGib"],
+                100
+            );
+            assert_eq!(inventory["pendingUpdate"]["totalGib"], 100);
+            assert_eq!(inventory["pendingUpdate"]["layout"]["systemGib"], 16);
+            assert_eq!(inventory["activeGib"], 0);
+            assert_eq!(inventory["configuredGib"], 46);
+        } else {
+            assert!(inventory["pendingUpdate"].is_null());
+        }
         let saved = serde_json::to_value(reopened.store.load().unwrap()).unwrap();
         assert_eq!(saved["policy"]["resources"]["diskGib"], 100);
         let (disks, layout) = if existing {

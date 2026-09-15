@@ -22,3 +22,12 @@ it('refreshes a clean draft after committed changes while preserving a backup fo
  expect(refreshed.revision).toBe(3);expect(refreshed.locations).toEqual([]);
  expect(refreshed.temporaryDirectory).toBe('/backup');expect(storageDraftDirty(refreshed)).toBe(false);
 });
+it('opens pending selections as the saved draft without replacing the applied inventory',()=>{
+ const pendingUpdate={totalGib:100,layout:{version:1,systemLocationId:'one',volumeId:'data',runtimeDirectory:'/data/new/.nh12345678',systemGib:16},locations:[{id:'one',volumeId:'data',directory:'/data/new',allocationGib:99},{id:'two',volumeId:'other',directory:'/other/worker',allocationGib:1}]};
+ const pending=Object.assign({...inventory,revision:3,configuredGib:40},{pendingUpdate});
+ const draft=createStorageDraft(pending);
+ expect(draft.locations).toEqual([{id:'one',expectedVolumeId:'data',directory:'/data/new',allocationGib:99},{id:'two',expectedVolumeId:'other',directory:'/other/worker',allocationGib:1}]);
+ expect(draft.singleDiskGib).toBe(100);expect(storageDraftDirty(draft)).toBe(false);
+ expect(pending.locations[0].allocationGib).toBe(40);
+ expect(refreshStorageDraft(createStorageDraft(inventory),pending).locations).toEqual(draft.locations);
+});

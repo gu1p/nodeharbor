@@ -106,6 +106,38 @@ it('reviews a 30 to 100 GiB change as total VM space on the picked drive, includ
  expect(review).toHaveTextContent('/data/NodeHarbor/.nh12345678');
  expect(review).not.toHaveTextContent('Separate system disk');
  await user.click(within(review).getByRole('button',{name:'Confirm and save'}));
- expect(await screen.findByText(/saved.*storage update pending/i)).toBeVisible();
+ expect(await screen.findByText('Sharing rules saved; storage update pending')).toBeVisible();
+ expect(f.api.action).not.toHaveBeenCalled();
+});
+
+it('keeps the saved 100 GiB selection visible while growth is pending, including after reopening',async()=>{
+ const f=fixture();
+ const applied={id:'one',volumeId:'data',directory:'/data/NodeHarbor',allocationGib:30,available:true,reason:''};
+ f.setSnapshot({...f.snapshot(),worker:{installed:true,running:false},storage:{...f.snapshot().storage!,locations:[applied]}});
+ Object.assign(f.plan,{requiresRestart:true,layout:{version:1,systemLocationId:'one',volumeId:'data',runtimeDirectory:'/data/NodeHarbor/.nh12345678',systemGib:16}});
+ f.api.savePolicy=vi.fn(async(policy:Policy)=>{
+  const current=f.snapshot();
+  const storage=Object.assign({...current.storage!,revision:2,activeGib:0,configuredGib:30,operation:{phase:'pending',message:'Storage change paused. Prepare the worker to continue.'}},
+   {pendingUpdate:{locations:f.plan.locations,totalGib:100,layout:f.plan.layout!}});
+  const next={...current,policy,storage,configuration:{...current.configuration!,revision:5,policy}};
+  f.setSnapshot(next);return next;
+ });
+ const user=userEvent.setup();const mounted=render(<App backend={f.api}/>);
+ await user.click(await screen.findByRole('button',{name:'Sharing rules'}));
+ const allocation=screen.getByRole('spinbutton',{name:'Allocation for disk 1 (GiB)'});
+ await user.clear(allocation);await user.type(allocation,'100');
+ await user.click(screen.getByRole('button',{name:'Save sharing rules'}));
+ await user.click(await screen.findByRole('button',{name:'Confirm and save'}));
+ expect(await screen.findByText('Sharing rules saved; storage update pending')).toBeVisible();
+ expect(screen.getByRole('spinbutton',{name:'Allocation for disk 1 (GiB)'})).toHaveValue(100);
+ expect(screen.getByText(/100 GiB saved.*pending/i)).toBeVisible();
+ expect(screen.getAllByText(/30 GiB currently applied/i)[0]).toBeVisible();
+ await user.click(screen.getByRole('button',{name:'Your machine'}));
+ await user.click(screen.getByRole('button',{name:'Sharing rules'}));
+ expect(screen.getByRole('spinbutton',{name:'Allocation for disk 1 (GiB)'})).toHaveValue(100);
+ mounted.unmount();render(<App backend={f.api}/>);
+ await user.click(await screen.findByRole('button',{name:'Sharing rules'}));
+ expect(screen.getByRole('spinbutton',{name:'Allocation for disk 1 (GiB)'})).toHaveValue(100);
+ expect(screen.getByRole('spinbutton',{name:'Allocation for disk 1 (GiB)'})).toBeDisabled();
  expect(f.api.action).not.toHaveBeenCalled();
 });

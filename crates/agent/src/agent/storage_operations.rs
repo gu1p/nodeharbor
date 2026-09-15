@@ -531,6 +531,30 @@ impl Agent {
                 .into(),
             });
         self.lifecycle_snapshot(config, &mut inventory);
+        // Saved selections remain visible while the verified, applied pool is
+        // still being changed. Do not advertise them as active worker capacity.
+        let pending = config
+            .storage_operation
+            .as_ref()
+            .and_then(|op| op.layout.as_ref().map(|layout| (layout, &op.target)))
+            .or_else(|| {
+                config
+                    .storage_lifecycle
+                    .maintenance
+                    .as_ref()
+                    .and_then(|op| op.layout.as_ref().map(|layout| (layout, &op.target)))
+            });
+        inventory.pending_update = pending.and_then(|(layout, target)| {
+            let locations = layout.total_locations(target).ok()?;
+            Some(crate::storage::PendingUpdate {
+                total_gib: locations
+                    .iter()
+                    .map(|location| location.allocation_gib)
+                    .sum(),
+                locations,
+                layout: layout.clone(),
+            })
+        });
         if let Some(relocation) = &config.runtime_relocation {
             let message = format!("Original VM retained at {} until the selected-drive VM is verified and cleanup finishes", relocation.source);
             if let Some(operation) = &mut inventory.operation {

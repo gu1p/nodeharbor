@@ -84,6 +84,9 @@ qualification is a separate check; GUI-only evidence never claims a VM boot.
 - CLI supervision overflowed a 1 MiB process stack, reproducing the Windows
   startup failure. Supervision now keeps its large operation futures on the
   heap; a process-level stack-limit test also runs on Unix.
+- Reopening a saved growth request displayed the previous allocation while
+  maintenance was pending. The editor now shows the saved target separately
+  from the currently applied allocation, without granting active capacity.
 - A Linux folder at the QEMU user-network socket boundary passed review and
   failed when starting the packaged VM. Review now includes QEMU's longer
   socket name and rejects that folder before writing configuration or VM files.
