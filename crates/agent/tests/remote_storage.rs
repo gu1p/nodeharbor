@@ -104,7 +104,12 @@ async fn fixture() -> (
     tokio::task::JoinHandle<()>,
 ) {
     use axum::{routing::post, Json, Router};
-    let directory = tempfile::tempdir().unwrap();
+    // These protocol fixtures still exercise Lima's real Unix socket path
+    // limit. macOS's per-user temporary directory can exceed that limit.
+    let directory = tempfile::Builder::new()
+        .prefix("nh")
+        .tempdir_in("/tmp")
+        .unwrap();
     let root = directory.path().canonicalize().unwrap();
     let store = Store::open(&root).unwrap();
     let host = Arc::new(Host {
@@ -183,15 +188,12 @@ async fn stage(agent: &Agent) {
     let root = &agent.store.directory;
     agent.receive_configuration(request(agent,"preview",json!({"type":"storagePreview","selections":[{"directory":root.join("first"),"allocationGib":30},{"directory":root.join("second"),"allocationGib":40}],"options":{}}))).unwrap();
     agent.tick().await.unwrap();
-    let plan = agent
-        .configuration_report()
-        .unwrap()
-        .receipts
-        .last()
-        .unwrap()
+    let report = agent.configuration_report().unwrap();
+    let receipt = report.receipts.last().unwrap();
+    let plan = receipt
         .result
         .clone()
-        .unwrap();
+        .unwrap_or_else(|| panic!("The fixture's storage preview was rejected: {receipt:?}"));
     agent
         .receive_configuration(request(
             agent,

@@ -1,6 +1,18 @@
 use nodeharbor_agent::{Agent, CommandOutput, Runner, VmProvider};
 use std::sync::{Arc, Mutex};
 
+fn test_directory() -> tempfile::TempDir {
+    // Native socket path validation also applies to injected storage runners.
+    if cfg!(unix) {
+        tempfile::Builder::new()
+            .prefix("nh")
+            .tempdir_in("/tmp")
+            .unwrap()
+    } else {
+        tempfile::tempdir().unwrap()
+    }
+}
+
 #[derive(Default)]
 struct Runtime(Mutex<Vec<Vec<String>>>);
 
@@ -64,7 +76,7 @@ fn selected_volume(
 #[tokio::test]
 async fn selected_100_gib_uses_picked_drives_through_review_apply_reopen_save_and_prepare() {
     for allocations in [vec![100], vec![60, 40]] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_directory();
         let root = directory.path().canonicalize().unwrap();
         let runner = Arc::new(Runtime::default());
         let mut volumes = vec![selected_volume(&root, "system", 27)];
@@ -119,7 +131,7 @@ async fn selected_100_gib_uses_picked_drives_through_review_apply_reopen_save_an
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test]
 async fn sharing_rule_validation_checks_selected_capacity_and_ignores_unselected_system_space() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let root = directory.path().canonicalize().unwrap();
     let external = root.join("selected");
     std::fs::create_dir(&external).unwrap();
@@ -413,7 +425,7 @@ async fn first_preparation_records_default_storage_before_attempting_runtime_wri
 #[tokio::test]
 async fn combined_save_commits_selected_capacity_and_policy_once_before_reopen_and_prepare() {
     for allocations in [vec![100], vec![60, 40]] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_directory();
         let root = directory.path().canonicalize().unwrap();
         let runner = Arc::new(Runtime::default());
         let mut volumes = vec![selected_volume(&root, "system", 27)];
@@ -474,7 +486,7 @@ async fn rejected_combined_saves_preserve_both_storage_and_policy() {
         "allocation",
         "enabled",
     ] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_directory();
         let root = directory.path().canonicalize().unwrap();
         let agent = open(&root, Arc::new(Runtime::default()));
         let original = agent.store.load().unwrap();
@@ -512,7 +524,7 @@ async fn rejected_combined_saves_preserve_both_storage_and_policy() {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[tokio::test]
 async fn combined_growth_persists_rules_and_a_durable_operation_without_waiting_for_maintenance() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let root = directory.path().canonicalize().unwrap();
     let runner = Arc::new(Runtime::default());
     let agent = open(&root, runner.clone());
@@ -567,7 +579,7 @@ async fn combined_growth_persists_rules_and_a_durable_operation_without_waiting_
 #[tokio::test]
 async fn combined_save_rechecks_selected_drive_identity_and_capacity_before_any_write() {
     for replaced in [false, true] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_directory();
         let root = directory.path().canonicalize().unwrap();
         let selected = root.join("data");
         std::fs::create_dir(&selected).unwrap();
@@ -612,7 +624,7 @@ async fn combined_save_rechecks_selected_drive_identity_and_capacity_before_any_
 #[tokio::test]
 async fn combined_setup_shrink_and_removal_keep_the_reviewed_rules_and_locations_after_reopen() {
     for remove in [false, true] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_directory();
         let root = directory.path().canonicalize().unwrap();
         let agent = open(&root, Arc::new(Runtime::default()));
         let selections = (0..2)

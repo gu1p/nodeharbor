@@ -566,7 +566,7 @@ impl Agent {
     pub async fn run(&self) -> Result<()> {
         let _lock = self.store.supervisor_lock()?;
         loop {
-            if let Err(error) = self.tick().await {
+            if let Err(error) = Box::pin(self.tick()).await {
                 self.set_status("error", self.diagnostic_message(&error.to_string()))
                     .await;
             }
@@ -587,7 +587,7 @@ impl Agent {
     }
     pub async fn tick(&self) -> Result<()> {
         let _operation = self.operation.lock().await;
-        let result = self.tick_operation().await;
+        let result = Box::pin(self.tick_operation()).await;
         if let Err(error) = &result {
             self.activity.record(
                 "error",
@@ -616,8 +616,11 @@ impl Agent {
         }
         // The losing future is dropped before shutdown. MultipassRunner kills
         // its CLI child on drop; the owned VM is stopped through Multipass itself.
+        // Storage maintenance carries substantial async state. Keep it on the
+        // heap so construction and polling fit Windows' default 1 MiB stack.
+        // Dropping the future still cancels the same owner-controlled work.
         let outcome = tokio::select! {
-            result = self.tick_inner() => Some(result),
+            result = Box::pin(self.tick_inner()) => Some(result),
             result = self.wait_for_owner_interruption() => result.map(|()| None).unwrap_or_else(|error| Some(Err(error))),
         };
         self.runtime.lock().await.starting = None;
@@ -1380,5 +1383,21 @@ mod setup_notice_tests {
             .unwrap()
             .reason
             .contains("enroll again"));
+    }
+}
+
+#[cfg(test)]
+mod stack_budget_tests {
+    #[test]
+    fn supervision_futures_leave_room_for_native_frames_on_a_one_mebibyte_stack() {
+        let directory = tempfile::tempdir().unwrap();
+        let agent = super::Agent::open(directory.path()).unwrap();
+        let sizes = [
+            ("run", std::mem::size_of_val(&agent.run())),
+            ("tick", std::mem::size_of_val(&agent.tick())),
+            ("operation", std::mem::size_of_val(&agent.tick_operation())),
+        ];
+        assert!(sizes.iter().all(|(_, bytes)| *bytes <= 8 * 1024),
+            "Supervision state must leave stack space for construction, polling and native calls: {sizes:?}");
     }
 }

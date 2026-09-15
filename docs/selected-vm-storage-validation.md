@@ -79,6 +79,11 @@ qualification is a separate check; GUI-only evidence never claims a VM boot.
   twice when reopening effective resource settings.
 - The packaged GUI verifier compared physical data allocations directly to
   total owner selections and omitted the saved system placement.
+- macOS protocol fixtures exceeded Lima's Unix socket path limit under the
+  normal per-user temporary directory. The fixtures now select short paths.
+- CLI supervision overflowed a 1 MiB process stack, reproducing the Windows
+  startup failure. Supervision now keeps its large operation futures on the
+  heap; a process-level stack-limit test also runs on Unix.
 
 Run `make check` for the behavioral, accessibility, unit, integration, and lint
 checks. Release acceptance additionally requires the desktop matrix, signed

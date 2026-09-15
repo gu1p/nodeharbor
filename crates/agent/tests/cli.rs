@@ -10,13 +10,32 @@ impl Drop for TestProcess {
 
 #[test]
 fn command_line_supervision_streams_activity_before_the_process_finishes() {
-    use std::io::{BufRead, BufReader};
     let directory = tempfile::tempdir().unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nodeharbor-agent"));
+    command.arg("--config-dir").arg(directory.path()).arg("run");
+    assert_live_activity(&mut command);
+}
+
+#[cfg(unix)]
+#[test]
+fn supervision_fits_a_one_mebibyte_process_stack() {
+    let directory = tempfile::tempdir().unwrap();
+    // Windows executables use a 1 MiB main stack. A fresh Unix shell applies
+    // that same process budget; the host and the test runner keep their limits.
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", "ulimit -S -s 1024 && exec \"$@\"", "stack-fixture"])
+        .arg(env!("CARGO_BIN_EXE_nodeharbor-agent"))
+        .arg("--config-dir")
+        .arg(directory.path())
+        .arg("run");
+    assert_live_activity(&mut command);
+}
+
+fn assert_live_activity(command: &mut Command) {
+    use std::io::{BufRead, BufReader};
     let mut process = TestProcess(
-        Command::new(env!("CARGO_BIN_EXE_nodeharbor-agent"))
-            .arg("--config-dir")
-            .arg(directory.path())
-            .arg("run")
+        command
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .spawn()
@@ -26,14 +45,22 @@ fn command_line_supervision_streams_activity_before_the_process_finishes() {
     let (send, receive) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut line = String::new();
-        let result = BufReader::new(stderr).read_line(&mut line);
+        let mut reader = BufReader::new(stderr);
+        let result = loop {
+            line.clear();
+            let result = reader.read_line(&mut line);
+            if !line.trim().is_empty() || !matches!(result, Ok(n) if n > 0) {
+                break result;
+            }
+        };
         let _ = send.send((result, line));
     });
     let (result, line) = receive
         .recv_timeout(std::time::Duration::from_secs(10))
         .expect("The supervisor must publish live activity");
     result.unwrap();
-    let entry: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let entry: serde_json::Value = serde_json::from_str(&line)
+        .unwrap_or_else(|error| panic!("Expected supervisor activity, got {line:?}: {error}"));
     assert_eq!(entry["source"], "agent");
     assert!(entry["message"]
         .as_str()
@@ -58,16 +85,23 @@ fn an_installer_waits_for_the_exact_previous_application_without_killing_it() {
             .arg(&settings)
             .arg("run")
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap(),
     );
     let ready = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while store.supervisor_lock().is_ok() {
-        assert!(
-            app.0.try_wait().unwrap().is_none(),
-            "The application fixture exited before supervision began"
-        );
+        if let Some(status) = app.0.try_wait().unwrap() {
+            use std::io::Read;
+            let mut error = String::new();
+            app.0
+                .stderr
+                .take()
+                .unwrap()
+                .read_to_string(&mut error)
+                .unwrap();
+            panic!("The application fixture exited before supervision began ({status}): {error}");
+        }
         assert!(std::time::Instant::now() < ready);
         std::thread::sleep(std::time::Duration::from_millis(25));
     }

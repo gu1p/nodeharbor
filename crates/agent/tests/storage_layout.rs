@@ -17,7 +17,10 @@ fn total_allocation_contains_the_system_image_and_round_trips() {
         let locations = vec![location("one", total)];
         let layout = Layout::resolve(OWNER, &locations, None).unwrap();
         assert_eq!(layout.system_gib, 16);
-        assert!(layout.runtime_directory.starts_with("/data/one/"));
+        assert_eq!(
+            layout.home().parent().unwrap(),
+            std::path::Path::new("/data/one")
+        );
         let disks = layout.data_locations(&locations).unwrap();
         assert_eq!(disks[0].allocation_gib, total - 16);
         assert_eq!(layout.total_locations(&disks).unwrap(), locations);
