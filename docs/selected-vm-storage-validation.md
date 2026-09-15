@@ -84,6 +84,9 @@ qualification is a separate check; GUI-only evidence never claims a VM boot.
 - CLI supervision overflowed a 1 MiB process stack, reproducing the Windows
   startup failure. Supervision now keeps its large operation futures on the
   heap; a process-level stack-limit test also runs on Unix.
+- Reopening an off worker could run a saved storage change without a new
+  preparation request. Combined saves now pause maintenance atomically when
+  sharing is off and the owner has not already requested preparation.
 - Reopening a saved growth request displayed the previous allocation while
   maintenance was pending. The editor now shows the saved target separately
   from the currently applied allocation, without granting active capacity.

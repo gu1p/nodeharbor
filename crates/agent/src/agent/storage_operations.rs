@@ -177,7 +177,9 @@ impl Agent {
                         .checked_add(1)
                         .context("Storage generation overflow")?,
                     phase: "pending".into(),
-                    paused: false,
+                    paused: settings
+                        .as_ref()
+                        .is_some_and(|settings| settings.wait_for_preparation(current)),
                 });
                 current.draining_since.get_or_insert_with(now_seconds);
             } else {

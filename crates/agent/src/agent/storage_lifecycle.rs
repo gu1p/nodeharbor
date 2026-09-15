@@ -1205,7 +1205,11 @@ impl Agent {
                     c.policy.resources.disk_gib = plan.total_gib;
                 }
             } else {
-                c.storage_lifecycle.maintenance = Some(new_maintenance(c, &plan)?);
+                let mut maintenance = new_maintenance(c, &plan)?;
+                maintenance.paused = settings
+                    .as_ref()
+                    .is_some_and(|settings| settings.wait_for_preparation(c));
+                c.storage_lifecycle.maintenance = Some(maintenance);
                 c.draining_since.get_or_insert_with(now_seconds);
                 if review.kind == Kind::DeleteAll {
                     c.policy.enabled = false;

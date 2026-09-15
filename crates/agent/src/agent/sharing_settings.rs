@@ -6,6 +6,10 @@ pub(super) struct SharingSettings {
     pub revision: u64,
 }
 impl SharingSettings {
+    pub fn wait_for_preparation(&self, config: &Configuration) -> bool {
+        !self.policy.enabled && !config.prepare_requested
+    }
+
     pub fn validate(&self, config: &Configuration) -> Result<()> {
         anyhow::ensure!(
             config.remote.revision == self.revision,
@@ -55,5 +59,32 @@ impl Agent {
         host.disk_gib = plan.total_gib.saturating_add(10);
         validate_policy(&settings.policy, &host).map_err(anyhow::Error::msg)?;
         self.apply_storage_settings(plan, Some(settings)).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn storage_maintenance_requires_enabled_sharing_or_an_owner_preparation_request() {
+        for enabled in [false, true] {
+            for preparing in [false, true] {
+                let config = Configuration {
+                    prepare_requested: preparing,
+                    ..Configuration::default()
+                };
+                let mut policy = config.policy.clone();
+                policy.enabled = enabled;
+                let settings = SharingSettings {
+                    policy,
+                    revision: 0,
+                };
+                assert_eq!(
+                    settings.wait_for_preparation(&config),
+                    !enabled && !preparing
+                );
+            }
+        }
     }
 }

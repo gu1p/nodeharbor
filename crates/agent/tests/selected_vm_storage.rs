@@ -298,3 +298,109 @@ async fn review_rejects_the_qemu_socket_boundary_without_saving_or_running_comma
     assert_eq!(std::fs::read(root.join("config.json")).unwrap(), before);
     assert!(runner.0.lock().unwrap().is_empty());
 }
+
+#[derive(Default)]
+struct StoppedVm(Mutex<Vec<Vec<String>>>);
+#[async_trait::async_trait]
+impl Runner for StoppedVm {
+    fn provider(&self) -> VmProvider {
+        VmProvider::Lima
+    }
+    async fn run(
+        &self,
+        args: &[String],
+        _: Option<Vec<u8>>,
+        _: u64,
+    ) -> anyhow::Result<CommandOutput> {
+        self.0.lock().unwrap().push(args.to_vec());
+        anyhow::ensure!(
+            args[0] == "list",
+            "The owner has not requested VM preparation"
+        );
+        Ok(CommandOutput {
+            success: true,
+            stdout: serde_json::json!({"name":"worker","status":"Stopped"}).to_string(),
+            stderr: String::new(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_saved_growth_waits_across_restart_until_the_owner_requests_preparation() {
+    let dir = tempfile::Builder::new()
+        .prefix("nh")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let folder = root.join("data");
+    std::fs::create_dir(&folder).unwrap();
+    let volumes = vec![volume(&root, "picked", 256)];
+    let runner = Arc::new(StoppedVm::default());
+    let agent =
+        Agent::open_with_runner_and_volumes(&root, runner.clone(), volumes.clone()).unwrap();
+    agent
+        .store
+        .update(|c| {
+            c.device_token = Some("fixture-only".into());
+            c.format_version = 6;
+            c.vm_created = true;
+            c.vm_configured = true;
+            c.storage_boot_gib = 16;
+            c.policy.resources.cpus = 1;
+            c.policy.resources.memory_mib = 2048;
+            c.policy.enabled = false;
+            c.prepare_requested = false;
+            c.storage_locations = vec![Location {
+                id: "one".into(),
+                directory: folder.to_string_lossy().into(),
+                volume_id: "picked".into(),
+                allocation_gib: 14,
+            }];
+            Ok(())
+        })
+        .unwrap();
+    let c = agent.store.load().unwrap();
+    std::fs::write(
+        root.join("worker.receipt.json"),
+        serde_json::json!({"version":2,"provider":"lima","deviceId":c.device_id,"name":"worker"})
+            .to_string(),
+    )
+    .unwrap();
+    let plan = agent
+        .preview_storage(vec![Selection {
+            id: Some("one".into()),
+            expected_volume_id: Some("picked".into()),
+            directory: folder.to_string_lossy().into(),
+            allocation_gib: 100,
+        }])
+        .await
+        .unwrap();
+    let mut policy = c.policy;
+    policy.resources.disk_gib = 100;
+    agent
+        .save_policy_with_storage(policy, c.remote.revision, plan)
+        .await
+        .unwrap();
+    let reopened = Agent::open_with_runner_and_volumes(&root, runner.clone(), volumes).unwrap();
+    for _ in 0..3 {
+        reopened.tick().await.expect(
+            "An off worker must wait for its owner, including when the controller is unavailable",
+        );
+    }
+    let saved = reopened.store.load().unwrap();
+    assert!(!saved.policy.enabled && !saved.prepare_requested);
+    let pending = saved.storage_operation.unwrap();
+    assert!(pending.paused);
+    assert_eq!(pending.phase, "pending");
+    assert_eq!(pending.target[0].allocation_gib, 84);
+    assert!(runner
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|args| args[0] == "list"));
+    reopened.action("prepare").await.unwrap();
+    let requested = reopened.store.load().unwrap();
+    assert!(requested.prepare_requested);
+    assert!(!requested.storage_operation.unwrap().paused);
+}

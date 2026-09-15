@@ -141,3 +141,19 @@ it('keeps the saved 100 GiB selection visible while growth is pending, including
  expect(screen.getByRole('spinbutton',{name:'Allocation for disk 1 (GiB)'})).toBeDisabled();
  expect(f.api.action).not.toHaveBeenCalled();
 });
+
+it('explains that saved storage waits for owner preparation when sharing is off',async()=>{
+ for(const enabled of [false,true]) {
+  const f=fixture();
+  f.setSnapshot({...f.snapshot(),policy:{...f.snapshot().policy,enabled},worker:{installed:true,running:enabled},storage:{...f.snapshot().storage!,locations:[{id:'one',volumeId:'data',directory:'/data/NodeHarbor',allocationGib:30,available:true,reason:''}]}});
+  f.plan.requiresRestart=true;
+  const user=userEvent.setup();const mounted=render(<App backend={f.api}/>);
+  await user.click(await screen.findByRole('button',{name:'Sharing rules'}));
+  const allocation=screen.getByRole('spinbutton',{name:'Allocation for disk 1 (GiB)'});
+  await user.clear(allocation);await user.type(allocation,'100');
+  await user.click(screen.getByRole('button',{name:'Save sharing rules'}));
+  const review=await screen.findByRole('alertdialog');
+  expect(review).toHaveTextContent(enabled?'Saving these changes drains running work and restarts the worker.':'when you prepare the worker or start sharing');
+  expect(f.api.action).not.toHaveBeenCalled();mounted.unmount();
+ }
+});
