@@ -18,7 +18,15 @@ a sparse image's logical length is never treated as reserved host space.
 The selected folders contain private, receipt-owned image directories. Lima
 attaches the images through `additionalDisks`. Inside the VM, LVM combines them
 into one linear logical volume formatted as ext4. K3s/containerd data, the kubelet
-root, and Pod logs use that filesystem. Kubernetes reports its actual capacity
+root, and Pod logs use that filesystem. Harbor Build's per-machine cache path,
+`/var/lib/harbor-build`, is a link into that same filesystem, made whenever the
+pool is activated: at every boot and every worker configuration, so a worker
+updated in place gains the link in the same session. This keeps the cache off the
+16 GiB system disk. If the link cannot be made, the worker still starts and the
+guest log says why. The cache shares the pool with container images, Pod logs and
+build scratch space, and the kubelet's disk-pressure limit (15% free) applies to
+their combined use; the cache sizes itself from free space when it starts, so on a
+small allocation it leaves less room for builds. Kubernetes reports its actual capacity
 and usage. Controller health now rejects a node whose measured capacity is below
 85% or above 100% of its disk allowance, or whose allocatable capacity is missing,
 zero, or greater than capacity.

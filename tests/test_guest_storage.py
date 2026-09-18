@@ -1,9 +1,11 @@
 """Owned guest storage must never adopt, replace, or silently lose another disk."""
 import copy
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path, PureWindowsPath
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -429,3 +431,131 @@ class GuestStorageExecution(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'stop|running|active'):
                 storage.migrate_legacy(root=self.root, execute=lambda *args, **kwargs: 'active\n')
         self.assertFalse(json.loads((self.config / 'storage-state.json').read_text())['migrationComplete'])
+
+    def machine_cache(self):
+        root = self.root.resolve()
+        return root / 'var/lib/harbor-build', root / 'var/lib/nodeharbor/storage/harbor-build'
+
+    def activate(self, check=None):
+        mount = {'target': '/var/lib/nodeharbor/storage', 'fstype': 'ext4', 'uuid': FILESYSTEM, 'options': 'rw'}
+        with patch.object(storage, 'inspect_devices', return_value=[owned_disk()]), \
+             patch.object(storage, 'validate_lvm'), patch.object(storage, 'pool_mount', return_value=mount), \
+             patch.object(storage, 'check_pool', side_effect=check or (lambda root, execute: previous())):
+            return storage.activate_pool(root=self.root, execute=self.execute)
+
+    def test_activation_links_the_machine_cache_into_the_owned_pool(self):
+        self.save_state(); link, directory = self.machine_cache()
+        def check(root, execute):
+            self.assertFalse(link.is_symlink(), 'The link waits for the verified pool mount')
+            return previous()
+        self.activate(check)
+        self.assertTrue((directory / 'cache').is_dir())
+        self.assertEqual((directory / 'cache').stat().st_mode & 0o777, 0o700)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), '/var/lib/nodeharbor/storage/harbor-build')
+        self.assertIn(('chown', '65534:65534', str(directory), str(directory / 'cache')), self.commands)
+
+    def test_a_failed_pool_check_leaves_no_machine_cache_link(self):
+        self.save_state(); link, _ = self.machine_cache()
+        def check(root, execute):raise ValueError('The mounted storage pool has changed identity or is read-only')
+        with self.assertRaises(ValueError):self.activate(check)
+        self.assertFalse(link.is_symlink())
+        self.assertFalse(any(command[0] == 'chown' for command in self.commands))
+
+    def test_a_failed_machine_cache_link_still_returns_the_verified_pool(self):
+        self.save_state(); link, _ = self.machine_cache()
+        with patch.object(storage, 'link_machine_cache', side_effect=OSError('read-only pool')), \
+             patch.object(storage.sys, 'stderr', io.StringIO()) as stderr:
+            self.assertEqual(self.activate(), previous())
+        self.assertIn('cache link skipped', stderr.getvalue()); self.assertIn('read-only pool', stderr.getvalue())
+        self.assertFalse(link.is_symlink())
+
+    def test_an_unrelated_file_at_the_machine_cache_path_is_replaced_by_the_pool_link(self):
+        link, directory = self.machine_cache()
+        link.parent.mkdir(parents=True); link.write_text('not a cache')
+        storage.link_machine_cache(root=self.root, execute=self.execute)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), '/var/lib/nodeharbor/storage/harbor-build')
+        self.assertTrue((directory / 'cache').is_dir())
+
+    def test_a_system_disk_machine_cache_is_replaced_by_the_pool_link(self):
+        link, directory = self.machine_cache()
+        stale = link / 'cache'; stale.mkdir(parents=True); (stale / 'blocks').write_bytes(b'old cache')
+        with patch.object(storage.shutil, 'rmtree', wraps=shutil.rmtree) as rmtree:
+            storage.link_machine_cache(root=self.root, execute=self.execute)
+        rmtree.assert_called_once_with(link)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), '/var/lib/nodeharbor/storage/harbor-build')
+        self.assertEqual(list((directory / 'cache').iterdir()), [])
+
+    def test_an_existing_machine_cache_link_is_left_untouched(self):
+        link, directory = self.machine_cache()
+        link.parent.mkdir(parents=True); link.symlink_to('/var/lib/nodeharbor/storage/harbor-build')
+        before = os.lstat(link)
+        with patch.object(storage.shutil, 'rmtree', wraps=shutil.rmtree) as rmtree:
+            storage.link_machine_cache(root=self.root, execute=self.execute)
+        rmtree.assert_not_called()
+        self.assertEqual(os.lstat(link).st_ino, before.st_ino)
+        self.assertEqual(os.readlink(link), '/var/lib/nodeharbor/storage/harbor-build')
+        self.assertTrue((directory / 'cache').is_dir())
+
+    def test_a_machine_cache_link_elsewhere_is_replaced_without_following_it(self):
+        link, _ = self.machine_cache()
+        elsewhere = self.root.resolve() / 'elsewhere'; elsewhere.mkdir(); (elsewhere / 'keep').write_text('keep')
+        link.parent.mkdir(parents=True); link.symlink_to(elsewhere)
+        with patch.object(storage.shutil, 'rmtree', wraps=shutil.rmtree) as rmtree:
+            storage.link_machine_cache(root=self.root, execute=self.execute)
+        rmtree.assert_not_called()
+        self.assertEqual(os.readlink(link), '/var/lib/nodeharbor/storage/harbor-build')
+        self.assertEqual((elsewhere / 'keep').read_text(), 'keep')
+
+    def test_retire_removes_the_machine_cache_link_with_the_pool(self):
+        self.save_state(); link, directory = self.machine_cache()
+        (directory / 'cache').mkdir(parents=True); (directory / 'cache/blocks').write_bytes(b'cache')
+        link.symlink_to('/var/lib/nodeharbor/storage/harbor-build')
+        self.assertEqual(storage.retire_pool({'poolId': POOL}, root=self.root, execute=self.execute), {'ok': True})
+        self.assertFalse(link.is_symlink()); self.assertFalse(link.exists())
+        self.assertTrue((directory / 'cache/blocks').exists(), 'The pool is unmounted, never deleted through the link')
+        self.assertFalse((self.config / 'storage-state.json').exists())
+        self.assertIn(('systemctl', 'disable', '--now', 'nodeharbor-storage.service'), self.commands)
+
+    def test_retire_removes_a_system_disk_machine_cache(self):
+        self.save_state(); link, _ = self.machine_cache()
+        (link / 'cache').mkdir(parents=True); (link / 'cache/blocks').write_bytes(b'cache')
+        storage.retire_pool({'poolId': POOL}, root=self.root, execute=self.execute)
+        self.assertFalse(link.exists()); self.assertFalse(link.is_symlink())
+        self.assertFalse((self.config / 'storage-state.json').exists())
+
+    def test_retire_removes_an_unrelated_file_at_the_machine_cache_path(self):
+        self.save_state(); link, _ = self.machine_cache()
+        link.parent.mkdir(parents=True); link.write_text('not a cache')
+        self.assertEqual(storage.retire_pool({'poolId': POOL}, root=self.root, execute=self.execute), {'ok': True})
+        self.assertFalse(link.exists()); self.assertFalse(link.is_symlink())
+        storage.link_machine_cache(root=self.root, execute=self.execute)
+        self.assertTrue(link.is_symlink(), 'A later activation must be able to make the link')
+
+    def test_retire_of_another_pool_touches_nothing(self):
+        self.save_state(); link, _ = self.machine_cache()
+        link.parent.mkdir(parents=True); link.symlink_to('/var/lib/nodeharbor/storage/harbor-build')
+        with self.assertRaisesRegex(ValueError, 'pool'):
+            storage.retire_pool({'poolId': OWNER}, root=self.root, execute=self.execute)
+        self.assertTrue(link.is_symlink())
+        self.assertTrue((self.config / 'storage-state.json').exists())
+        self.assertFalse(any(command[0] in {'umount', 'rm'} or command[:2] == ('systemctl', 'disable') for command in self.commands))
+
+    def test_retire_requires_the_worker_to_be_stopped(self):
+        self.save_state(); link, _ = self.machine_cache()
+        link.parent.mkdir(parents=True); link.symlink_to('/var/lib/nodeharbor/storage/harbor-build')
+        with self.assertRaisesRegex(ValueError, 'stop|running|active'):
+            storage.retire_pool({'poolId': POOL}, root=self.root, execute=lambda *args, **kwargs: 'active\n')
+        self.assertTrue(link.is_symlink())
+        self.assertTrue((self.config / 'storage-state.json').exists())
+
+    def test_restored_marks_the_matching_replacement_pool_migrated(self):
+        with self.assertRaisesRegex(ValueError, 'unavailable'):
+            storage.restore_pool({'poolId': POOL}, root=self.root, execute=self.execute)
+        state = previous(); state['migrationComplete'] = False; self.save_state(state)
+        with patch.object(storage, 'check_pool', return_value=state) as check:
+            self.assertEqual(storage.restore_pool({'poolId': POOL}, root=self.root, execute=self.execute), {'ok': True})
+        check.assert_called_once()
+        self.assertTrue(json.loads((self.config / 'storage-state.json').read_text())['migrationComplete'])

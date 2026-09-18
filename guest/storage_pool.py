@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path, PurePath, PurePosixPath
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,8 @@ import uuid
 
 GIB = 1024 ** 3
 POOL_PATH = PurePosixPath('/var/lib/nodeharbor/storage')
+MACHINE_CACHE_LINK = PurePosixPath('/var/lib/harbor-build')
+MACHINE_CACHE_DIRECTORY = POOL_PATH / 'harbor-build'
 CONFIG_PATH = PurePosixPath('/etc/nodeharbor')
 HELPER = '/usr/local/lib/nodeharbor/storage_pool.py'
 LVM_PARTITION = 'E6D6D379-F507-44C2-A23C-238F2A3DF928'
@@ -282,7 +285,38 @@ def activate_pool(root=Path('/'), execute=run, recover_pending=True):
         target = path_at(root, POOL_PATH); target.mkdir(parents=True, exist_ok=True)
         if any(target.iterdir()):raise ValueError('Refusing to hide existing files below the pool mount')
         execute('mount', '--types', 'ext4', '--source', 'UUID=' + state['filesystemUuid'], '--target', str(target))
-    return check_pool(root, execute)
+    result = check_pool(root, execute)
+    # The cache link is a convenience. A verified pool must still start the
+    # worker, so a failed link is reported and the cache stays on the system disk.
+    try:link_machine_cache(root, execute)
+    except (OSError, RuntimeError) as error:print(f'Harbor Build cache link skipped: {error}', file=sys.stderr)
+    return result
+
+
+def machine_cache_link(root):
+    return path_at(root, MACHINE_CACHE_LINK.parent) / MACHINE_CACHE_LINK.name
+
+
+def link_machine_cache(root=Path('/'), execute=run):
+    # Harbor Build's cache pod uses the host path /var/lib/harbor-build/cache.
+    # Point it into the owned pool so the cache is sized against, and retired
+    # with, the owner's allocation instead of filling the small system disk.
+    directory = path_at(root, MACHINE_CACHE_DIRECTORY); cache = directory / 'cache'
+    cache.mkdir(parents=True, exist_ok=True)
+    for path in (directory, cache):path.chmod(0o700)
+    execute('chown', '65534:65534', str(directory), str(cache))
+    link = machine_cache_link(root)
+    if link.is_symlink() and os.readlink(link) == str(MACHINE_CACHE_DIRECTORY):return
+    remove_machine_cache(link)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(str(MACHINE_CACHE_DIRECTORY))
+
+
+def remove_machine_cache(link):
+    # Anything else at the link path is stale: a cache left on the system disk,
+    # a link elsewhere, or an unrelated file that would block the symlink.
+    if link.is_dir() and not link.is_symlink():shutil.rmtree(link)
+    elif link.is_symlink() or link.exists():link.unlink()
 
 
 def require_stopped(execute):
@@ -467,6 +501,34 @@ def apply_request(request, root=Path('/'), execute=run):
     return result
 
 
+def replaced_pool(request, root, execute):
+    require_stopped(execute)
+    state_path = config_path(root, 'storage-state.json')
+    if not state_path.exists():return state_path, None
+    state = load_state(root)
+    if request.get('poolId') != state['poolId']:raise ValueError('Replacement pool identity changed')
+    return state_path, state
+
+
+def retire_pool(request, root=Path('/'), execute=run):
+    state_path, state = replaced_pool(request, root, execute)
+    if state:
+        execute('systemctl', 'disable', '--now', 'nodeharbor-storage.service')
+        if pool_mount(root, execute):execute('umount', str(POOL_PATH))
+        for name in ('storage-state.json', 'storage-request.json', 'storage-pending.json'):
+            config_path(root, name).unlink(missing_ok=True)
+    # The machine cache goes with the pool: drop its link, or a copy left on the system disk.
+    remove_machine_cache(machine_cache_link(root))
+    return {'ok': True}
+
+
+def restore_pool(request, root=Path('/'), execute=run):
+    state_path, state = replaced_pool(request, root, execute)
+    if state is None:raise ValueError('Replacement storage is unavailable')
+    check_pool(root, execute); state['migrationComplete'] = True; write_json(state_path, state)
+    return {'ok': True}
+
+
 def main():
     if sys.platform != 'linux' or os.geteuid() != 0:
         raise SystemExit('Storage maintenance runs only as root inside the owned Linux worker')
@@ -479,21 +541,7 @@ def main():
     with os.fdopen(descriptor, 'r+') as handle:
         fcntl.flock(handle, fcntl.LOCK_EX)
         if sys.argv[1] in ('retire', 'restored'):
-            require_stopped(run)
-            request = json.load(sys.stdin)
-            state_path = config_path(Path('/'), 'storage-state.json')
-            if state_path.exists():
-                state = load_state(Path('/'))
-                if request.get('poolId') != state['poolId']: raise ValueError('Replacement pool identity changed')
-                if sys.argv[1] == 'retire':
-                    run('systemctl', 'disable', '--now', 'nodeharbor-storage.service')
-                    if pool_mount(Path('/'), run): run('umount', str(POOL_PATH))
-                    for name in ('storage-state.json', 'storage-request.json', 'storage-pending.json'):
-                        config_path(Path('/'), name).unlink(missing_ok=True)
-                else:
-                    check_pool(); state['migrationComplete'] = True; write_json(state_path, state)
-            elif sys.argv[1] == 'restored': raise ValueError('Replacement storage is unavailable')
-            result = {'ok': True}
+            result = {'retire': retire_pool, 'restored': restore_pool}[sys.argv[1]](json.load(sys.stdin))
         elif sys.argv[1] == 'apply':
             contents = sys.stdin.buffer.read(1024 * 1024 + 1)
             if len(contents) > 1024 * 1024:raise ValueError('Storage request exceeds its supported size')

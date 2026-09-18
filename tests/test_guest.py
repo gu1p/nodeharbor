@@ -130,14 +130,23 @@ class GuestNetworkConfiguration(unittest.TestCase):
         self.assertIn('Requires=netbird.service nodeharbor-storage.service',service)
         self.assertIn('After=network-online.target netbird.service nodeharbor-storage.service',service)
         self.assertIn('ExecStartPre=/usr/bin/python3 /usr/local/lib/nodeharbor/storage_pool.py check',service)
-        self.assertIn(('/usr/bin/python3','/usr/local/lib/nodeharbor/storage_pool.py','check'),commands)
+        self.assertIn(('/usr/bin/python3','/usr/local/lib/nodeharbor/storage_pool.py','activate'),commands)
+
+    def test_pooled_worker_activates_its_pool_before_restarting_kubernetes(self):
+        # Boot activated the pool with the helper installed at the time. Configuration
+        # installs the current helper, so activating again links the Harbor Build cache now.
+        state={'format':1,'deviceId':GuestContract().config()['deviceId'],'poolId':GuestContract().config()['deviceId'],'migrationComplete':True}
+        commands,_,_=self.prepare('nameserver 192.168.64.1\n',storage_state=state)
+        activate=commands.index(('/usr/bin/python3','/usr/local/lib/nodeharbor/storage_pool.py','activate'))
+        self.assertLess(activate,commands.index(('systemctl','restart','k3s-agent')))
+        self.assertNotIn(('/usr/bin/python3','/usr/local/lib/nodeharbor/storage_pool.py','check'),commands)
 
     def test_missing_pool_cannot_fall_back_to_the_legacy_root_disk_or_start_network_services(self):
         state={'format':1,'deviceId':GuestContract().config()['deviceId'],'poolId':GuestContract().config()['deviceId'],'migrationComplete':True}
         install=Mock()
         with self.assertRaisesRegex(RuntimeError,'restart failed'):
             self.prepare('nameserver 192.168.64.1\n',storage_state=state,install=install,
-                         fail_command=('/usr/bin/python3','/usr/local/lib/nodeharbor/storage_pool.py','check'))
+                         fail_command=('/usr/bin/python3','/usr/local/lib/nodeharbor/storage_pool.py','activate'))
         install.assert_not_called()
 
     def test_missing_pool_state_cannot_turn_a_configured_worker_back_into_legacy_storage(self):

@@ -29,6 +29,8 @@ results in `storage-724.md` predate this workflow and do not qualify these chang
 - Delete all worker storage revokes worker access through the existing controller
   reset process, deletes owned storage, disables sharing and storage, and retains
   host enrollment. It cannot silently recreate the default 30 GiB allocation.
+  Retiring the pool also removes the guest's Harbor Build cache link; a paused
+  worker keeps it.
 - Missing storage stops assignments and the affected VM immediately. Checks run
   every ten seconds for two minutes. A returned pool must pass complete identity
   and pool validation; there is no forced mount or partial LVM activation.

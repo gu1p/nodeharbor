@@ -91,6 +91,9 @@ Existing disks can be moved, grown, shrunk, or removed, and more disks can be ad
 Shrink and removal use a verified private backup and replacement images, with
 temporary space and downtime reviewed before applying. **Delete all worker storage**
 requires explicit confirmation and keeps storage disabled while retaining enrollment.
+Harbor Build's per-machine cache lives inside the owned storage pool, so it counts
+against your allocation; **Delete all worker storage** or a replacement pool deletes
+it, and pausing the worker keeps it.
 Optional automatic recovery waits two minutes for a missing disk, then can discard
 the entire old pool and rebuild on remaining selected disks. Existing installations
 keep waiting until the owner enables recovery; Pause and Stop override recovery.

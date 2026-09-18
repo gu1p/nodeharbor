@@ -137,8 +137,10 @@ def main():
         state=json.loads((ROOT/'storage-state.json').read_text())
         if state.get('deviceId')!=config['deviceId']:raise ValueError('Storage belongs to another device')
         if not state.get('migrationComplete'):raise ValueError('Complete the explicit worker storage migration before configuring Kubernetes')
-        progress('Checking the configured storage pool')
-        run('/usr/bin/python3','/usr/local/lib/nodeharbor/storage_pool.py','check')
+        progress('Activating the configured storage pool')
+        # Activate, not check: boot ran whatever helper was installed then, so a
+        # worker updated in place gains the Harbor Build cache link now, not next boot.
+        run('/usr/bin/python3','/usr/local/lib/nodeharbor/storage_pool.py','activate')
     # Use Ubuntu's DHCP-provided upstream DNS. NetBird must not replace it, and
     # invalid DNS must not silently fall back to an unrelated public resolver.
     progress('Checking Ubuntu DNS')
