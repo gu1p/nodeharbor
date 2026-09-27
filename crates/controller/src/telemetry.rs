@@ -229,6 +229,7 @@ impl Telemetry {
             vec![KeyValue::new("sikalio.operation", name)],
             &Context::current(),
         );
+        let start = Instant::now();
         let result = future.with_context(context.clone()).await;
         self.metrics
             .operations
@@ -244,6 +245,22 @@ impl Telemetry {
                 .last_success
                 .set(chrono::Utc::now().timestamp());
         }
+        let span_context = context.span().span_context().clone();
+        let trace_id = span_context
+            .is_valid()
+            .then(|| span_context.trace_id().to_string());
+        let span_id = span_context
+            .is_valid()
+            .then(|| span_context.span_id().to_string());
+        tracing::info!(
+            event = "controller_operation_completed",
+            operation = name,
+            outcome = if result.is_ok() { "success" } else { "error" },
+            duration_ms = start.elapsed().as_secs_f64() * 1000.0,
+            trace_id = trace_id.as_deref(),
+            span_id = span_id.as_deref(),
+            "controller operation completed"
+        );
         context.span().end();
         result
     }
@@ -346,6 +363,26 @@ pub(crate) async fn http(
     ));
     if status.is_server_error() {
         context.span().set_status(Status::error(""));
+    }
+    // Probe traffic already has metrics and traces; keep completion logs for API work.
+    if !matches!(route.as_str(), "/healthz" | "/readyz") {
+        let span_context = context.span().span_context().clone();
+        let trace_id = span_context
+            .is_valid()
+            .then(|| span_context.trace_id().to_string());
+        let span_id = span_context
+            .is_valid()
+            .then(|| span_context.span_id().to_string());
+        tracing::info!(
+            event = "http_request_completed",
+            method,
+            route,
+            status = status.as_u16(),
+            duration_ms = start.elapsed().as_secs_f64() * 1000.0,
+            trace_id = trace_id.as_deref(),
+            span_id = span_id.as_deref(),
+            "controller request completed"
+        );
     }
     context.span().end();
     telemetry

@@ -55,7 +55,7 @@ async fn the_controller_exports_real_otlp_and_keeps_metrics_off_the_public_route
             "OTEL_RESOURCE_ATTRIBUTES",
             "service.namespace=testing,private.attribute=private-resource",
         )
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
@@ -87,10 +87,25 @@ async fn the_controller_exports_real_otlp_and_keeps_metrics_off_the_public_route
     let response = client
         .get(format!("{base}/api/v1/fleet?secret=private-query"))
         .bearer_auth("private-process-credential")
+        .header(
+            "traceparent",
+            "00-11111111111111111111111111111111-2222222222222222-01",
+        )
         .send()
         .await
         .unwrap();
     assert!(response.status().is_success());
+    assert_eq!(
+        client
+            .post(format!("{base}/api/v1/enroll"))
+            .header("content-type", "application/json")
+            .body(r#"{"code":"private-body",invalid}"#)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
     assert_eq!(
         client
             .get(format!("{base}/metrics"))
@@ -141,13 +156,53 @@ async fn the_controller_exports_real_otlp_and_keeps_metrics_off_the_public_route
             .status()
             .unwrap();
         assert!(status.success());
-        assert!(
-            tokio::time::timeout(Duration::from_secs(12), process.wait())
-                .await
-                .unwrap()
-                .unwrap()
-                .success()
+        let output = tokio::time::timeout(Duration::from_secs(12), process.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(output.status.success());
+        let logs = String::from_utf8(output.stdout).unwrap();
+        for private in [
+            "private-query",
+            "private-body",
+            "private-process-credential",
+        ] {
+            assert!(!logs.contains(private), "Completion logs exposed {private}");
+        }
+        let events: Vec<serde_json::Value> = logs
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let request = events
+            .iter()
+            .find(|event| event["fields"]["route"] == "/api/v1/fleet")
+            .expect("API completion must be correlated with its real trace");
+        assert_eq!(request["fields"]["event"], "http_request_completed");
+        assert_eq!(request["fields"]["status"], 200);
+        assert_eq!(
+            request["fields"]["trace_id"],
+            "11111111111111111111111111111111"
         );
+        assert_eq!(request["fields"]["span_id"].as_str().unwrap().len(), 16);
+        assert!(request["fields"]["duration_ms"].is_number());
+        assert!(events
+            .iter()
+            .any(|event| event["fields"]["route"] == "/api/v1/enroll"
+                && event["fields"]["status"] == 400));
+        assert!(!events
+            .iter()
+            .any(|event| event["fields"]["route"] == "/healthz"
+                || event["fields"]["route"] == "/readyz"));
+        let operation = events
+            .iter()
+            .find(|event| event["fields"]["operation"] == "maintenance")
+            .expect("Background operations must emit a correlated completion");
+        assert_eq!(
+            operation["fields"]["event"],
+            "controller_operation_completed"
+        );
+        assert_eq!(operation["fields"]["outcome"], "success");
+        assert_eq!(operation["fields"]["trace_id"].as_str().unwrap().len(), 32);
     }
     #[cfg(windows)]
     process.kill().await.unwrap();
